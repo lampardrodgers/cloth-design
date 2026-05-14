@@ -27,3 +27,32 @@ export function buildOptimizedPrompt(
 
   return `${guardedIntent.join("\n")}\n\n用户目标:\n${subject}\n\n生成提示词:\n请生成一张商业可用的服装图片，优先保证服装版型、面料纹理、颜色、缝线、扣件和人体比例准确。画面干净，构图明确，不出现多余文字、水印、畸形手指、错误衣领、错乱纽扣或不合理褶皱。`;
 }
+
+export function buildEditablePrompt(
+  rawPrompt: string,
+  mode: GenerationMode,
+  refs: ReferenceImage[],
+  settings: StudioSettings,
+) {
+  const subject = rawPrompt.trim() || mode.promptStarter;
+  const referenceHints = refs
+    .filter((ref) => ref.previewUrl || ref.fileName || ref.note.trim().length > 0)
+    .map((ref) => `参考${ref.label}作为${roleLabels[ref.role]}${ref.note ? `（${ref.note}）` : ""}`)
+    .join("；");
+  const qualityHints = [
+    settings.quality === "high" ? "高质量商业成片" : "清晰商业成片",
+    settings.resolution === "fourK" ? "适合4K后处理放大" : "保持原生细节清晰",
+    settings.background === "transparent" ? "透明背景" : "干净背景",
+    settings.preserveIdentity ? "涉及人物时保持身份、脸型、身形一致" : "",
+    settings.inputFidelity === "high" ? "严格保留参考图中的款式、材质和结构" : "",
+  ].filter(Boolean);
+
+  return [
+    subject,
+    referenceHints ? `参考关系：${referenceHints}。` : "",
+    `画面要求：${mode.description}${qualityHints.length ? `，${qualityHints.join("，")}` : ""}。`,
+    "避免文字水印、错误衣领、错乱纽扣、不合理褶皱、变形手指和失真的人体比例。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}

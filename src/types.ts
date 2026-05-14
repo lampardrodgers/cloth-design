@@ -1,4 +1,4 @@
-export type ViewKey = "studio" | "tasks" | "account" | "admin" | "storage";
+export type ViewKey = "studio" | "account" | "storage";
 
 export type ModeKey =
   | "text"
@@ -87,6 +87,8 @@ export interface CreditPolicy {
   transparentBackgroundFee: number;
   failureRefundRate: number;
 }
+
+export type SystemPromptMap = Record<ModeKey, string>;
 
 export interface GenerationTask {
   id: string;

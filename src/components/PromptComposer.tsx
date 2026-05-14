@@ -1,14 +1,13 @@
 import { WandSparkles } from "lucide-react";
-import type { GenerationMode, StudioSettings } from "../types";
+import type { GenerationMode } from "../types";
 import { Button, Section } from "./ui";
 
 interface PromptComposerProps {
   mode: GenerationMode;
   prompt: string;
-  optimizedPrompt: string;
-  settings: StudioSettings;
   cost: number;
   canGenerate: boolean;
+  optimizationNotice?: string;
   onPromptChange: (prompt: string) => void;
   onOptimize: () => void;
   onGenerate: () => void;
@@ -17,9 +16,9 @@ interface PromptComposerProps {
 export function PromptComposer({
   mode,
   prompt,
-  optimizedPrompt,
   cost,
   canGenerate,
+  optimizationNotice,
   onPromptChange,
   onOptimize,
   onGenerate,
@@ -42,10 +41,7 @@ export function PromptComposer({
           生成
         </Button>
       </div>
-      <div className="optimized-box">
-        <strong>系统提示词</strong>
-        <p>{optimizedPrompt}</p>
-      </div>
+      {optimizationNotice ? <p className="prompt-notice">{optimizationNotice}</p> : null}
     </Section>
   );
 }

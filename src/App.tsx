@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Archive,
+  ClipboardList,
   Images,
   LayoutDashboard,
-  ListChecks,
-  Settings,
   UserCog,
 } from "lucide-react";
 import {
+  creditPolicy as defaultCreditPolicy,
   generationModes,
   initialReferences,
   initialStoragePolicy,
@@ -18,15 +18,18 @@ import {
   rechargePackages,
 } from "./data/catalog";
 import { fetchApiConfig, requestGeneration, type ApiConfig } from "./lib/api";
-import { buildOptimizedPrompt } from "./lib/prompt";
+import { buildEditablePrompt, buildOptimizedPrompt } from "./lib/prompt";
 import type {
+  CreditPolicy,
   GeneratedResult,
   GenerationMode,
   GenerationTask,
+  ModeKey,
   RechargePackage,
   ReferenceImage,
   StoragePolicy,
   StudioSettings,
+  SystemPromptMap,
   UserAccount,
   ViewKey,
 } from "./types";
@@ -38,11 +41,14 @@ import { TaskRail } from "./components/TaskRail";
 
 const navigation: Array<{ id: ViewKey; label: string; icon: typeof Images }> = [
   { id: "studio", label: "生成", icon: Images },
-  { id: "tasks", label: "任务", icon: ListChecks },
   { id: "account", label: "账户", icon: UserCog },
-  { id: "admin", label: "后台", icon: Settings },
   { id: "storage", label: "存储", icon: Archive },
 ];
+
+const initialSystemPrompts = generationModes.reduce((map, mode) => {
+  map[mode.id] = mode.systemTemplate;
+  return map;
+}, {} as SystemPromptMap);
 
 const initialSettings: StudioSettings = {
   mode: "text",
@@ -88,19 +94,34 @@ function useStoredState<T>(key: string, fallback: T) {
 
 function App() {
   const [view, setView] = useState<ViewKey>("studio");
+  const [path, setPath] = useState(() => window.location.pathname);
   const [settings, setSettings] = useStoredState<StudioSettings>("clothdesign:settings", initialSettings);
   const [references, setReferences] = useState<ReferenceImage[]>(initialReferences);
   const [prompt, setPrompt] = useState(generationModes.find((mode) => mode.id === initialSettings.mode)?.promptStarter ?? "");
-  const [optimizedPrompt, setOptimizedPrompt] = useState("");
+  const [optimizationNotice, setOptimizationNotice] = useState("");
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [tasks, setTasks] = useStoredState<GenerationTask[]>("clothdesign:tasks", initialTasks);
   const [results, setResults] = useStoredState<GeneratedResult[]>("clothdesign:results", []);
   const [users, setUsers] = useStoredState<UserAccount[]>("clothdesign:users", initialUsers);
+  const [packages, setPackages] = useStoredState<RechargePackage[]>("clothdesign:packages", rechargePackages);
   const [routes, setRoutes] = useStoredState("clothdesign:routes", modelRoutes);
+  const [creditPolicy, setCreditPolicy] = useStoredState<CreditPolicy>("clothdesign:creditPolicy", defaultCreditPolicy);
+  const [systemPrompts, setSystemPrompts] = useStoredState<SystemPromptMap>("clothdesign:systemPrompts", initialSystemPrompts);
   const [storagePolicy, setStoragePolicy] = useStoredState<StoragePolicy>("clothdesign:storage", initialStoragePolicy);
   const [apiConfig, setApiConfig] = useState<ApiConfig | null>(null);
 
   const currentUser = users[0];
-  const activeMode = useMemo(() => generationModes.find((mode) => mode.id === settings.mode) ?? generationModes[0], [settings.mode]);
+  const activeMode = useMemo(() => {
+    const mode = generationModes.find((item) => item.id === settings.mode) ?? generationModes[0];
+    return { ...mode, systemTemplate: systemPrompts[mode.id] ?? mode.systemTemplate };
+  }, [settings.mode, systemPrompts]);
+  const runningTasks = tasks.filter((task) => task.status === "running").length;
+
+  useEffect(() => {
+    const handlePopState = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   useEffect(() => {
     const mode = generationModes.find((item) => item.id === settings.mode);
@@ -116,10 +137,6 @@ function App() {
       setSettings((current) => ({ ...current, ratioId: fallback.id }));
     }
   }, [settings.resolution, settings.ratioId]);
-
-  useEffect(() => {
-    setOptimizedPrompt(buildOptimizedPrompt(prompt, activeMode, references, settings));
-  }, [activeMode, prompt, references, settings]);
 
   useEffect(() => {
     fetchApiConfig()
@@ -158,7 +175,8 @@ function App() {
   };
 
   const handleOptimize = () => {
-    setOptimizedPrompt(buildOptimizedPrompt(prompt, activeMode, references, settings));
+    setPrompt(buildEditablePrompt(prompt, activeMode, references, settings));
+    setOptimizationNotice("已按当前功能、参考图关系和商业出图质量补齐提示词。");
   };
 
   const handleGenerate = async (mode: GenerationMode, cost: number) => {
@@ -188,7 +206,7 @@ function App() {
         mode,
         settings,
         references,
-        prompt: optimizedPrompt,
+        prompt: buildOptimizedPrompt(taskPrompt, mode, references, settings),
         apiSize: ratio.apiSize,
         ratioLabel: ratio.label,
       });
@@ -254,6 +272,7 @@ function App() {
     setPrompt(task.prompt);
     setSettings((current) => ({ ...current, mode: mode.id }));
     setView("studio");
+    setTaskMenuOpen(false);
   };
 
   const handleRecharge = (pkg: RechargePackage) => {
@@ -271,8 +290,10 @@ function App() {
     setTasks((items) => [rechargeTask, ...items]);
   };
 
-  const handleAdjustUser = (userId: string, credits: number) => {
-    setUsers((items) => items.map((user) => (user.id === userId ? { ...user, credits: user.credits + credits } : user)));
+  const handleSetAdminPath = (nextPath: string) => {
+    window.history.pushState({}, "", nextPath);
+    setPath(nextPath);
+    if (nextPath !== "/admin") setView("studio");
   };
 
   const handleSyncResult = (id: string) => {
@@ -289,44 +310,30 @@ function App() {
         <StudioWorkspace
           settings={settings}
           prompt={prompt}
-          optimizedPrompt={optimizedPrompt}
           references={references}
           results={results}
           user={currentUser}
-          tasks={tasks}
+          creditPolicy={creditPolicy}
+          optimizationNotice={optimizationNotice}
           onSettingsChange={(patch) => (patch.mode ? handleModePrompt(patch.mode) : handleSettingsChange(patch))}
-          onPromptChange={setPrompt}
+          onPromptChange={(value) => {
+            setPrompt(value);
+            setOptimizationNotice("");
+          }}
           onReferencesChange={setReferences}
           onOptimize={handleOptimize}
           onGenerate={handleGenerate}
           onUseAsReference={setReferences}
           onSyncResult={handleSyncResult}
           onDeleteResult={handleDeleteResult}
-          onRetryTask={handleRetryTask}
         />
-      );
-    }
-
-    if (view === "tasks") {
-      return (
-        <main className="single-view panel-scroll">
-          <TaskRail tasks={tasks} onRetry={handleRetryTask} />
-        </main>
       );
     }
 
     if (view === "account") {
       return (
         <main className="single-view panel-scroll">
-          <AccountPanel currentUser={currentUser} users={users} packages={rechargePackages} onRecharge={handleRecharge} onAdjustUser={handleAdjustUser} />
-        </main>
-      );
-    }
-
-    if (view === "admin") {
-      return (
-        <main className="single-view panel-scroll">
-          <AdminPanel routes={routes} onRoutesChange={setRoutes} />
+          <AccountPanel currentUser={currentUser} packages={packages} onRecharge={handleRecharge} />
         </main>
       );
     }
@@ -338,6 +345,40 @@ function App() {
     );
   };
 
+  if (path.startsWith("/admin")) {
+    return (
+      <div className="admin-shell">
+        <header className="admin-topbar">
+          <div className="brand">
+            <LayoutDashboard size={18} />
+            <strong>ClothDesign Admin</strong>
+          </div>
+          <button className="btn btn-secondary" onClick={() => handleSetAdminPath("/")}>
+            返回客户页
+          </button>
+        </header>
+        <main className="admin-page panel-scroll">
+          <AdminPanel
+            routes={routes}
+            onRoutesChange={setRoutes}
+            users={users}
+            onUsersChange={setUsers}
+            packages={packages}
+            onPackagesChange={setPackages}
+            creditPolicy={creditPolicy}
+            onCreditPolicyChange={setCreditPolicy}
+            storagePolicy={storagePolicy}
+            onStoragePolicyChange={setStoragePolicy}
+            systemPrompts={systemPrompts}
+            onSystemPromptsChange={(modeId: ModeKey, value: string) =>
+              setSystemPrompts((items) => ({ ...items, [modeId]: value }))
+            }
+          />
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -348,7 +389,17 @@ function App() {
         <div className="top-status">
           <span>{activeMode.title}</span>
           <span>{apiConfig?.mode === "live" ? "OpenAI 就绪" : "演示模式"}</span>
-          <span>{currentUser.credits} 积分</span>
+          <span className="credit-pill">{currentUser.credits} 积分</span>
+          <button className="task-menu-button" onClick={() => setTaskMenuOpen((open) => !open)} aria-expanded={taskMenuOpen}>
+            <ClipboardList size={16} />
+            <span>任务</span>
+            {runningTasks > 0 ? <em>{runningTasks}</em> : null}
+          </button>
+          {taskMenuOpen ? (
+            <div className="task-popover">
+              <TaskRail tasks={tasks} results={results} onRetry={handleRetryTask} />
+            </div>
+          ) : null}
         </div>
       </header>
 

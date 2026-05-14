@@ -1,3 +1,4 @@
+import { useRef, useState, type DragEvent } from "react";
 import { ImagePlus, Plus, Trash2, Upload } from "lucide-react";
 import { roleLabels } from "../data/catalog";
 import type { ReferenceImage, ReferenceRole } from "../types";
@@ -12,6 +13,9 @@ interface ReferencePanelProps {
 }
 
 export function ReferencePanel({ references, onChange }: ReferencePanelProps) {
+  const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
   const addReference = () => {
     const label = alphabet[references.length] ?? `${references.length + 1}`;
     onChange([
@@ -43,6 +47,12 @@ export function ReferencePanel({ references, onChange }: ReferencePanelProps) {
     });
   };
 
+  const handleDrop = (id: string, event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDraggingId(null);
+    handleFile(id, event.dataTransfer.files?.[0]);
+  };
+
   return (
     <Section
       title="参考图"
@@ -52,20 +62,34 @@ export function ReferencePanel({ references, onChange }: ReferencePanelProps) {
       <div className="reference-grid">
         {references.map((ref) => (
           <div className="reference-card" key={ref.id}>
-            <div className="reference-preview">
-              {ref.previewUrl ? (
-                <img src={ref.previewUrl} alt={`参考${ref.label}`} />
-              ) : (
-                <div className="reference-empty">
-                  <ImagePlus size={22} />
-                  <span>{ref.label}</span>
-                </div>
-              )}
-              <strong>{ref.label}</strong>
-              <label className="upload-hit">
-                <input type="file" accept="image/*" onChange={(event) => handleFile(ref.id, event.target.files?.[0])} />
-                <Upload size={15} />
-              </label>
+            <div className="reference-card-head">
+              <strong>参考 {ref.label}</strong>
+              <button className="icon-button remove-ref" aria-label={`删除参考${ref.label}`} onClick={() => removeReference(ref.id)}>
+                <Trash2 size={15} />
+              </button>
+            </div>
+            <div
+              className={`reference-preview ${draggingId === ref.id ? "drag-active" : ""}`}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDraggingId(ref.id);
+              }}
+              onDragLeave={() => setDraggingId(null)}
+              onDrop={(event) => handleDrop(ref.id, event)}
+            >
+              <input
+                ref={(node) => {
+                  inputRefs.current[ref.id] = node;
+                }}
+                type="file"
+                accept="image/*"
+                onChange={(event) => handleFile(ref.id, event.target.files?.[0])}
+              />
+              {ref.previewUrl ? <img src={ref.previewUrl} alt={`参考${ref.label}`} /> : null}
+              <button type="button" className="upload-hit" onClick={() => inputRefs.current[ref.id]?.click()}>
+                {ref.previewUrl ? <Upload size={16} /> : <ImagePlus size={22} />}
+                <span>{ref.previewUrl ? "替换图片" : "点击或拖入图片"}</span>
+              </button>
             </div>
             <div className="reference-fields">
               <select value={ref.role} onChange={(event) => updateReference(ref.id, { role: event.target.value as ReferenceRole })}>
@@ -80,10 +104,8 @@ export function ReferencePanel({ references, onChange }: ReferencePanelProps) {
                 onChange={(event) => updateReference(ref.id, { note: event.target.value })}
                 placeholder="备注"
               />
+              {ref.fileName ? <small>{ref.fileName}</small> : null}
             </div>
-            <button className="icon-button remove-ref" aria-label={`删除参考${ref.label}`} onClick={() => removeReference(ref.id)}>
-              <Trash2 size={15} />
-            </button>
           </div>
         ))}
       </div>

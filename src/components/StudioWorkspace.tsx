@@ -1,23 +1,22 @@
 import { useMemo } from "react";
 import { AlertTriangle } from "lucide-react";
-import { creditPolicy, generationModes, ratioOptions, roleLabels } from "../data/catalog";
+import { generationModes, ratioOptions, roleLabels } from "../data/catalog";
 import { estimateCredits } from "../lib/costing";
-import type { GeneratedResult, GenerationMode, ReferenceImage, StudioSettings, UserAccount } from "../types";
+import type { CreditPolicy, GeneratedResult, GenerationMode, ReferenceImage, StudioSettings, UserAccount } from "../types";
 import { ModePicker } from "./ModePicker";
 import { OutputGallery, resultToReference } from "./OutputGallery";
 import { ParameterPanel } from "./ParameterPanel";
 import { PromptComposer } from "./PromptComposer";
 import { ReferencePanel } from "./ReferencePanel";
-import { TaskRail } from "./TaskRail";
 
 interface StudioWorkspaceProps {
   settings: StudioSettings;
   prompt: string;
-  optimizedPrompt: string;
   references: ReferenceImage[];
   results: GeneratedResult[];
   user: UserAccount;
-  tasks: Parameters<typeof TaskRail>[0]["tasks"];
+  creditPolicy: CreditPolicy;
+  optimizationNotice?: string;
   onSettingsChange: (patch: Partial<StudioSettings>) => void;
   onPromptChange: (prompt: string) => void;
   onReferencesChange: (references: ReferenceImage[]) => void;
@@ -26,17 +25,16 @@ interface StudioWorkspaceProps {
   onUseAsReference: (references: ReferenceImage[]) => void;
   onSyncResult: (id: string) => void;
   onDeleteResult: (id: string) => void;
-  onRetryTask: Parameters<typeof TaskRail>[0]["onRetry"];
 }
 
 export function StudioWorkspace({
   settings,
   prompt,
-  optimizedPrompt,
   references,
   results,
   user,
-  tasks,
+  creditPolicy,
+  optimizationNotice,
   onSettingsChange,
   onPromptChange,
   onReferencesChange,
@@ -45,7 +43,6 @@ export function StudioWorkspace({
   onUseAsReference,
   onSyncResult,
   onDeleteResult,
-  onRetryTask,
 }: StudioWorkspaceProps) {
   const mode = generationModes.find((item) => item.id === settings.mode) ?? generationModes[0];
   const cost = useMemo(() => estimateCredits(mode, settings, references, creditPolicy), [mode, references, settings]);
@@ -64,17 +61,15 @@ export function StudioWorkspace({
       <div className="left-panel panel-scroll">
         <ModePicker activeMode={settings.mode} onChange={(modeId) => onSettingsChange({ mode: modeId })} />
         <ReferencePanel references={references} onChange={onReferencesChange} />
-        <ParameterPanel settings={settings} onChange={onSettingsChange} />
       </div>
 
       <div className="center-panel panel-scroll">
         <PromptComposer
           mode={mode}
           prompt={prompt}
-          optimizedPrompt={optimizedPrompt}
-          settings={settings}
           cost={cost}
           canGenerate={canGenerate}
+          optimizationNotice={optimizationNotice}
           onPromptChange={onPromptChange}
           onOptimize={onOptimize}
           onGenerate={() => onGenerate(mode, cost)}
@@ -87,20 +82,15 @@ export function StudioWorkspace({
                 ? `缺少 ${missingRoleText} 参考图`
                 : cost > user.credits
                   ? "积分不足"
-                  : "当前分辨率不支持该比例"}
+                : "当前分辨率不支持该比例"}
             </span>
           </div>
         ) : null}
-        <OutputGallery results={results} onUseAsReference={useResult} onSync={onSyncResult} onDelete={onDeleteResult} />
+        <ParameterPanel settings={settings} onChange={onSettingsChange} />
       </div>
 
       <div className="right-panel panel-scroll">
-        <div className="balance-strip">
-          <span>当前余额</span>
-          <strong>{user.credits}</strong>
-          <em>本次 {cost} 积分</em>
-        </div>
-        <TaskRail tasks={tasks} onRetry={onRetryTask} />
+        <OutputGallery results={results} onUseAsReference={useResult} onSync={onSyncResult} onDelete={onDeleteResult} />
       </div>
     </main>
   );

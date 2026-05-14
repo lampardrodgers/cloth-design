@@ -1,6 +1,6 @@
-import { AlertCircle, CheckCircle2, Clock3, RotateCcw } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock3, ImageIcon, RotateCcw } from "lucide-react";
 import { generationModes } from "../data/catalog";
-import type { GenerationTask, TaskStatus } from "../types";
+import type { GeneratedResult, GenerationTask, TaskStatus } from "../types";
 import { Button, Metric, Section } from "./ui";
 
 const statusLabel: Record<TaskStatus, string> = {
@@ -17,10 +17,11 @@ const statusIcon = {
 
 interface TaskRailProps {
   tasks: GenerationTask[];
+  results?: GeneratedResult[];
   onRetry: (task: GenerationTask) => void;
 }
 
-export function TaskRail({ tasks, onRetry }: TaskRailProps) {
+export function TaskRail({ tasks, results = [], onRetry }: TaskRailProps) {
   const running = tasks.filter((task) => task.status === "running").length;
   const success = tasks.filter((task) => task.status === "success").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
@@ -35,25 +36,31 @@ export function TaskRail({ tasks, onRetry }: TaskRailProps) {
       <div className="task-list">
         {tasks.map((task) => {
           const mode = generationModes.find((item) => item.id === task.mode);
+          const preview = results.find((result) => result.taskId === task.id);
           return (
             <article className={`task-item task-${task.status}`} key={task.id}>
-              <div className="task-title">
-                <span>{statusIcon[task.status]}</span>
-                <strong>{mode?.shortTitle ?? task.mode}</strong>
-                <em>{statusLabel[task.status]}</em>
+              <div className="task-preview">
+                {preview ? <img src={preview.imageUrl} alt={preview.title} /> : <ImageIcon size={19} />}
               </div>
-              <p>{task.prompt}</p>
-              <div className="progress-track">
-                <span style={{ width: `${task.progress}%` }} />
+              <div className="task-body">
+                <div className="task-title">
+                  <span>{statusIcon[task.status]}</span>
+                  <strong>{mode?.shortTitle ?? task.mode}</strong>
+                  <em>{statusLabel[task.status]}</em>
+                </div>
+                <p>{task.prompt}</p>
+                <div className="progress-track">
+                  <span style={{ width: `${task.progress}%` }} />
+                </div>
+                <div className="task-foot">
+                  <span>{task.createdAt}</span>
+                  <span>{task.credits} 积分</span>
+                </div>
+                <small>{task.message}</small>
+                {task.status === "failed" ? (
+                  <Button icon={<RotateCcw size={14} />} onClick={() => onRetry(task)}>重试</Button>
+                ) : null}
               </div>
-              <div className="task-foot">
-                <span>{task.createdAt}</span>
-                <span>{task.credits} 积分</span>
-              </div>
-              <small>{task.message}</small>
-              {task.status === "failed" ? (
-                <Button icon={<RotateCcw size={14} />} onClick={() => onRetry(task)}>重试</Button>
-              ) : null}
             </article>
           );
         })}

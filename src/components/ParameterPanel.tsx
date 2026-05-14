@@ -116,36 +116,42 @@ export function ParameterPanel({ settings, onChange }: ParameterPanelProps) {
           </label>
         ) : null}
 
-        <div className="two-col">
-          <label className="field">
-            <span>审核</span>
-            <select value={settings.moderation} onChange={(event) => onChange({ moderation: event.target.value as ModerationMode })}>
-              {moderations.map((moderation) => (
-                <option key={moderation} value={moderation}>
-                  {moderation}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>输入保真</span>
-            <select value={settings.inputFidelity} onChange={(event) => onChange({ inputFidelity: event.target.value as "standard" | "high" })}>
-              <option value="standard">standard</option>
-              <option value="high">high</option>
-            </select>
-          </label>
-        </div>
+        <details className="advanced-settings">
+          <summary>高级参数</summary>
+          <div className="two-col">
+            <label className="field">
+              <span>安全审核</span>
+              <select value={settings.moderation} onChange={(event) => onChange({ moderation: event.target.value as ModerationMode })}>
+                {moderations.map((moderation) => (
+                  <option key={moderation} value={moderation}>
+                    {moderation}
+                  </option>
+                ))}
+              </select>
+              <small>auto 使用默认安全策略；low 更少拦截但仍保留基础安全检查。</small>
+            </label>
+            <label className="field">
+              <span>参考图保真</span>
+              <select value={settings.inputFidelity} onChange={(event) => onChange({ inputFidelity: event.target.value as "standard" | "high" })}>
+                <option value="standard">standard</option>
+                <option value="high">high</option>
+              </select>
+              <small>high 会更严格跟随参考图，适合换衣、主图、融合。</small>
+            </label>
+          </div>
 
-        <div className="switch-row">
-          <label>
-            <input type="checkbox" checked={settings.streamPreview} onChange={(event) => onChange({ streamPreview: event.target.checked })} />
-            <span>流式预览</span>
-          </label>
-          <label>
-            <input type="checkbox" checked={settings.preserveIdentity} onChange={(event) => onChange({ preserveIdentity: event.target.checked })} />
-            <span>锁定人物</span>
-          </label>
-        </div>
+          <div className="switch-row">
+            <label>
+              <input type="checkbox" checked={settings.streamPreview} onChange={(event) => onChange({ streamPreview: event.target.checked })} />
+              <span>流式预览</span>
+            </label>
+            <label>
+              <input type="checkbox" checked={settings.preserveIdentity} onChange={(event) => onChange({ preserveIdentity: event.target.checked })} />
+              <span>锁定人物一致</span>
+            </label>
+          </div>
+          <p className="field-help">锁定人物一致会把脸、发型、身形写入内部提示词，主要服务于模特换衣和多图融合。</p>
+        </details>
       </div>
     </Section>
   );

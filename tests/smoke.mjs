@@ -34,6 +34,7 @@ assert(await page.getByText("ClothDesign AI").isVisible(), "app shell did not re
 assert(await page.getByText("演示模式").isVisible(), "API mode indicator missing");
 assert(await page.getByRole("heading", { name: "参考图" }).isVisible(), "reference panel missing");
 assert(await page.getByRole("heading", { name: "提示词" }).isVisible(), "prompt panel missing");
+assert((await page.getByText("系统提示词").count()) === 0, "system prompt should not be visible in customer UI");
 
 await page.screenshot({ path: desktopShot, fullPage: false });
 
@@ -44,16 +45,21 @@ await fs.writeFile(
     "base64",
   ),
 );
-await page.locator(".upload-hit input").first().setInputFiles(uploadRef);
+await page.locator(".reference-preview input[type='file']").first().setInputFiles(uploadRef);
 assert(await page.locator(".reference-preview img").first().isVisible(), "reference upload preview missing");
 
-await page.locator(".mode-pill").filter({ hasText: "文生图" }).click();
+assert(await page.locator(".mode-pill.active").filter({ hasText: "文生图" }).isVisible(), "default text-to-image mode missing");
 await page.locator("textarea").fill("生成一张春季女装风衣广告图，干净棚拍，面料细节真实。");
 await page.locator(".prompt-footer").getByRole("button", { name: "生成" }).click();
 await page.locator(".result-card").first().waitFor({ state: "visible", timeout: 120000 });
 
-assert((await page.locator(".result-card").count()) === 2, "generation did not create two result cards");
+assert((await page.locator(".result-card").count()) === 1, "gallery should show one primary result card");
+assert((await page.locator(".result-thumb").count()) === 2, "generation did not create two result thumbnails");
+await page.getByRole("button", { name: /任务/ }).click();
 assert((await page.locator(".task-success").count()) > 0, "successful task status missing");
+assert((await page.locator(".task-preview img").count()) > 0, "task thumbnails missing");
+await page.keyboard.press("Escape").catch(() => {});
+await page.getByRole("button", { name: /任务/ }).click();
 
 await page.locator(".result-card").first().getByRole("button", { name: "继续" }).click();
 assert((await page.locator(".reference-card").count()) >= 4, "continue action did not add output as reference");
@@ -71,20 +77,20 @@ const beforeCredit = Number((await textOf(page.locator(".metric").filter({ hasTe
 await page.locator(".package-card").filter({ hasText: "试用包" }).getByRole("button").click();
 const afterCredit = Number((await textOf(page.locator(".metric").filter({ hasText: "余额" }).locator("strong"))).replace(/\D/g, ""));
 assert(afterCredit > beforeCredit, "recharge did not increase credits");
+assert((await page.getByRole("heading", { name: "用户管理" }).count()) === 0, "customer account page should not expose user management");
 
-await page.locator(".rail button[title='后台']").click();
+await page.goto(new URL("/admin", targetUrl).toString(), { waitUntil: "networkidle" });
 assert((await page.locator("input[value='gpt-image-2']").count()) > 0, "admin model mapping missing gpt-image-2");
 assert((await page.getByText("Supabase Auth").count()) > 0, "account system recommendation missing");
 const adminInputs = page.locator(".route-table .admin-input");
 assert((await adminInputs.count()) > 0, "admin model inputs missing");
-await adminInputs.first().fill("gpt-image-2-commercial-test");
+await adminInputs.nth(2).fill("gpt-image-2-commercial-test");
 await page.reload({ waitUntil: "networkidle" });
-await page.locator(".rail button[title='后台']").click();
 assert((await page.locator("input[value='gpt-image-2-commercial-test']").count()) > 0, "admin model config did not persist");
+assert(await page.getByRole("heading", { name: "系统提示词模板" }).isVisible(), "admin prompt templates missing");
 
-await page.locator(".rail button[title='存储']").click();
 assert((await page.getByText("WebDAV").count()) > 0, "storage WebDAV panel missing");
-assert((await page.getByText("容量回收").count()) > 0, "storage lifecycle missing");
+assert((await page.getByText("存储策略").count()) > 0, "storage lifecycle settings missing");
 
 assert(consoleIssues.length === 0, `console issues found:\n${consoleIssues.join("\n")}`);
 
