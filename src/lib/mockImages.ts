@@ -2,6 +2,7 @@ import type { ModeKey } from "../types";
 
 const modePalette: Record<ModeKey, [string, string, string]> = {
   text: ["#e9d7c3", "#2f6f61", "#c24e32"],
+  free: ["#e5e7eb", "#4f46e5", "#0f766e"],
   tryon: ["#dbe8e4", "#1f5c68", "#d77047"],
   fusion: ["#ebe4d7", "#5d5a95", "#2c8c7d"],
   campaign: ["#f0d5ce", "#b83534", "#2e624c"],

@@ -1,30 +1,60 @@
 import { useRef, useState, type DragEvent } from "react";
 import { ImagePlus, Plus, Trash2, Upload } from "lucide-react";
-import { roleLabels } from "../data/catalog";
+import { roleLabels, roleNotePlaceholders } from "../data/catalog";
 import type { ReferenceImage, ReferenceRole } from "../types";
 import { Button, Section } from "./ui";
 
 const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 const roles = Object.keys(roleLabels) as ReferenceRole[];
 
+function nextReferenceLabel(references: ReferenceImage[]) {
+  const used = new Set(references.map((item) => item.label));
+  return alphabet.find((label) => !used.has(label)) ?? `${references.length + 1}`;
+}
+
 interface ReferencePanelProps {
   references: ReferenceImage[];
+  requiredRefs: ReferenceRole[];
+  recommendedRefs: ReferenceRole[];
   onChange: (references: ReferenceImage[]) => void;
 }
 
-export function ReferencePanel({ references, onChange }: ReferencePanelProps) {
+const referenceStatusLabels = {
+  required: "必填",
+  recommended: "推荐",
+  optional: "可选",
+} as const;
+
+export function ReferencePanel({ references, requiredRefs, recommendedRefs, onChange }: ReferencePanelProps) {
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const recommendedRoleSet = new Set(recommendedRefs);
+  const claimedRequiredIds = new Set<string>();
+  const requiredOrder = new Map<string, number>();
+  requiredRefs.forEach((role, index) => {
+    const ref = references.find((item) => item.role === role && !claimedRequiredIds.has(item.id));
+    if (!ref) return;
+    claimedRequiredIds.add(ref.id);
+    requiredOrder.set(ref.id, index);
+  });
+  const visibleReferences = [...references].sort((first, second) => {
+    const firstRequiredOrder = requiredOrder.get(first.id);
+    const secondRequiredOrder = requiredOrder.get(second.id);
+    if (firstRequiredOrder !== undefined && secondRequiredOrder !== undefined) return firstRequiredOrder - secondRequiredOrder;
+    if (firstRequiredOrder !== undefined) return -1;
+    if (secondRequiredOrder !== undefined) return 1;
+    return references.indexOf(first) - references.indexOf(second);
+  });
 
   const addReference = () => {
-    const label = alphabet[references.length] ?? `${references.length + 1}`;
+    const label = nextReferenceLabel(references);
     onChange([
       ...references,
       {
         id: `ref-${Date.now()}`,
         label,
         role: "style",
-        note: "补充参考",
+        note: "",
       },
     ]);
   };
@@ -60,14 +90,26 @@ export function ReferencePanel({ references, onChange }: ReferencePanelProps) {
       className="reference-section"
     >
       <div className="reference-grid">
-        {references.map((ref) => (
-          <div className="reference-card" key={ref.id}>
-            <div className="reference-card-head">
-              <strong>参考 {ref.label}</strong>
-              <button className="icon-button remove-ref" aria-label={`删除参考${ref.label}`} onClick={() => removeReference(ref.id)}>
-                <Trash2 size={15} />
-              </button>
-            </div>
+        {visibleReferences.map((ref) => {
+          const status = claimedRequiredIds.has(ref.id) ? "required" : recommendedRoleSet.has(ref.role) ? "recommended" : "optional";
+          const locked = status === "required";
+          return (
+            <div className={`reference-card reference-${status}`} key={ref.id}>
+              <div className="reference-card-head">
+                <span>
+                  <strong>参考 {ref.label}</strong>
+                  <em className={`reference-badge reference-badge-${status}`}>{referenceStatusLabels[status]}</em>
+                </span>
+                <button
+                  className="icon-button remove-ref"
+                  aria-label={`删除参考${ref.label}`}
+                  disabled={locked}
+                  title={locked ? "当前模式必填参考图，不能删除" : `删除参考${ref.label}`}
+                  onClick={() => removeReference(ref.id)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
             <div
               className={`reference-preview ${draggingId === ref.id ? "drag-active" : ""}`}
               onDragOver={(event) => {
@@ -92,7 +134,11 @@ export function ReferencePanel({ references, onChange }: ReferencePanelProps) {
               </button>
             </div>
             <div className="reference-fields">
-              <select value={ref.role} onChange={(event) => updateReference(ref.id, { role: event.target.value as ReferenceRole })}>
+              <select
+                value={ref.role}
+                disabled={locked}
+                onChange={(event) => updateReference(ref.id, { role: event.target.value as ReferenceRole })}
+              >
                 {roles.map((role) => (
                   <option value={role} key={role}>
                     {roleLabels[role]}
@@ -102,12 +148,13 @@ export function ReferencePanel({ references, onChange }: ReferencePanelProps) {
               <input
                 value={ref.note}
                 onChange={(event) => updateReference(ref.id, { note: event.target.value })}
-                placeholder="备注"
+                placeholder={roleNotePlaceholders[ref.role]}
               />
               {ref.fileName ? <small>{ref.fileName}</small> : null}
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </Section>
   );

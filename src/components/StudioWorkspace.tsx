@@ -9,6 +9,13 @@ import { ParameterPanel } from "./ParameterPanel";
 import { PromptComposer } from "./PromptComposer";
 import { ReferencePanel } from "./ReferencePanel";
 
+const referenceAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+
+function nextReferenceLabel(references: ReferenceImage[]) {
+  const used = new Set(references.map((item) => item.label));
+  return referenceAlphabet.find((label) => !used.has(label)) ?? `${references.length + 1}`;
+}
+
 interface StudioWorkspaceProps {
   settings: StudioSettings;
   prompt: string;
@@ -52,7 +59,7 @@ export function StudioWorkspace({
   const canGenerate = missingRoles.length === 0 && cost <= user.credits && ratio.allowedResolutions.includes(settings.resolution);
 
   const useResult = (result: GeneratedResult) => {
-    const nextLabel = references.length < 26 ? "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[references.length] : `${references.length + 1}`;
+    const nextLabel = nextReferenceLabel(references);
     onUseAsReference([...references, resultToReference(result, nextLabel)]);
   };
 
@@ -60,7 +67,12 @@ export function StudioWorkspace({
     <main className="workspace">
       <div className="left-panel panel-scroll">
         <ModePicker activeMode={settings.mode} onChange={(modeId) => onSettingsChange({ mode: modeId })} />
-        <ReferencePanel references={references} onChange={onReferencesChange} />
+        <ReferencePanel
+          references={references}
+          requiredRefs={mode.requiredRefs}
+          recommendedRefs={mode.recommendedRefs}
+          onChange={onReferencesChange}
+        />
       </div>
 
       <div className="center-panel panel-scroll">

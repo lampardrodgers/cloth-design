@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Download, ImageDown, RotateCw, Send, Trash2 } from "lucide-react";
+import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
+import { resultFileName } from "../lib/resultFiles";
 import type { GeneratedResult, ReferenceImage } from "../types";
 import { Button, Section } from "./ui";
 
@@ -46,10 +48,14 @@ export function OutputGallery({ results, onUseAsReference, onSync, onDelete }: O
               </div>
               <span>{selectedResult.credits} 分</span>
             </div>
+            <div className={`result-quality quality-${selectedResult.qualityGate?.status ?? "unknown"}`}>
+              <span>{imageQualityLabel(selectedResult.qualityGate)}</span>
+              <small>{imageQualitySummary({ qualityGate: selectedResult.qualityGate, imageInspection: selectedResult.imageInspection })}</small>
+            </div>
             <div className="result-actions">
               <Button icon={<RotateCw size={14} />} onClick={() => onUseAsReference(selectedResult)}>继续</Button>
               <Button icon={<Send size={14} />} onClick={() => onSync(selectedResult.id)}>WebDAV</Button>
-              <a className="icon-button" href={selectedResult.imageUrl} download={`${selectedResult.title}.svg`} aria-label="下载">
+              <a className="icon-button" href={selectedResult.imageUrl} download={resultFileName(selectedResult)} aria-label="下载">
                 <Download size={15} />
               </a>
               <button className="icon-button" onClick={() => onDelete(selectedResult.id)} aria-label="删除">
@@ -83,7 +89,7 @@ export function resultToReference(result: GeneratedResult, label: string): Refer
     label,
     role: "style",
     note: result.title,
-    fileName: `${result.title}.svg`,
+    fileName: resultFileName(result),
     previewUrl: result.imageUrl,
   };
 }

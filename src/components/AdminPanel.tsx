@@ -1,9 +1,14 @@
 import { DatabaseZap, KeyRound, Settings2, ShieldCheck, WalletCards } from "lucide-react";
 import { generationModes } from "../data/catalog";
+import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
 import type {
   CreditPolicy,
+  CreditLedgerEntry,
+  GeneratedResult,
   ModeKey,
   ModelRoute,
+  PaymentOrder,
+  PaymentConfigStatus,
   QualityKey,
   RechargePackage,
   StoragePolicy,
@@ -17,8 +22,24 @@ interface AdminPanelProps {
   onRoutesChange: (routes: ModelRoute[]) => void;
   users: UserAccount[];
   onUsersChange: (users: UserAccount[]) => void;
+  onUserPatch?: (id: string, patch: Partial<UserAccount>) => void;
+  onCreditAdjust?: (id: string, amount: number) => void;
   packages: RechargePackage[];
   onPackagesChange: (packages: RechargePackage[]) => void;
+  onPackagePatch?: (id: string, patch: Partial<RechargePackage>) => void;
+  orders?: PaymentOrder[];
+  ledger?: CreditLedgerEntry[];
+  generationResults?: GeneratedResult[];
+  paymentEvents?: Array<{
+    id: string;
+    provider: string;
+    eventKey: string;
+    orderId?: string | null;
+    transactionId?: string | null;
+    processed: boolean;
+    createdAt: string;
+  }>;
+  paymentConfig?: PaymentConfigStatus;
   creditPolicy: CreditPolicy;
   onCreditPolicyChange: (policy: CreditPolicy) => void;
   storagePolicy: StoragePolicy;
@@ -32,8 +53,16 @@ export function AdminPanel({
   onRoutesChange,
   users,
   onUsersChange,
+  onUserPatch,
+  onCreditAdjust,
   packages: packagesList,
   onPackagesChange,
+  onPackagePatch,
+  orders = [],
+  ledger = [],
+  generationResults = [],
+  paymentEvents = [],
+  paymentConfig,
   creditPolicy,
   onCreditPolicyChange,
   storagePolicy,
@@ -47,10 +76,12 @@ export function AdminPanel({
 
   const updatePackage = (id: string, patch: Partial<RechargePackage>) => {
     onPackagesChange(packagesList.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    onPackagePatch?.(id, patch);
   };
 
   const updateUser = (id: string, patch: Partial<UserAccount>) => {
     onUsersChange(users.map((user) => (user.id === id ? { ...user, ...patch } : user)));
+    onUserPatch?.(id, patch);
   };
 
   return (
@@ -218,21 +249,22 @@ export function AdminPanel({
             <span>余额</span>
             <span>月消耗</span>
             <span>状态</span>
+            <span>调分</span>
           </div>
           {users.map((user) => (
             <div className="table-row" role="row" key={user.id}>
               <input className="admin-input" value={user.name} onChange={(event) => updateUser(user.id, { name: event.target.value })} />
               <select className="admin-input" value={user.role} onChange={(event) => updateUser(user.id, { role: event.target.value as UserAccount["role"] })}>
                 <option value="owner">owner</option>
-                <option value="designer">designer</option>
-                <option value="operator">operator</option>
+                <option value="admin">admin</option>
+                <option value="user">user</option>
               </select>
               <input
                 className="admin-input"
                 type="number"
                 min={0}
                 value={user.credits}
-                onChange={(event) => updateUser(user.id, { credits: Number(event.target.value) })}
+                readOnly
               />
               <input
                 className="admin-input"
@@ -245,8 +277,84 @@ export function AdminPanel({
                 <option value="active">正常</option>
                 <option value="locked">锁定</option>
               </select>
+              <span className="admin-route-actions">
+                <button className="btn btn-secondary" onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
+                <button className="btn btn-secondary" onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>
+              </span>
             </div>
           ))}
+        </div>
+      </Section>
+
+      <section className="admin-two">
+        <Section title="支付配置" action={<ShieldCheck size={17} />}>
+          <div className="billing-admin-list">
+            {(["alipay", "wechat"] as const).map((provider) => {
+              const config = paymentConfig?.[provider];
+              return (
+                <article key={provider}>
+                  <strong>{provider === "alipay" ? "支付宝" : "微信支付"} · {config?.ready ? "配置完整" : "待配置"}</strong>
+                  <span>{config?.demoMode ? "当前演示模式" : "当前真实支付模式"}</span>
+                  <span>{config?.missing.length ? `缺少：${config.missing.join("、")}` : "商户参数和回调地址已满足启动校验"}</span>
+                </article>
+              );
+            })}
+          </div>
+        </Section>
+
+        <Section title="支付订单">
+          <div className="billing-admin-list">
+            {orders.slice(0, 8).map((order) => (
+              <article key={order.id}>
+                <strong>{order.provider} · {order.status}</strong>
+                <span>{order.subject}</span>
+                <span>￥{(order.amountCents / 100).toFixed(2)} · {order.credits} 积分</span>
+              </article>
+            ))}
+            {orders.length === 0 ? <span className="muted-text">暂无订单</span> : null}
+          </div>
+        </Section>
+
+        <Section title="支付事件">
+          <div className="billing-admin-list">
+            {paymentEvents.slice(0, 8).map((event) => (
+              <article key={event.id}>
+                <strong>{event.provider} · {event.processed ? "已入账" : "未入账"}</strong>
+                <span>{event.orderId || event.eventKey}</span>
+                <span>{event.transactionId || event.createdAt}</span>
+              </article>
+            ))}
+            {paymentEvents.length === 0 ? <span className="muted-text">暂无支付通知</span> : null}
+          </div>
+        </Section>
+      </section>
+
+      <Section title="积分流水">
+        <div className="billing-admin-list ledger-grid">
+          {ledger.slice(0, 12).map((item) => (
+            <article key={item.id}>
+              <strong>{item.kind} · {item.amount > 0 ? "+" : ""}{item.amount}</strong>
+              <span>{item.reason}</span>
+              <span>余额 {item.balanceAfter}</span>
+            </article>
+          ))}
+          {ledger.length === 0 ? <span className="muted-text">暂无流水</span> : null}
+        </div>
+      </Section>
+
+      <Section title="最近生成审计">
+        <div className="billing-admin-list generation-history-list">
+          {generationResults.slice(0, 12).map((result) => (
+            <article key={result.id}>
+              <img src={result.imageUrl} alt={result.title} />
+              <div>
+                <strong>{imageQualityLabel(result.qualityGate)} · {result.title}</strong>
+                <span>{result.userName || result.userEmail || result.userId} · {result.mode} · {result.ratioLabel}</span>
+                <span>{imageQualitySummary({ qualityGate: result.qualityGate, imageInspection: result.imageInspection })}</span>
+              </div>
+            </article>
+          ))}
+          {generationResults.length === 0 ? <span className="muted-text">暂无生成记录</span> : null}
         </div>
       </Section>
 
@@ -315,12 +423,12 @@ export function AdminPanel({
             <article>
               <KeyRound size={18} />
               <strong>用户系统</strong>
-              <span>客户页不显示后台入口；生产环境用 Supabase Auth / Auth.js 管理员鉴权保护 /admin。</span>
+              <span>Better Auth 管理登录态；/admin 和后台 API 由 owner/admin 权限保护。</span>
             </article>
             <article>
               <ShieldCheck size={18} />
               <strong>支付订单</strong>
-              <span>支付回调写入积分流水，失败任务按退款比例退回。</span>
+              <span>支付宝和微信支付回调验签后写入服务端积分流水。</span>
             </article>
             <article>
               <DatabaseZap size={18} />

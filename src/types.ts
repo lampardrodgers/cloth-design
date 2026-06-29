@@ -1,7 +1,8 @@
-export type ViewKey = "studio" | "account" | "storage";
+export type ViewKey = "studio" | "workflows" | "account" | "storage";
 
 export type ModeKey =
   | "text"
+  | "free"
   | "tryon"
   | "fusion"
   | "campaign"
@@ -104,19 +105,33 @@ export interface GenerationTask {
 export interface GeneratedResult {
   id: string;
   taskId: string;
+  userId?: string;
+  userEmail?: string;
+  userName?: string;
   title: string;
   mode: ModeKey;
   ratioLabel: string;
   storageStatus: StorageStatus;
   credits: number;
   imageUrl: string;
+  imageInspection?: Record<string, unknown>;
+  qualityGate?: {
+    status?: "passed" | "rework";
+    score?: number;
+    checks?: string[];
+    warnings?: string[];
+    issues?: string[];
+    nextActions?: string[];
+    normalization?: Record<string, unknown> | null;
+  };
   createdAt: string;
 }
 
 export interface UserAccount {
   id: string;
+  email?: string;
   name: string;
-  role: "owner" | "designer" | "operator";
+  role: "owner" | "admin" | "user";
   plan: string;
   credits: number;
   monthlyUsed: number;
@@ -128,7 +143,51 @@ export interface RechargePackage {
   title: string;
   credits: number;
   price: number;
+  amountCents?: number;
   badge: string;
+  enabled?: boolean;
+  sortOrder?: number;
+}
+
+export type PaymentProvider = "alipay" | "wechat";
+export type PaymentOrderStatus = "pending" | "paid" | "closed" | "failed" | "refunded";
+
+export interface PaymentOrder {
+  id: string;
+  packageId: string;
+  provider: PaymentProvider;
+  status: PaymentOrderStatus;
+  amountCents: number;
+  credits: number;
+  subject: string;
+  qrCodeUrl: string;
+  qrCodeDataUrl: string;
+  expiresAt: string;
+  paidAt?: string | null;
+  createdAt: string;
+}
+
+export interface CreditLedgerEntry {
+  id: string;
+  userId: string;
+  orderId?: string | null;
+  taskId?: string | null;
+  kind: "recharge" | "consume" | "refund" | "admin_adjust";
+  amount: number;
+  balanceAfter: number;
+  reason: string;
+  createdBy?: string | null;
+  createdAt: string;
+}
+
+export interface PaymentCapabilities {
+  alipay: { enabled: boolean; demoMode: boolean; demoCompleteAllowed: boolean; ready?: boolean };
+  wechat: { enabled: boolean; demoMode: boolean; demoCompleteAllowed: boolean; ready?: boolean };
+}
+
+export interface PaymentConfigStatus {
+  alipay: { provider: "alipay"; enabled: boolean; demoMode: boolean; ready: boolean; missing: string[] };
+  wechat: { provider: "wechat"; enabled: boolean; demoMode: boolean; ready: boolean; missing: string[] };
 }
 
 export interface ModelRoute {
@@ -142,6 +201,15 @@ export interface ModelRoute {
   creditFormula: string;
 }
 
+export interface ImageProviderHealth {
+  status: "demo" | "unknown" | "running" | "ok" | "usage_limited" | "no_token" | "timeout" | "error";
+  label: string;
+  blocking: boolean;
+  message: string;
+  resetAt?: string | null;
+  checkedAt?: string | null;
+}
+
 export interface StoragePolicy {
   localCacheLimitGb: number;
   localCacheTtlHours: number;
@@ -151,4 +219,168 @@ export interface StoragePolicy {
   autoSyncOriginals: boolean;
   keepThumbnailsLocally: boolean;
   purgeFailedAfterHours: number;
+}
+
+export type WorkflowType = "fabric-to-style" | "virtual-model-showcase" | "postprocess-suite" | "trend-brand-lab";
+export type WorkflowAssetKind = "fabric" | "sketch" | "garment" | "mannequin" | "designSketch" | "result" | "brand" | "reference";
+
+export interface WorkflowDefinition {
+  id: WorkflowType;
+  title: string;
+  inputTypes: string[];
+  outputTypes: string[];
+  capabilities: string[];
+  capabilityStatus: Array<{
+    id: string;
+    label: string;
+    status: "live" | "preview" | "requires_service";
+    note: string;
+    blocking?: boolean;
+  }>;
+}
+
+export interface WorkflowAsset {
+  id?: string;
+  userId?: string;
+  jobId?: string;
+  kind: WorkflowAssetKind;
+  name: string;
+  mimeType: string;
+  sourceUrl: string;
+  note?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export interface CommercialModel {
+  id: string;
+  name: string;
+  ethnicity: string;
+  ageGroup: "adult" | "child" | "senior";
+  bodyType: "standard" | "plus";
+  gender: "female" | "male";
+  commercialUse: boolean;
+  poses: string[];
+}
+
+export interface WorkflowStep {
+  id: string;
+  jobId: string;
+  position: number;
+  title: string;
+  capability: string;
+  status: TaskStatus;
+  message: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface WorkflowResult {
+  id: string;
+  jobId: string;
+  assetId?: string | null;
+  title: string;
+  versionType: string;
+  mediaType: "image" | "video" | "profile";
+  imageUrl: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface TrendSignal {
+  id: string;
+  jobId: string;
+  keyword: string;
+  score: number;
+  detail: string;
+  createdAt?: string;
+}
+
+export interface BrandProfile {
+  id: string;
+  jobId: string;
+  title: string;
+  status: "ready" | "training" | "failed";
+  dna: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export interface WorkflowJob {
+  id: string;
+  userId: string;
+  type: WorkflowType;
+  title: string;
+  prompt: string;
+  status: TaskStatus;
+  progress: number;
+  credits: number;
+  message: string;
+  options: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  assets: WorkflowAsset[];
+  steps: WorkflowStep[];
+  results: WorkflowResult[];
+  trendSignals?: TrendSignal[];
+  brandProfile?: BrandProfile | null;
+}
+
+export interface WorkflowDashboard {
+  definitions: WorkflowDefinition[];
+  commercialModels: CommercialModel[];
+  jobs: WorkflowJob[];
+  assets: WorkflowAsset[];
+  trendSignals: TrendSignal[];
+  brandProfiles: BrandProfile[];
+  summary: {
+    totalJobs: number;
+    totalAssets: number;
+    readyResults: number;
+    activeBrandProfiles: number;
+    quality: {
+      passed: number;
+      review: number;
+      rework: number;
+      unchecked: number;
+    };
+    productionReadiness: {
+      provider: {
+        mode: "demo" | "live";
+        providerReady: boolean;
+        baseUrl: string;
+        model: string;
+        health?: ImageProviderHealth;
+      };
+      runtime: {
+        liveImageRequests: boolean;
+        label: string;
+      };
+      capabilityCounts: {
+        live: number;
+        preview: number;
+        requiresService: number;
+      };
+      blockers: Array<{
+        workflowId: WorkflowType;
+        workflowTitle: string;
+        capabilityId: string;
+        label: string;
+        note: string;
+        service: string;
+        requiredEnv: string[];
+        configured: boolean;
+        nextAction: string;
+      }>;
+      optionalServices: Array<{
+        workflowId: WorkflowType;
+        workflowTitle: string;
+        capabilityId: string;
+        label: string;
+        note: string;
+        service: string;
+        requiredEnv: string[];
+        configured: boolean;
+        nextAction: string;
+      }>;
+    };
+  };
 }

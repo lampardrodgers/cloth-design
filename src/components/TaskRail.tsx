@@ -15,6 +15,20 @@ const statusIcon = {
   failed: <AlertCircle size={15} />,
 };
 
+function displayTaskMessage(message: string) {
+  if (!message.includes("Images API failed")) return message;
+  const jsonStart = message.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      const data = JSON.parse(message.slice(jsonStart));
+      return data?.error?.message || data?.message || "图像引擎请求失败，请检查模型或令牌配置。";
+    } catch {
+      return "图像引擎请求失败，请检查模型或令牌配置。";
+    }
+  }
+  return message.replace(/^Images API failed:\s*/, "图像引擎请求失败：");
+}
+
 interface TaskRailProps {
   tasks: GenerationTask[];
   results?: GeneratedResult[];
@@ -56,7 +70,7 @@ export function TaskRail({ tasks, results = [], onRetry }: TaskRailProps) {
                   <span>{task.createdAt}</span>
                   <span>{task.credits} 积分</span>
                 </div>
-                <small>{task.message}</small>
+                <small>{displayTaskMessage(task.message)}</small>
                 {task.status === "failed" ? (
                   <Button icon={<RotateCcw size={14} />} onClick={() => onRetry(task)}>重试</Button>
                 ) : null}

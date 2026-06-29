@@ -20,6 +20,15 @@ export const roleLabels = {
   style: "风格",
 } as const;
 
+export const roleNotePlaceholders = {
+  model: "可选：脸型、身形、发型或姿势要求",
+  garment: "可选：款号、面料、颜色或细节",
+  pose: "可选：动作、构图、角度或镜头",
+  scene: "可选：场景、光线或空间氛围",
+  fabric: "可选：材质、纹理、花型或工艺",
+  style: "可选：风格、品牌调性或参考方向",
+} as const;
+
 export const generationModes: GenerationMode[] = [
   {
     id: "text",
@@ -32,6 +41,18 @@ export const generationModes: GenerationMode[] = [
     baseCredits: 12,
     promptStarter: "一张高级女装连衣裙的电商主图，柔和棚拍光线，服装结构清晰，面料质感真实。",
     systemTemplate: "只输出图片生成提示词。聚焦服装主体、面料、版型、镜头、光线和商业用途。",
+  },
+  {
+    id: "free",
+    title: "自由生成",
+    shortTitle: "自由",
+    action: "generate",
+    description: "不套用服装行业限制，按用户输入直接生成图片。",
+    requiredRefs: [],
+    recommendedRefs: [],
+    baseCredits: 12,
+    promptStarter: "直接描述你想生成的图片内容。",
+    systemTemplate: "",
   },
   {
     id: "tryon",
@@ -51,7 +72,7 @@ export const generationModes: GenerationMode[] = [
     shortTitle: "融合",
     action: "compose",
     description: "按 A/B/C 引用关系融合动作、模特、衣服、背景和风格。",
-    requiredRefs: ["model", "garment", "pose"],
+    requiredRefs: ["pose", "model", "garment"],
     recommendedRefs: ["scene", "style"],
     baseCredits: 34,
     promptStarter: "参考A的动作，参考B的模特，参考C的衣服，融合成一张自然棚拍成片。",
@@ -111,19 +132,19 @@ export const resolutionOptions: ResolutionOption[] = [
   {
     id: "native",
     label: "API 原生",
-    detail: "1024/1536 输出",
+    detail: "直接生成 1024/1536",
     apiNative: true,
   },
   {
     id: "hd",
     label: "高清交付",
-    detail: "原生生成后高清化",
+    detail: "先原生生成再高清化",
     apiNative: false,
   },
   {
     id: "fourK",
     label: "4K 导出",
-    detail: "后处理放大，限制比例",
+    detail: "后处理放大，仅部分比例",
     apiNative: false,
   },
 ];
@@ -208,19 +229,19 @@ export const initialReferences: ReferenceImage[] = [
     id: "ref-a",
     label: "A",
     role: "model",
-    note: "模特或人物主体",
+    note: "",
   },
   {
     id: "ref-b",
     label: "B",
     role: "garment",
-    note: "衣服、款式或 SKU",
+    note: "",
   },
   {
     id: "ref-c",
     label: "C",
     role: "pose",
-    note: "动作、构图或姿势",
+    note: "",
   },
 ];
 
@@ -268,7 +289,7 @@ export const initialUsers: UserAccount[] = [
   {
     id: "u-002",
     name: "样衣设计组",
-    role: "designer",
+    role: "admin",
     plan: "共享额度",
     credits: 360,
     monthlyUsed: 218,
@@ -277,7 +298,7 @@ export const initialUsers: UserAccount[] = [
   {
     id: "u-003",
     name: "外包修图",
-    role: "operator",
+    role: "user",
     plan: "受限子账号",
     credits: 80,
     monthlyUsed: 64,
@@ -294,8 +315,8 @@ export const rechargePackages: RechargePackage[] = [
 export const modelRoutes: ModelRoute[] = [
   {
     id: "route-text",
-    frontendCapability: "文生图 / 面料花型",
-    provider: "OpenAI",
+    frontendCapability: "自由生成 / 文生图 / 面料花型",
+    provider: "PackyAPI",
     model: "gpt-image-2",
     endpoint: "v1/images/generations",
     enabled: true,
@@ -305,7 +326,7 @@ export const modelRoutes: ModelRoute[] = [
   {
     id: "route-edit",
     frontendCapability: "换衣 / 商品主图",
-    provider: "OpenAI",
+    provider: "PackyAPI",
     model: "gpt-image-2",
     endpoint: "v1/images/edits",
     enabled: true,
@@ -315,7 +336,7 @@ export const modelRoutes: ModelRoute[] = [
   {
     id: "route-compose",
     frontendCapability: "多图融合 / 广告图 / Lookbook",
-    provider: "OpenAI",
+    provider: "PackyAPI",
     model: "gpt-image-2",
     endpoint: "v1/images/edits",
     enabled: true,

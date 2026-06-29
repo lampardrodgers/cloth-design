@@ -28,6 +28,7 @@ export function ParameterPanel({ settings, onChange }: ParameterPanelProps) {
               </option>
             ))}
           </select>
+          <small>这是交付档位：原生直接调用模型尺寸；高清/4K 会后处理放大，并自动限制可选长宽比。</small>
         </label>
 
         <div className="field">

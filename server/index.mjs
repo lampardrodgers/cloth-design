@@ -4,6 +4,16 @@ import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
+import { authHandler, requireAccount, runAuthMigrations } from "./auth.mjs";
+import { registerBusinessRoutes, serializeAccount } from "./api.mjs";
+import { migrateBusinessDatabase, nowIso, sqlite } from "./db.mjs";
+import { generatedImageStaticMount, persistGeneratedImage, readManagedGeneratedImage, validateImageBuffer } from "./image-provider.mjs";
+import { imageQualityGate } from "./image-quality.mjs";
+import { assertPaymentProductionReady, consumeCredits, handleAlipayNotify, handleWechatNotify, refundCredits } from "./payments.mjs";
+import { imageProviderHealth, summarizeProviderErrorText } from "./provider-health.mjs";
+import { generatedVideoStaticMount } from "./video-provider.mjs";
+import { migrateWorkflowDatabase, registerWorkflowRoutes } from "./workflows.mjs";
+import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -21,7 +31,38 @@ const upload = multer({
 
 const app = express();
 app.disable("x-powered-by");
-app.use(express.json({ limit: "2mb" }));
+
+await runAuthMigrations();
+migrateBusinessDatabase();
+migrateWorkflowDatabase();
+assertPaymentProductionReady();
+if (isProduction && process.env.PAYMENT_DEMO_MODE !== "false") {
+  console.warn("Payment demo mode is active in production. Set PAYMENT_DEMO_MODE=false after configuring Alipay and WeChat Pay credentials.");
+}
+
+app.all("/api/auth/{*any}", authHandler);
+
+app.post("/api/payments/alipay/notify", express.urlencoded({ extended: false }), async (req, res) => {
+  try {
+    await handleAlipayNotify(req.body);
+    res.type("text/plain").send("success");
+  } catch (error) {
+    console.error(error);
+    res.type("text/plain").status(400).send("failure");
+  }
+});
+
+app.post("/api/payments/wechat/notify", express.raw({ type: "application/json", limit: "2mb" }), async (req, res) => {
+  try {
+    await handleWechatNotify(req.headers, req.body.toString("utf8"));
+    res.json({ code: "SUCCESS", message: "成功" });
+  } catch (error) {
+    console.error(error);
+    res.status(400).json({ code: "FAIL", message: error instanceof Error ? error.message : "失败" });
+  }
+});
+
+app.use(express.json({ limit: "25mb" }));
 
 function hasOpenAIKey() {
   return Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim().length > 0);
@@ -31,12 +72,31 @@ function isDemoMode() {
   return process.env.OPENAI_DEMO_MODE === "true" || !hasOpenAIKey();
 }
 
+function configuredImageApiBaseUrl() {
+  const configuredUrl =
+    process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE_URL || process.env.PACKY_API_BASE_URL || "https://api.openai.com";
+  const trimmed = configuredUrl.trim().replace(/\/+$/, "");
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+function imageApiUrl(pathname) {
+  return `${configuredImageApiBaseUrl()}/${pathname.replace(/^\/+/, "")}`;
+}
+
+function imageRequestTimeoutMs() {
+  return timeoutMsFromEnv("OPENAI_IMAGE_TIMEOUT_MS", 180000);
+}
+
 function publicConfig() {
+  const mode = isDemoMode() ? "demo" : "live";
+  const providerReady = hasOpenAIKey();
   return {
-    mode: isDemoMode() ? "demo" : "live",
-    providerReady: hasOpenAIKey(),
+    mode,
+    providerReady,
     imageModelConfigured: Boolean(process.env.OPENAI_IMAGE_MODEL),
+    authEnabled: true,
     port,
+    providerHealth: imageProviderHealth({ mode, providerReady }),
   };
 }
 
@@ -53,6 +113,7 @@ function safeOutputFormat(format) {
 function createDemoImage({ mode = "text", label = "演示图", ratioLabel = "1:1", index = 1 }) {
   const palettes = {
     text: ["#e9d7c3", "#2f6f61", "#c24e32"],
+    free: ["#e5e7eb", "#4f46e5", "#0f766e"],
     tryon: ["#dbe8e4", "#1f5c68", "#d77047"],
     fusion: ["#ebe4d7", "#5d5a95", "#2c8c7d"],
     campaign: ["#f0d5ce", "#b83534", "#2e624c"],
@@ -86,7 +147,7 @@ function normalizePayload(rawPayload) {
   const settings = payload.settings || {};
   const format = safeOutputFormat(settings.outputFormat);
   return {
-    prompt: String(payload.prompt || "").slice(0, 32000),
+    prompt: String(payload.prompt || "").trim().slice(0, 32000),
     mode: payload.mode || "text",
     action: payload.action || "generate",
     ratioLabel: payload.ratioLabel || "1:1",
@@ -95,24 +156,217 @@ function normalizePayload(rawPayload) {
     quality: settings.quality || "auto",
     background: settings.background || "auto",
     moderation: settings.moderation || "auto",
+    references: Array.isArray(payload.references) ? payload.references : [],
     outputFormat: format,
     outputCompression: Number(settings.compression || 100),
     inputFidelity: settings.inputFidelity === "high" ? "high" : "low",
+    resolution: settings.resolution || "native",
   };
 }
 
-async function parseOpenAIResponse(response, outputFormat) {
+function validateGenerationPayload(payload) {
+  if (!payload.prompt) {
+    return "提示词不能为空。";
+  }
+  return "";
+}
+
+function safeReferenceSourceUrl(value) {
+  const sourceUrl = String(value || "");
+  if (sourceUrl.startsWith("data:image/")) return sourceUrl;
+  const { publicPath } = generatedImageStaticMount();
+  if (sourceUrl.startsWith(`${publicPath}/`)) return sourceUrl;
+  try {
+    const url = new URL(sourceUrl);
+    return url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+async function fetchReferenceSource(reference) {
+  const sourceUrl = safeReferenceSourceUrl(reference.sourceUrl);
+  if (!sourceUrl) return null;
+  const { publicPath } = generatedImageStaticMount();
+  const label = `参考图${reference.label || ""}`;
+  const assertValidReference = (file) => {
+    const validation = validateImageBuffer(file.buffer, file.mimetype, label);
+    assertReferenceImageUsable(validation, label);
+    return { ...file, mimetype: validation.mimeType };
+  };
+  if (sourceUrl.startsWith(`${publicPath}/`)) {
+    return assertValidReference(await readManagedGeneratedImage(sourceUrl, `${reference.label || "reference"}.png`));
+  }
+  if (sourceUrl.startsWith("data:image/")) {
+    const [meta, encoded] = sourceUrl.split(",", 2);
+    const mime = meta.match(/^data:([^;]+)/)?.[1] || "image/png";
+    return assertValidReference({
+      buffer: Buffer.from(encoded || "", meta.includes(";base64") ? "base64" : "utf8"),
+      mimetype: mime,
+      originalname: `${reference.label || "reference"}.png`,
+    });
+  }
+  const response = await fetchWithTimeout(sourceUrl, {}, {
+    timeoutMs: imageRequestTimeoutMs(),
+    timeoutMessage: `参考图${reference.label || ""}下载超时。`,
+  });
+  if (!response.ok) {
+    throw new Error(`参考图${reference.label || ""}下载失败 (${response.status})`);
+  }
+  const mime = response.headers.get("content-type") || "image/png";
+  if (!mime.startsWith("image/")) {
+    throw new Error(`参考图${reference.label || ""}不是图片资源`);
+  }
+  return assertValidReference({
+    buffer: Buffer.from(await response.arrayBuffer()),
+    mimetype: mime,
+    originalname: `${reference.label || "reference"}.png`,
+  });
+}
+
+function validateUploadedReferenceFile(file, reference, uploadIndex) {
+  const label = `参考图${reference.label || uploadIndex}`;
+  const validation = validateImageBuffer(file.buffer, file.mimetype || "image/png", label);
+  assertReferenceImageUsable(validation, label);
+  return {
+    ...file,
+    mimetype: validation.mimeType,
+    originalname: `${reference.label || uploadIndex}-${file.originalname || "reference.png"}`,
+  };
+}
+
+function assertReferenceImageUsable(validation, label) {
+  const width = Number(validation.dimensions?.width || 0);
+  const height = Number(validation.dimensions?.height || 0);
+  if (width < 256 || height < 256) {
+    throw new Error(`${label}尺寸过小，最小需要 256x256。`);
+  }
+}
+
+async function orderedReferenceFiles(payload, uploadedFiles) {
+  const files = [];
+  let uploadIndex = 0;
+  for (const reference of payload.references) {
+    if (reference.hasFile) {
+      const uploaded = uploadedFiles[uploadIndex];
+      uploadIndex += 1;
+      if (uploaded) {
+        files.push(validateUploadedReferenceFile(uploaded, reference, uploadIndex));
+      }
+      continue;
+    }
+    const fetched = await fetchReferenceSource(reference);
+    if (fetched) files.push(fetched);
+  }
+  return files;
+}
+
+function estimateCredits(payload) {
+  const baseCredits = {
+    text: 12,
+    free: 12,
+    tryon: 28,
+    fusion: 34,
+    campaign: 24,
+    product: 18,
+    fabric: 16,
+    lookbook: 26,
+  };
+  const policy = {
+    perReference: 4,
+    highQualityMultiplier: 1.35,
+    fourKMultiplier: 1.9,
+    transparentBackgroundFee: 3,
+  };
+  const activeReferenceCount = payload.references.filter(
+    (item) => item.hasFile || item.fileName || safeReferenceSourceUrl(item.sourceUrl),
+  ).length;
+  let total = (baseCredits[payload.mode] || baseCredits.text) + activeReferenceCount * policy.perReference;
+  if (payload.quality === "high") total *= policy.highQualityMultiplier;
+  if (payload.resolution === "fourK") total *= policy.fourKMultiplier;
+  if (payload.background === "transparent") total += policy.transparentBackgroundFee;
+  if (payload.inputFidelity === "high" && activeReferenceCount > 0) total += activeReferenceCount * 3;
+  return Math.ceil(total * payload.quantity);
+}
+
+function insertGenerationTask({ id, userId, payload, cost }) {
+  const timestamp = nowIso();
+  sqlite
+    .prepare(
+      `INSERT INTO generation_task (id, user_id, mode, prompt, status, credits, message, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'running', ?, '生成中', ?, ?)`,
+    )
+    .run(id, userId, payload.mode, payload.prompt, cost, timestamp, timestamp);
+}
+
+function updateGenerationTask({ id, status, credits, message }) {
+  sqlite
+    .prepare("UPDATE generation_task SET status = ?, credits = ?, message = ?, updated_at = ? WHERE id = ?")
+    .run(status, credits, message, nowIso(), id);
+}
+
+function generatedResultMetadata(result, index) {
+  return JSON.stringify({
+    index: result.index ?? index,
+    imageInspection: result.imageInspection || null,
+    qualityGate: result.qualityGate || null,
+    revisedPrompt: result.revisedPrompt || null,
+  });
+}
+
+function insertGeneratedResults({ userId, taskId, payload, results, cost }) {
+  const timestamp = nowIso();
+  const insert = sqlite.prepare(
+    `INSERT INTO generated_result
+      (id, task_id, user_id, title, mode, ratio_label, storage_status, credits, image_url, metadata_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'local-cache', ?, ?, ?, ?)`,
+  );
+  results.forEach((result, index) => {
+    insert.run(
+      `result-${taskId}-${index}`,
+      taskId,
+      userId,
+      `${payload.mode}-${timestamp.slice(11, 16).replace(":", "")}-${index + 1}`,
+      payload.mode,
+      payload.ratioLabel,
+      Math.ceil(cost / Math.max(results.length, 1)),
+      result.imageUrl,
+      generatedResultMetadata(result, index),
+      timestamp,
+    );
+  });
+}
+
+function summarizeImagesApiError(status, text) {
+  const message = summarizeProviderErrorText(text, 500);
+  if (/model_not_found|无可用渠道|分组/.test(text)) {
+    return `图像模型不可用 (${status})：${message}。请检查 API 令牌分组是否支持当前模型。`;
+  }
+  return `图像引擎请求失败 (${status})：${message}`;
+}
+
+async function parseOpenAIResponse(response, outputFormat, targetSize, outputCompression) {
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`OpenAI Images API failed: ${response.status} ${text.slice(0, 500)}`);
+    throw new Error(summarizeImagesApiError(response.status, text));
   }
   const data = await response.json();
   const mime = mimeForFormat(outputFormat);
-  return (data.data || []).map((item, index) => ({
-    imageUrl: item.b64_json ? `data:${mime};base64,${item.b64_json}` : item.url,
-    revisedPrompt: item.revised_prompt,
-    index,
-  }));
+  const items = Array.isArray(data.data) ? data.data : [];
+  if (items.length === 0) {
+    throw new Error("图像引擎没有返回图片。");
+  }
+  return Promise.all(
+    items.map(async (item, index) => {
+      const persisted = await persistGeneratedImage(item, { fallbackMimeType: mime, targetSize, outputCompression });
+      return {
+        ...persisted,
+        qualityGate: imageQualityGate(persisted.imageInspection),
+        revisedPrompt: item.revised_prompt,
+        index,
+      };
+    }),
+  );
 }
 
 async function callOpenAIImages(payload, files) {
@@ -120,67 +374,123 @@ async function callOpenAIImages(payload, files) {
   const headers = {
     Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
   };
+  const results = [];
+  const requestCount = Math.max(1, payload.quantity);
 
-  if (files.length > 0 || payload.action !== "generate") {
-    const form = new FormData();
-    form.append("model", model);
-    form.append("prompt", payload.prompt);
-    form.append("n", String(payload.quantity));
-    form.append("size", payload.size);
-    form.append("quality", payload.quality);
-    form.append("background", payload.background);
-    form.append("moderation", payload.moderation);
-    form.append("output_format", payload.outputFormat);
-    form.append("input_fidelity", payload.inputFidelity);
+  for (let index = 0; index < requestCount; index += 1) {
+    if (files.length > 0 || payload.action !== "generate") {
+      const form = new FormData();
+      form.append("model", model);
+      form.append("prompt", payload.prompt);
+      form.append("n", "1");
+      form.append("size", payload.size);
+      form.append("quality", payload.quality);
+      form.append("background", payload.background);
+      form.append("moderation", payload.moderation);
+      form.append("response_format", "url");
+      form.append("output_format", payload.outputFormat);
+      form.append("input_fidelity", payload.inputFidelity);
+      if (payload.outputFormat !== "png") {
+        form.append("output_compression", String(payload.outputCompression));
+      }
+      for (const file of files) {
+        const blob = new Blob([file.buffer], { type: file.mimetype || "image/png" });
+        form.append("image", blob, file.originalname || "reference.png");
+      }
+
+      const response = await fetchWithTimeout(imageApiUrl("/images/edits"), {
+        method: "POST",
+        headers,
+        body: form,
+      }, {
+        timeoutMs: imageRequestTimeoutMs(),
+        timeoutMessage: "图像引擎请求超时。",
+      });
+      results.push(...(await parseOpenAIResponse(response, payload.outputFormat, payload.size, payload.outputCompression)));
+      continue;
+    }
+
+    const body = {
+      model,
+      prompt: payload.prompt,
+      n: 1,
+      size: payload.size,
+      quality: payload.quality,
+      background: payload.background,
+      moderation: payload.moderation,
+      response_format: "url",
+      output_format: payload.outputFormat,
+    };
     if (payload.outputFormat !== "png") {
-      form.append("output_compression", String(payload.outputCompression));
-    }
-    for (const file of files) {
-      const blob = new Blob([file.buffer], { type: file.mimetype || "image/png" });
-      form.append("image[]", blob, file.originalname || "reference.png");
+      body.output_compression = payload.outputCompression;
     }
 
-    const response = await fetch("https://api.openai.com/v1/images/edits", {
+    const response = await fetchWithTimeout(imageApiUrl("/images/generations"), {
       method: "POST",
-      headers,
-      body: form,
+      headers: {
+        ...headers,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }, {
+      timeoutMs: imageRequestTimeoutMs(),
+      timeoutMessage: "图像引擎请求超时。",
     });
-    return parseOpenAIResponse(response, payload.outputFormat);
+    results.push(...(await parseOpenAIResponse(response, payload.outputFormat, payload.size, payload.outputCompression)));
   }
 
-  const body = {
-    model,
-    prompt: payload.prompt,
-    n: payload.quantity,
-    size: payload.size,
-    quality: payload.quality,
-    background: payload.background,
-    moderation: payload.moderation,
-    output_format: payload.outputFormat,
-  };
-  if (payload.outputFormat !== "png") {
-    body.output_compression = payload.outputCompression;
-  }
-
-  const response = await fetch("https://api.openai.com/v1/images/generations", {
-    method: "POST",
-    headers: {
-      ...headers,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  return parseOpenAIResponse(response, payload.outputFormat);
+  return results.map((result, index) => ({ ...result, index }));
 }
 
 app.get("/api/config", (_req, res) => {
   res.json(publicConfig());
 });
 
+registerBusinessRoutes(app);
+registerWorkflowRoutes(app);
+
 app.post("/api/generate", upload.array("images", 16), async (req, res) => {
+  let taskId = "";
+  let account = null;
+  let cost = 0;
   try {
+    account = await requireAccount(req, res);
+    if (!account) return;
+
     const payload = normalizePayload(req.body.payload);
-    const files = Array.isArray(req.files) ? req.files : [];
+    const validationError = validateGenerationPayload(payload);
+    if (validationError) {
+      res.status(400).json({
+        ...publicConfig(),
+        error: validationError,
+      });
+      return;
+    }
+    const files = await orderedReferenceFiles(payload, Array.isArray(req.files) ? req.files : []);
+    taskId = `task-${Date.now()}`;
+    cost = estimateCredits(payload);
+
+    insertGenerationTask({ id: taskId, userId: account.user.id, payload, cost });
+    try {
+      consumeCredits({
+        userId: account.user.id,
+        taskId,
+        amount: cost,
+        reason: `${payload.mode} 图片生成`,
+      });
+    } catch (error) {
+      updateGenerationTask({
+        id: taskId,
+        status: "failed",
+        credits: 0,
+        message: error instanceof Error ? error.message : "积分扣费失败",
+      });
+      res.status(402).json({
+        ...publicConfig(),
+        error: error instanceof Error ? error.message : "积分余额不足。",
+      });
+      return;
+    }
 
     if (isDemoMode()) {
       const results = Array.from({ length: payload.quantity }, (_, index) => ({
@@ -192,27 +502,73 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
         }),
         index,
       }));
+      updateGenerationTask({
+        id: taskId,
+        status: "success",
+        credits: cost,
+        message: hasOpenAIKey() ? "演示模式已开启，未调用图像引擎。" : "未配置 OPENAI_API_KEY，已使用演示模式。",
+      });
+      insertGeneratedResults({ userId: account.user.id, taskId, payload, results, cost });
+      const profile = sqlite.prepare("SELECT * FROM user_profile WHERE user_id = ?").get(account.user.id);
       res.json({
         ...publicConfig(),
         results,
-        message: hasOpenAIKey() ? "演示模式已开启，未调用 OpenAI。" : "未配置 OPENAI_API_KEY，已使用演示模式。",
+        taskId,
+        credits: cost,
+        account: serializeAccount(account.user, profile),
+        message: hasOpenAIKey() ? "演示模式已开启，未调用图像引擎。" : "未配置 OPENAI_API_KEY，已使用演示模式。",
       });
       return;
     }
 
     const results = await callOpenAIImages(payload, files);
+    updateGenerationTask({
+      id: taskId,
+      status: "success",
+      credits: cost,
+      message: "图像引擎已返回结果。",
+    });
+    insertGeneratedResults({ userId: account.user.id, taskId, payload, results, cost });
+    const profile = sqlite.prepare("SELECT * FROM user_profile WHERE user_id = ?").get(account.user.id);
     res.json({
       ...publicConfig(),
       results,
-      message: "OpenAI Images API 已返回结果。",
+      taskId,
+      credits: cost,
+      account: serializeAccount(account.user, profile),
+      message: "图像引擎已返回结果。",
     });
   } catch (error) {
-    res.status(500).json({
+    if (account && taskId && cost > 0) {
+      try {
+        refundCredits({
+          userId: account.user.id,
+          taskId,
+          amount: cost,
+          reason: "生成失败自动退款",
+        });
+        updateGenerationTask({
+          id: taskId,
+          status: "failed",
+          credits: 0,
+          message: error instanceof Error ? `${error.message}，积分已退回` : "生成失败，积分已退回",
+        });
+      } catch (refundError) {
+        console.error(refundError);
+      }
+    }
+    const status = !taskId && error instanceof Error && /^参考图/.test(error.message) ? 400 : 500;
+    res.status(status).json({
       ...publicConfig(),
       error: error instanceof Error ? error.message : "Unknown generation error",
     });
   }
 });
+
+const generatedImages = generatedImageStaticMount();
+app.use(generatedImages.publicPath, express.static(generatedImages.directory));
+const generatedVideos = generatedVideoStaticMount();
+app.use(generatedVideos.publicPath, express.static(generatedVideos.directory));
 
 if (isProduction) {
   const distPath = path.join(root, "dist");
@@ -223,7 +579,7 @@ if (isProduction) {
 } else {
   const vite = await createViteServer({
     root,
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: process.env.NODE_ENV === "test" ? false : undefined },
     appType: "spa",
   });
   app.use(vite.middlewares);
