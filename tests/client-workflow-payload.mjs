@@ -22,6 +22,8 @@ const fabricPayload = workflowPayload.buildWorkflowPayload("fabric-to-style", {
   createDemoAsset,
   fabricControls: {
     pattern: "stripe",
+    color: "moss",
+    fissionDimension: "color",
     hemLength: "maxi",
     sleeveLength: "sleeveless",
     neckline: "v-neck",
@@ -40,6 +42,7 @@ assert.deepEqual(fabricPayload.options.editControls, {
   neckline: "v-neck",
   necklineDepthPercent: 48,
   pattern: "stripe",
+  color: "moss",
 });
 assert(fabricPayload.prompt.includes("条纹"));
 assert(fabricPayload.prompt.includes("V领"));
@@ -48,8 +51,9 @@ assert(fabricPayload.prompt.includes("无袖"));
 assert(fabricPayload.prompt.includes("衣长100%"));
 assert(fabricPayload.prompt.includes("袖长0%"));
 assert(fabricPayload.prompt.includes("领口开度48%"));
+assert(fabricPayload.prompt.includes("配色裂变"));
 assert.equal(fabricPayload.assets[0].name, "moss-stripe.png");
-assert(createdAssets.some((asset) => asset.note.includes("stripe pattern")));
+assert(createdAssets.some((asset) => asset.name.includes("stripe") || asset.note.includes("stripe")));
 
 const virtualPayload = workflowPayload.buildWorkflowPayload("virtual-model-showcase", {
   createDemoAsset,
@@ -205,6 +209,7 @@ const userVirtualPayload = workflowPayload.buildWorkflowPayload("virtual-model-s
     modelId: "black-adult-01",
     sceneId: "grassland",
     poseId: "standing",
+    motionPreview: false,
   },
   virtualModelInputs: {
     sourceType: "mannequin",

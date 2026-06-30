@@ -3008,3 +3008,975 @@ button:disabled {
   padding: 12px;
   font-size: 12px;
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * AI功能中心 · 重构（左右双栏 + 统一控件 + 13寸一屏适配）
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/* 整体容器：覆盖旧 .workflow-center 的纵向 padding，交给新布局管理 */
+.workflow-center {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  height: 100%;
+  padding: 10px;
+  overflow: hidden;
+}
+
+/* 顶部条：标题 + 横向分段控件 + 说明按钮 */
+.workflow-center > .workflow-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 6px 16px rgba(34, 43, 38, 0.05);
+  position: relative;
+}
+
+.workflow-topbar-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.workflow-topbar-title h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.workflow-topbar-title p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 横向模块分段控件（替代旧的左侧竖向 rail） */
+.workflow-segments {
+  display: flex;
+  gap: 6px;
+  flex: 1 1 auto;
+  justify-content: center;
+  min-width: 0;
+}
+
+.workflow-segments .segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.workflow-segments .segment svg {
+  color: var(--muted);
+}
+
+.workflow-segments .segment em {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  font-style: normal;
+  line-height: 1;
+}
+
+.workflow-segments .segment:hover {
+  border-color: rgba(47, 125, 109, 0.4);
+  color: var(--ink);
+}
+
+.workflow-segments .segment.active {
+  border-color: var(--accent-2);
+  background: var(--accent-2);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(47, 125, 109, 0.28);
+}
+
+.workflow-segments .segment.active svg,
+.workflow-segments .segment.active em {
+  color: #fff;
+}
+
+.workflow-segments .segment.active em {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+/* 主布局：三栏（左素材 / 中设定 / 右结果）—— 参照《生成》workspace 节奏 */
+.workflow-split {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(340px, 0.95fr) minmax(360px, 1.25fr);
+  gap: 11px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+/* 三列通用：纵向铺叠 + 各自内部滚动 */
+.workflow-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 警告条横跨三栏 */
+.workflow-alert {
+  grid-column: 1 / -1;
+}
+
+.workflow-split > .workflow-failure-notice {
+  grid-column: 1 / -1;
+}
+
+/* 右列：结果 + 历史（始终有内容） */
+.workflow-output-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--accent-2);
+  flex: 0 0 auto;
+}
+
+.workflow-output-head strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.workflow-col-right > .workflow-results-grid {
+  margin: 0;
+}
+
+/* 右列历史/可复用素材标题 */
+.workflow-history-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 4px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.workflow-history-head svg {
+  color: var(--accent-2);
+}
+
+.workflow-history-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.history-thumb {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  min-width: 0;
+}
+
+.history-thumb img {
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.history-thumb figcaption {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 运行条：中栏底部的生成按钮 + 附带参数 */
+.run-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-2);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(47, 125, 109, 0.06), #fff);
+  flex: 0 0 auto;
+}
+
+.run-bar > .field,
+.run-bar > .toggle-field {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.run-bar > .btn-primary {
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 0 16px;
+  font-size: 13.5px;
+  font-weight: 780;
+}
+
+.run-bar > small {
+  flex: 1 1 auto;
+}
+
+/* 运行栏内的开关字段（动效预览等） */
+.run-bar > .toggle-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toggle-field {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: start;
+  gap: 4px 9px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.toggle-field input[type="checkbox"] {
+  grid-row: 1;
+  grid-column: 1;
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-2);
+}
+
+.toggle-field span {
+  grid-row: 1;
+  grid-column: 2;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 750;
+}
+
+.toggle-field small {
+  grid-row: 2;
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* 细步骤条（横向） */
+.workflow-steps-rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  flex: 0 0 auto;
+}
+
+.workflow-steps-rail span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.workflow-steps-rail .step-success {
+  color: var(--accent-2);
+  background: rgba(47, 125, 109, 0.1);
+}
+
+.workflow-steps-rail .step-success svg {
+  color: var(--accent-2);
+}
+
+.workflow-steps-rail .step-running {
+  color: var(--accent);
+  background: rgba(207, 86, 58, 0.1);
+}
+
+.workflow-steps-rail .step-failed {
+  color: #8b3d33;
+  background: rgba(157, 58, 44, 0.1);
+}
+
+.workflow-steps-rail .step-failed svg {
+  color: #8b3d33;
+}
+
+/* ── 编号模块卡 FieldCard ── */
+.field-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(34, 43, 38, 0.04);
+  overflow: hidden;
+}
+
+.field-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(47, 125, 109, 0.04), #fff);
+}
+
+.field-card.collapsible .field-card-head {
+  cursor: pointer;
+  user-select: none;
+}
+
+.field-card.collapsible .field-card-head:hover {
+  background: rgba(47, 125, 109, 0.08);
+}
+
+.field-card-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--accent-2);
+}
+
+.field-card-title svg {
+  color: var(--accent-2);
+}
+
+.field-card-title strong {
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 750;
+}
+
+.field-card-index {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--accent-2);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.field-card-step {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(47, 125, 109, 0.12);
+  color: var(--accent-2);
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.field-card-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.field-card-toggle {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.field-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px 12px;
+}
+
+.field-card-footer {
+  padding: 0 12px 11px;
+}
+
+.field-card-footer .run-button {
+  width: 100%;
+  min-height: 42px;
+  font-size: 14px;
+  font-weight: 780;
+}
+
+/* ── 单字段 Field ── */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 750;
+}
+
+.field-label em {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  font-style: normal;
+}
+
+.field-label strong {
+  margin-left: auto;
+  color: var(--accent-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.field textarea,
+.field input[type="text"] {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.field textarea {
+  min-height: 62px;
+  resize: vertical;
+}
+
+.field input[type="text"]:focus,
+.field textarea:focus {
+  outline: none;
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(47, 125, 109, 0.14);
+}
+
+/* 滑杆行 */
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.slider-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent-2);
+}
+
+.slider-row input[type="number"] {
+  width: 56px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 6px;
+  text-align: center;
+  font-size: 12.5px;
+}
+
+.field input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent-2);
+}
+
+/* ── 药丸 Chip ── */
+.chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.2;
+  transition: all 0.13s ease;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  border-color: rgba(47, 125, 109, 0.45);
+  color: var(--accent-2);
+}
+
+.chip.selected {
+  border-color: var(--accent-2);
+  background: var(--accent-2);
+  color: #fff;
+  box-shadow: 0 3px 9px rgba(47, 125, 109, 0.24);
+}
+
+.chip-sm .chip {
+  padding: 5px 9px;
+  font-size: 11.5px;
+}
+
+/* ── 组合框 ComboBox ── */
+.combo-box {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.combo-box input[type="text"] {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 30px 8px 10px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.combo-box input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(47, 125, 109, 0.14);
+}
+
+.combo-caret {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.combo-caret:hover {
+  color: var(--accent-2);
+  background: rgba(47, 125, 109, 0.08);
+}
+
+.combo-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  max-height: 260px;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 14px 32px rgba(31, 43, 37, 0.18);
+  overflow-y: auto;
+}
+
+.combo-list li {
+  min-width: 0;
+}
+
+.combo-list button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.combo-list button.focused,
+.combo-list button:hover {
+  background: rgba(47, 125, 109, 0.1);
+}
+
+.combo-list em {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 650;
+}
+
+/* ── 上传缩略图 tile ── */
+.upload-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.upload-tile {
+  min-width: 0;
+}
+
+.upload-tile-empty {
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  min-height: 96px;
+  padding: 12px;
+  border: 1.5px dashed rgba(47, 125, 109, 0.35);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(47, 125, 109, 0.05), #fff);
+  color: var(--accent-2);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.13s ease, background 0.13s ease;
+}
+
+.upload-tile-empty:hover {
+  border-color: var(--accent-2);
+  background: rgba(47, 125, 109, 0.1);
+}
+
+.upload-tile-empty svg {
+  color: var(--accent-2);
+}
+
+.upload-tile-empty span {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 750;
+}
+
+.upload-tile-empty small {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.upload-tile-empty input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.upload-tile-preview {
+  display: grid;
+  gap: 5px;
+  min-height: 96px;
+}
+
+.upload-tile-preview img {
+  width: 100%;
+  height: 72px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.upload-tile-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.upload-tile-meta span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-tile-clear {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+}
+
+.upload-tile-clear:hover {
+  border-color: rgba(157, 58, 44, 0.4);
+  color: #8b3d33;
+  background: rgba(157, 58, 44, 0.06);
+}
+
+/* ── 数值步进 NumberStepper ── */
+.number-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  width: fit-content;
+}
+
+.number-stepper button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  background: var(--surface-2);
+  color: var(--accent-2);
+}
+
+.number-stepper button:hover:not(:disabled) {
+  background: rgba(47, 125, 109, 0.14);
+}
+
+.number-stepper button:disabled {
+  color: var(--line);
+  cursor: not-allowed;
+}
+
+.number-stepper input {
+  width: 44px;
+  height: 34px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  text-align: center;
+  font-size: 13px;
+  font-weight: 750;
+  -moz-appearance: textfield;
+}
+
+.number-stepper input::-webkit-outer-spin-button,
+.number-stepper input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ── 虚拟模特资料 / 批量预估（沿用并微调）── */
+.workflow-col .virtual-model-profile,
+.workflow-col .postprocess-batch-preview {
+  display: grid;
+  gap: 4px;
+  padding: 9px 11px;
+  border: 1px solid rgba(47, 125, 109, 0.18);
+  border-radius: var(--radius);
+  background: rgba(47, 125, 109, 0.06);
+}
+
+.workflow-col .postprocess-batch-preview {
+  border-color: rgba(167, 182, 164, 0.42);
+  background: rgba(167, 182, 164, 0.14);
+}
+
+.workflow-col .virtual-model-profile strong,
+.workflow-col .postprocess-batch-preview strong {
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+.workflow-col .virtual-model-profile span,
+.workflow-col .postprocess-batch-preview span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* ── 结果卡（右栏当前结果，3 列）── */
+.workflow-col-right .workflow-results-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  align-content: start;
+}
+
+/* 功能说明浮层里的步骤卡 */
+.module-help-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin: 4px 0 2px;
+}
+
+.module-help-steps article {
+  display: grid;
+  grid-template-columns: 18px 18px minmax(0, 1fr);
+  gap: 6px;
+  align-items: start;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid rgba(47, 125, 109, 0.14);
+  border-radius: var(--radius);
+  background: rgba(47, 125, 109, 0.06);
+}
+
+.module-help-steps article > span {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--accent-2);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.module-help-steps svg {
+  color: var(--accent-2);
+}
+
+.module-help-steps div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.module-help-steps strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.module-help-steps small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* ── 13 寸 (1280×800) 及以下：三栏等比收缩 ── */
+@media (max-width: 1320px) {
+  .workflow-split {
+    grid-template-columns: minmax(250px, 0.78fr) minmax(310px, 0.95fr) minmax(320px, 1.2fr);
+    gap: 9px;
+  }
+
+  .workflow-history-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1180px) {
+  .workflow-center {
+    overflow: visible;
+    height: auto;
+  }
+
+  .workflow-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-col {
+    overflow: visible;
+  }
+
+  .workflow-col-right .workflow-results-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .workflow-segments {
+    overflow-x: auto;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .workflow-topbar {
+    flex-wrap: wrap;
+  }
+
+  .workflow-topbar-title {
+    flex: 1 1 100%;
+  }
+
+  .workflow-segments {
+    flex: 1 1 100%;
+  }
+
+  .upload-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-col-right .workflow-results-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .run-bar {
+    flex-wrap: wrap;
+  }
+}
+

@@ -2,6 +2,8 @@ import type { CommercialModel, WorkflowAsset, WorkflowAssetKind, WorkflowType } 
 
 export interface FabricControls {
   pattern: string;
+  color: string;
+  fissionDimension: string;
   hemLength: string;
   hemLengthPercent: number;
   sleeveLength: string;
@@ -21,6 +23,7 @@ export interface VirtualModelControls {
   modelId: string;
   sceneId: string;
   poseId: string;
+  motionPreview: boolean;
 }
 
 export interface VirtualModelInputs {
@@ -64,10 +67,39 @@ export type ModelCollectionFilter = "all" | "child" | "plus" | "senior" | "mensw
 export type DemoAssetFactory = (kind: WorkflowAssetKind, name: string, note?: string) => WorkflowAsset;
 
 export const fabricPatternOptions: OptionItem[] = [
-  { id: "jacquard", label: "提花", prompt: "苔绿色丝感提花" },
-  { id: "stripe", label: "条纹", prompt: "苔绿色细条纹" },
-  { id: "floral", label: "小花", prompt: "苔绿色小花印花" },
-  { id: "solid", label: "净色", prompt: "苔绿色净色斜纹" },
+  { id: "jacquard", label: "提花", prompt: "丝感提花" },
+  { id: "stripe", label: "条纹", prompt: "细条纹" },
+  { id: "floral", label: "碎花", prompt: "碎花印花" },
+  { id: "solid", label: "净色", prompt: "净色斜纹" },
+  { id: "check", label: "格纹", prompt: "经典格纹" },
+  { id: "geometric", label: "几何", prompt: "几何印花" },
+  { id: "animal", label: "动物纹", prompt: "动物纹理" },
+  { id: "tie-dye", label: "扎染", prompt: "扎染渐变" },
+  { id: "polka", label: "波点", prompt: "波点印花" },
+];
+
+export const fabricColorOptions: OptionItem[] = [
+  { id: "moss", label: "苔绿", prompt: "苔绿色" },
+  { id: "ivory", label: "象牙白", prompt: "象牙白" },
+  { id: "butter", label: "黄油黄", prompt: "黄油黄" },
+  { id: "soft-pink", label: "藕粉", prompt: "藕粉色" },
+  { id: "mist-blue", label: "雾霾蓝", prompt: "雾霾蓝" },
+  { id: "wine", label: "酒红", prompt: "酒红色" },
+  { id: "navy", label: "藏青", prompt: "藏青色" },
+  { id: "charcoal", label: "炭灰", prompt: "炭灰色" },
+  { id: "khaki", label: "卡其", prompt: "卡其色" },
+  { id: "black", label: "经典黑", prompt: "纯黑色" },
+];
+
+/**
+ * 裂变维度：模块一"款式裂变"按哪个方向生成多个变体。
+ * 默认配色裂变（最适合测款）。
+ */
+export const fissionDimensionOptions: OptionItem[] = [
+  { id: "color", label: "配色裂变", prompt: "按配色裂变，每个变体换主色调" },
+  { id: "pattern", label: "印花裂变", prompt: "按印花裂变，每个变体换花型" },
+  { id: "silhouette", label: "版型裂变", prompt: "按版型细节裂变，调整衣长/袖长/领口比例" },
+  { id: "mix", label: "综合裂变", prompt: "综合配色与版型细节裂变" },
 ];
 
 export const hemLengthOptions: OptionItem[] = [
@@ -79,6 +111,7 @@ export const hemLengthOptions: OptionItem[] = [
 export const sleeveLengthOptions: OptionItem[] = [
   { id: "sleeveless", label: "无袖", prompt: "无袖" },
   { id: "short", label: "短袖", prompt: "短袖" },
+  { id: "three-quarter", label: "七分袖", prompt: "七分袖" },
   { id: "long", label: "长袖", prompt: "长袖" },
 ];
 
@@ -87,6 +120,9 @@ export const necklineOptions: OptionItem[] = [
   { id: "v-neck", label: "V领", prompt: "V领" },
   { id: "crew", label: "圆领", prompt: "圆领" },
   { id: "shirt", label: "衬衫领", prompt: "衬衫领" },
+  { id: "one-shoulder", label: "一字领", prompt: "一字领" },
+  { id: "ruffle", label: "荷叶领", prompt: "荷叶领" },
+  { id: "stand", label: "立领", prompt: "立领" },
 ];
 
 export const modelControlOptions: ModelOptionItem[] = [
@@ -123,10 +159,14 @@ export const modelCollectionFilterOptions: Array<{ id: ModelCollectionFilter; la
 ];
 
 export const sceneControlOptions: OptionItem[] = [
+  { id: "studio", label: "棚拍", prompt: "干净棚拍纯色背景" },
+  { id: "city", label: "城市街拍", prompt: "城市街景" },
   { id: "forest", label: "森林", prompt: "森林场景" },
-  { id: "city", label: "城市", prompt: "城市街景" },
   { id: "grassland", label: "草地", prompt: "草地场景" },
-  { id: "studio", label: "棚拍", prompt: "棚拍场景" },
+  { id: "beach", label: "海滩", prompt: "海滩场景" },
+  { id: "indoor", label: "室内", prompt: "室内家居场景" },
+  { id: "cafe", label: "咖啡馆", prompt: "咖啡馆场景" },
+  { id: "minimal-white", label: "极简白底", prompt: "极简纯白背景" },
 ];
 
 export const poseControlOptions: OptionItem[] = [
@@ -153,19 +193,34 @@ export const postprocessActionOptions: OptionItem[] = [
 export const targetColorOptions: OptionItem[] = [
   { id: "ivory", label: "象牙白", prompt: "象牙白" },
   { id: "sage", label: "鼠尾草绿", prompt: "鼠尾草绿" },
+  { id: "butter", label: "黄油黄", prompt: "黄油黄" },
+  { id: "soft-pink", label: "藕粉", prompt: "藕粉色" },
+  { id: "mist-blue", label: "雾霾蓝", prompt: "雾霾蓝" },
+  { id: "wine", label: "酒红", prompt: "酒红色" },
+  { id: "navy", label: "藏青", prompt: "藏青色" },
+  { id: "charcoal", label: "炭灰", prompt: "炭灰色" },
+  { id: "black", label: "经典黑", prompt: "纯黑色" },
   { id: "original", label: "保留原色", prompt: "保留原色" },
 ];
 
 export const targetRatioOptions: OptionItem[] = [
+  { id: "1:1", label: "1:1", prompt: "1:1" },
   { id: "4:5", label: "4:5", prompt: "4:5" },
   { id: "3:4", label: "3:4", prompt: "3:4" },
-  { id: "1:1", label: "1:1", prompt: "1:1" },
+  { id: "2:3", label: "2:3", prompt: "2:3" },
+  { id: "3:2", label: "3:2", prompt: "3:2" },
+  { id: "16:9", label: "16:9", prompt: "16:9" },
+  { id: "9:16", label: "9:16", prompt: "9:16" },
 ];
 
 export const postprocessSceneOptions: OptionItem[] = [
   { id: "studio", label: "棚拍", prompt: "棚拍场景" },
   { id: "city", label: "城市", prompt: "城市街景" },
   { id: "grassland", label: "草地", prompt: "草地场景" },
+  { id: "beach", label: "海滩", prompt: "海滩场景" },
+  { id: "indoor", label: "室内", prompt: "室内家居场景" },
+  { id: "cafe", label: "咖啡馆", prompt: "咖啡馆场景" },
+  { id: "minimal-white", label: "极简白底", prompt: "极简纯白背景" },
 ];
 
 export const postprocessRepairFocusOptions: OptionItem[] = [
@@ -176,6 +231,8 @@ export const postprocessRepairFocusOptions: OptionItem[] = [
 
 export const defaultFabricControls: FabricControls = {
   pattern: "jacquard",
+  color: "moss",
+  fissionDimension: "color",
   hemLength: "midi",
   hemLengthPercent: 68,
   sleeveLength: "short",
@@ -193,8 +250,9 @@ export const defaultFabricInputs: FabricInputs = {
 
 export const defaultVirtualModelControls: VirtualModelControls = {
   modelId: "child-east-asian-01",
-  sceneId: "forest",
+  sceneId: "studio",
   poseId: "walking",
+  motionPreview: true,
 };
 
 export const defaultVirtualModelInputs: VirtualModelInputs = {
@@ -220,6 +278,19 @@ export const defaultPostprocessInputs: PostprocessInputs = {
 
 function findOption(options: OptionItem[], id: string, fallbackId = options[0]?.id) {
   return options.find((item) => item.id === id) ?? options.find((item) => item.id === fallbackId) ?? options[0];
+}
+
+/**
+ * 解析"可自定义"字段：ComboBox 允许用户输入候选项之外的值。
+ * 命中候选项时返回该候选项；未命中时保留用户原文（构造为 OptionItem），
+ * 确保自定义值（如场景"海边"、模特自定义关键词）能进入 prompt，而不是被静默丢弃。
+ */
+function resolveOptionOrCustom(options: OptionItem[], idOrText: string): OptionItem {
+  const matched = options.find((item) => item.id === idOrText || item.label === idOrText);
+  if (matched) return matched;
+  const trimmed = String(idOrText ?? "").trim();
+  if (trimmed.length === 0) return options[0];
+  return { id: trimmed, label: trimmed, prompt: trimmed };
 }
 
 export function findModelOption(id: string) {
@@ -301,6 +372,14 @@ function clampVariants(value: number) {
   if (!Number.isFinite(value)) return defaultFabricControls.variants;
   return Math.min(Math.max(Math.trunc(value), 1), 8);
 }
+
+/**
+ * 统一商业出图质量约束（喂给 gpt-image-2），与 src/lib/prompt.ts 口径一致。
+ * 保证版型/缝线/扣件/人体比例准确，避免水印文字、畸形手指等常见缺陷，
+ * 输出可直接用于电商主图。三个工作流共用，提升真实出图质量。
+ */
+const COMMERCIAL_QUALITY_PROMPT =
+  "画面干净、构图明确、电商主图质感；优先保证服装版型、面料纹理、颜色、缝线、扣件、领口和人体比例准确；避免多余文字、水印、水印、畸形手指、错误衣领、错乱纽扣或不合理褶皱。";
 
 function clampPercent(value: number, fallback: number) {
   if (!Number.isFinite(value)) return fallback;
@@ -385,6 +464,8 @@ export function buildWorkflowPayload(
 ) {
   if (type === "fabric-to-style") {
     const pattern = findOption(fabricPatternOptions, fabricControls.pattern, defaultFabricControls.pattern);
+    const color = resolveOptionOrCustom(fabricColorOptions, fabricControls.color);
+    const fission = findOption(fissionDimensionOptions, fabricControls.fissionDimension, defaultFabricControls.fissionDimension);
     const hemLength = findOption(hemLengthOptions, fabricControls.hemLength, defaultFabricControls.hemLength);
     const sleeveLength = findOption(sleeveLengthOptions, fabricControls.sleeveLength, defaultFabricControls.sleeveLength);
     const neckline = findOption(necklineOptions, fabricControls.neckline, defaultFabricControls.neckline);
@@ -393,23 +474,25 @@ export function buildWorkflowPayload(
     const sleeveLengthPercent = clampPercent(fabricControls.sleeveLengthPercent, defaultFabricControls.sleeveLengthPercent);
     const necklineDepthPercent = clampPercent(fabricControls.necklineDepthPercent, defaultFabricControls.necklineDepthPercent);
     const textDescription = cleanText(fabricInputs.textDescription);
+    const garmentCategory = cleanText(fabricInputs.garmentCategory, 40) || "dress";
     const assets =
       fabricInputs.assets.length > 0
         ? fabricInputs.assets
         : [
-            createDemoAsset("fabric", `moss-${pattern.id}.png`, `moss green ${pattern.id} pattern silk`),
-            createDemoAsset("sketch", `${neckline.id}-sketch.png`, `${neckline.prompt} ${hemLength.prompt} ${sleeveLength.prompt} dress sketch`),
+            createDemoAsset("fabric", `${color.id}-${pattern.id}.png`, `${color.prompt} ${pattern.prompt} fabric`),
+            createDemoAsset("sketch", `${neckline.id}-sketch.png`, `${neckline.prompt} ${hemLength.prompt} ${sleeveLength.prompt} ${garmentCategory} sketch`),
           ];
     const inputSummary = fabricInputSummary(assets, textDescription);
     const inputModeText = inputSummary.inputModes.length ? `多模态输入：${inputSummary.inputModes.join("、")}。` : "";
     return {
       type,
       title: "面料到款式智能生成",
-      prompt: `${inputModeText}${pattern.prompt}面料，生成春夏通勤连衣裙，支持${neckline.prompt}、${hemLength.prompt}和${sleeveLength.prompt}细节，精细控制衣长${hemLengthPercent}%、袖长${sleeveLengthPercent}%、领口开度${necklineDepthPercent}%，输出 ${variants} 个可比较变体。${textDescription ? `补充需求：${textDescription}` : ""}`,
+      prompt: `${inputModeText}${color.prompt}${pattern.prompt}面料，生成${garmentCategory === "dress" ? "春夏通勤连衣裙" : garmentCategory}，支持${neckline.prompt}、${hemLength.prompt}和${sleeveLength.prompt}细节，精细控制衣长${hemLengthPercent}%、袖长${sleeveLengthPercent}%、领口开度${necklineDepthPercent}%。${fission.prompt}，输出 ${variants} 个可比较变体。${textDescription ? `补充需求：${textDescription}。` : ""}${COMMERCIAL_QUALITY_PROMPT}`,
       assets,
       options: {
-        garmentCategory: cleanText(fabricInputs.garmentCategory, 40) || "dress",
+        garmentCategory,
         variants,
+        fissionDimension: fission.id,
         editControls: {
           hemLength: hemLength.id,
           hemLengthPercent,
@@ -418,6 +501,7 @@ export function buildWorkflowPayload(
           neckline: neckline.id,
           necklineDepthPercent,
           pattern: pattern.id,
+          color: color.id,
         },
         inputSummary,
       },
@@ -427,23 +511,35 @@ export function buildWorkflowPayload(
   if (type === "virtual-model-showcase") {
     const availableModels = modelOptions.length > 0 ? modelOptions : modelControlOptions;
     const model = findModelOptionFrom(availableModels, virtualModelControls.modelId);
-    const scene = findOption(sceneControlOptions, virtualModelControls.sceneId, defaultVirtualModelControls.sceneId);
+    // 展示场景无模型依赖：用 resolveOptionOrCustom 保留自定义场景文本（如"海边"），而非丢弃。
+    const scene = resolveOptionOrCustom(sceneControlOptions, virtualModelControls.sceneId);
+    // 模特姿势与所选模特绑定：若用户值是该模特支持的姿势则直接用；
+    // 若是"已知但与此模特不兼容"的姿势（如转身 vs 不支持转身的中东模特），回退到该模特支持的姿势（安全网）；
+    // 若是用户真正自定义的姿势文本（非任何已知姿势），则保留并注入 prompt。
     const poseOptions = compatiblePoseOptions(model.id, availableModels);
-    const pose = findOption(poseOptions, virtualModelControls.poseId, poseOptions[0]?.id);
+    const knownPoseIds = new Set(poseControlOptions.map((option) => option.id));
+    const pose =
+      poseOptions.some((option) => option.id === virtualModelControls.poseId)
+        ? findOption(poseOptions, virtualModelControls.poseId, poseOptions[0]?.id)
+        : knownPoseIds.has(virtualModelControls.poseId)
+          ? poseOptions[0]
+          : resolveOptionOrCustom(poseOptions.length > 0 ? poseOptions : poseControlOptions, virtualModelControls.poseId);
     const sourceType = virtualSourceOptions.find((option) => option.kind === virtualModelInputs.sourceType) ?? virtualSourceOptions[0];
     const description = cleanText(virtualModelInputs.description);
     const assets = virtualModelInputs.assets.length > 0 ? virtualModelInputs.assets : [defaultVirtualSourceAsset(sourceType, createDemoAsset)];
+    const motionPreview = virtualModelControls.motionPreview !== false;
     return {
       type,
       title: "虚拟模特智能展示",
-      prompt: `上传${sourceType.prompt}，穿到${model.prompt}身上，${scene.prompt}，切换为${pose.prompt}，输出逼真的上身展示图。${description ? `服装要求：${description}` : ""}`,
+      prompt: `上传${sourceType.prompt}，穿到${model.prompt}身上，${scene.prompt}，切换为${pose.prompt}，输出逼真的上身展示图。${motionPreview ? "并生成该姿势的动效预览。" : ""}${description ? `服装要求：${description}。` : ""}${COMMERCIAL_QUALITY_PROMPT}`,
       assets,
       options: {
         modelId: model.id,
         sceneId: scene.id,
         poseId: pose.id,
         sourceType: sourceType.id,
-        makeVideo: false,
+        makeVideo: motionPreview,
+        motionPreview,
       },
     };
   }
@@ -472,7 +568,7 @@ export function buildWorkflowPayload(
     return {
       type,
       title: "图像后期批量处理",
-      prompt: `${reusablePostprocessAssets.length > 0 && postprocessInputs.assets.length === 0 ? "基于前面真实生成的商品图" : "商品图"}批量执行${actionText}，目标颜色${targetColor.prompt}，输出比例${targetRatio.prompt}，场景输出${sceneText}。擦除目标${postprocessTuning.eraseTarget}，补光${postprocessTuning.lightStrength}%，美体${postprocessTuning.beautyLevel}%，修复重点${postprocessTuning.repairFocusLabel}。`,
+      prompt: `${reusablePostprocessAssets.length > 0 && postprocessInputs.assets.length === 0 ? "基于前面真实生成的商品图" : "商品图"}批量执行${actionText}，目标颜色${targetColor.prompt}，输出比例${targetRatio.prompt}，场景输出${sceneText}。擦除目标${postprocessTuning.eraseTarget}，补光${postprocessTuning.lightStrength}%，美体${postprocessTuning.beautyLevel}%，修复重点${postprocessTuning.repairFocusLabel}。${COMMERCIAL_QUALITY_PROMPT}`,
       assets,
       options: {
         actions,
