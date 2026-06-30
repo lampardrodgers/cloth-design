@@ -1,13 +1,17 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import {
   BadgeCheck,
+  Bookmark,
   CircleAlert,
   Clapperboard,
+  Cloud,
+  Download,
   HelpCircle,
   ImageUp,
   Layers3,
   Loader2,
   PlayCircle,
+  RefreshCcw,
   Scissors,
   SlidersHorizontal,
   Shirt,
@@ -391,13 +395,25 @@ function UploadTile({
   onClear: () => void;
 }) {
   const preview = assets[0];
+  const multiPreview = multiple && assets.length > 1;
   return (
     <div className="upload-tile">
       {preview ? (
-        <div className="upload-tile-preview">
-          <img src={preview.sourceUrl} alt={preview.name} />
+        <div className={multiPreview ? "upload-tile-preview multi" : "upload-tile-preview"}>
+          {multiPreview ? (
+            <div className="upload-tile-preview-grid">
+              {assets.slice(0, 6).map((asset, index) => (
+                <figure key={`${asset.name}-${index}`}>
+                  <img src={asset.sourceUrl} alt={asset.name} />
+                  {index === 5 && assets.length > 6 ? <figcaption>+{assets.length - 5}</figcaption> : null}
+                </figure>
+              ))}
+            </div>
+          ) : (
+            <img src={preview.sourceUrl} alt={preview.name} />
+          )}
           <div className="upload-tile-meta">
-            <span>{preview.name}</span>
+            <span>{multiPreview ? `已选择 ${assets.length} 张图片` : preview.name}</span>
             <button type="button" aria-label="清除" className="upload-tile-clear" onClick={onClear}>
               <Trash2 size={14} />
             </button>
@@ -477,6 +493,215 @@ function SliderField({
   );
 }
 
+const colorSwatches: Record<string, string> = {
+  moss: "#6f8065",
+  ivory: "#f3efe4",
+  butter: "#f3d980",
+  "soft-pink": "#e6c4c8",
+  "mist-blue": "#aec7d2",
+  wine: "#7e3144",
+  navy: "#203b61",
+  charcoal: "#4d5453",
+  khaki: "#b8aa8c",
+  black: "#1f2423",
+  sage: "#9baa87",
+  original: "conic-gradient(from 90deg, #f3efe4, #8aa37a, #e6c4c8, #aec7d2, #f3efe4)",
+};
+
+function ColorOptionGroup({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  options: Array<{ id: string; label: string }>;
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="swatch-group" role="radiogroup" aria-label={ariaLabel}>
+      {options.map((option) => {
+        const selected = option.id === value;
+        const color = colorSwatches[option.id] ?? "#d8ded9";
+        return (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            className={selected ? "swatch-option selected" : "swatch-option"}
+            onClick={() => onChange(option.id)}
+          >
+            <span style={{ background: color }} />
+            <small>{option.label}</small>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function PanelHeading({
+  eyebrow,
+  title,
+  action,
+}: {
+  eyebrow?: string;
+  title: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="workflow-panel-heading">
+      <div>
+        {eyebrow ? <span>{eyebrow}</span> : null}
+        <strong>{title}</strong>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function InputStatus({ items }: { items: Array<{ label: string; active?: boolean }> }) {
+  return (
+    <div className="workflow-input-status">
+      {items.map((item) => (
+        <span key={item.label} className={item.active ? "ready" : ""}>
+          {item.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function SourceReadinessCard({
+  title,
+  detail,
+  items,
+}: {
+  title: string;
+  detail: string;
+  items: string[];
+}) {
+  return (
+    <div className="source-readiness-card">
+      <BadgeCheck size={17} />
+      <div>
+        <strong>{title}</strong>
+        <span>{detail}</span>
+        <small>{items.join(" / ")}</small>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowOutputActions({ variant = "default" }: { variant?: "default" | "postprocess" }) {
+  return (
+    <div className="workflow-output-actions">
+      <Button icon={<RefreshCcw size={14} />}>继续编辑</Button>
+      <Button icon={<Bookmark size={14} />}>{variant === "postprocess" ? "作为参考" : "作为后期素材"}</Button>
+      <Button icon={<Download size={14} />}>{variant === "postprocess" ? "下载全部" : "下载"}</Button>
+      <Button icon={<Cloud size={14} />}>{variant === "postprocess" ? "同步 WebDAV" : "WebDAV"}</Button>
+    </div>
+  );
+}
+
+function PreviewImage({ kind, note, alt }: { kind: WorkflowAsset["kind"]; note: string; alt: string }) {
+  return <img src={createDemoAssetUrl(kind, note)} alt={alt} />;
+}
+
+function FabricFallbackResults() {
+  return (
+    <div className="workflow-preview-grid fabric-preview-results">
+      {["款式方案 A", "款式方案 B", "款式方案 C"].map((title, index) => (
+        <article key={title} className="workflow-preview-card">
+          <div className="workflow-preview-media">
+            <PreviewImage kind="result" note={index === 0 ? "green" : ""} alt={title} />
+            <span className={index === 2 ? "badge-warn" : "badge-good"}>{index === 0 ? "优质" : index === 1 ? "良好" : "一般"}</span>
+          </div>
+          <strong>{title}</strong>
+          <small>苔绿 / 提花 / 中长裙摆</small>
+          <div className="mini-actions">
+            <button type="button">继续编辑</button>
+            <button type="button">作为参考</button>
+            <button type="button">下载</button>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function VirtualFallbackResults() {
+  return (
+    <div className="virtual-output-preview">
+      <div className="virtual-main-result">
+        <PreviewImage kind="result" note="" alt="虚拟模特上身效果" />
+        <span>高清 4K</span>
+      </div>
+      <SourceReadinessCard title="来源保留度" detail="92%" items={["泡泡袖造型", "腰部排扣细节", "米白色", "领口褶皱"]} />
+      <div className="motion-strip">
+        <strong>动态预览</strong>
+        <div>
+          {[0, 1, 2].map((item) => (
+            <figure key={item}>
+              <PreviewImage kind="result" note="" alt={`动态预览 ${item + 1}`} />
+            </figure>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PostprocessFallbackResults() {
+  return (
+    <div className="postprocess-output-preview">
+      <div className="before-after-card">
+        <div>
+          <span>原图</span>
+          <PreviewImage kind="result" note="" alt="原图" />
+        </div>
+        <button type="button" aria-label="拖动滑块查看对比">
+          <SlidersHorizontal size={16} />
+        </button>
+        <div>
+          <span>效果图</span>
+          <PreviewImage kind="result" note="green" alt="效果图" />
+        </div>
+      </div>
+      <div className="workflow-preview-grid postprocess-preview-results">
+        {["透明底", "精修", "重色", "电商裁剪"].map((title, index) => (
+          <article key={title} className="workflow-preview-card compact">
+            <div className="workflow-preview-media">
+              <PreviewImage kind="result" note={index === 2 ? "green" : ""} alt={title} />
+              <span>{index === 0 ? "PNG" : index === 3 ? "4:5" : title}</span>
+            </div>
+            <strong>{title}</strong>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowResultArea({ active, job }: { active: CoreWorkflowType; job?: WorkflowJob }) {
+  const hasResults = Boolean(job?.results.length);
+  if (hasResults) {
+    return (
+      <div className="workflow-results-grid">
+        {job!.results.map((result) => (
+          <ResultCard result={result} key={result.id} compact />
+        ))}
+      </div>
+    );
+  }
+
+  if (active === "virtual-model-showcase") return <VirtualFallbackResults />;
+  if (active === "postprocess-suite") return <PostprocessFallbackResults />;
+  return <FabricFallbackResults />;
+}
+
 function ModuleHelpPopover({ active, onClose }: { active: CoreWorkflowType; onClose: () => void }) {
   const spec = moduleRequirements[active];
   return (
@@ -540,7 +765,7 @@ function workflowActionText(actions: unknown) {
   return actions.map((action) => labels.get(String(action)) || String(action)).join(" / ");
 }
 
-function ResultCard({ result }: { result: WorkflowResult }) {
+function ResultCard({ result, compact = false }: { result: WorkflowResult; compact?: boolean }) {
   const qualityGate = result.metadata.qualityGate as
     | { status?: string; score?: number; assetInputCount?: number; issues?: string[]; nextActions?: string[] }
     | undefined;
@@ -571,8 +796,16 @@ function ResultCard({ result }: { result: WorkflowResult }) {
           ? "配置"
           : "图片";
 
+  const resultClassName = compact
+    ? failed
+      ? "workflow-result-card compact failed"
+      : "workflow-result-card compact"
+    : failed
+      ? "workflow-result-card failed"
+      : "workflow-result-card";
+
   return (
-    <article className={failed ? "workflow-result-card failed" : "workflow-result-card"}>
+    <article className={resultClassName}>
       <div className="workflow-result-media">
         {isPlayableVideo ? <video src={result.imageUrl} controls muted playsInline preload="metadata" /> : <img src={result.imageUrl} alt={result.title} />}
         <span>{mediaLabel}</span>
@@ -581,34 +814,44 @@ function ResultCard({ result }: { result: WorkflowResult }) {
       <div className="workflow-result-body">
         <strong>{result.title}</strong>
         <span>{resultVersionLabel(result)}</span>
-        <div className="generation-evidence">
-          <span>{evidence.label}</span>
-          <small>{evidence.detail}</small>
-        </div>
-        {result.metadata.colors ? <small>{textList(result.metadata.colors)}</small> : null}
-        {fabricInputSummary ? <small>{fabricInputSummary}</small> : null}
-        {fabricAnalysis ? <small>{fabricAnalysis}</small> : null}
-        {styleMatchSummary ? <small>{styleMatchSummary}</small> : null}
-        {styleRecommendation ? <small>{styleRecommendation}</small> : null}
-        {editControlSummary ? <small>{editControlSummary}</small> : null}
-        {virtualModelSummary ? <small>{virtualModelSummary}</small> : null}
-        {tryOnSourceSummary ? <small>{tryOnSourceSummary}</small> : null}
-        {postprocessBatchSummary ? <small>{postprocessBatchSummary}</small> : null}
-        {postprocessTuningSummary ? <small>{postprocessTuningSummary}</small> : null}
-        {cutoutQualitySummary ? <small>{cutoutQualitySummary}</small> : null}
-        {workflowActionText(result.metadata.actions) ? <small>{workflowActionText(result.metadata.actions)}</small> : null}
-        {result.mediaType === "profile" && result.metadata.palette ? <small>{textList(result.metadata.palette)}</small> : null}
-        {result.mediaType === "profile" && result.metadata.texture ? <small>{textList(result.metadata.texture)}</small> : null}
-        {qualityGate ? (
-          <small>
-            {qualityGate.status === "passed" ? "素材约束通过" : qualityGate.status === "rework" ? "需返工" : "需人工复核"} · {qualityGate.score ?? 0} · 输入{" "}
-            {qualityGate.assetInputCount ?? 0}
-          </small>
-        ) : null}
-        {qualityGate?.issues?.[0] ? <small className="quality-issue">{qualityGate.issues[0]}</small> : null}
-        {qualityGate?.nextActions?.[0] ? <small className="quality-action">{qualityGate.nextActions[0]}</small> : null}
-        {failureEvidence?.reason ? <small className="quality-issue">{failureEvidence.reason}</small> : null}
-        {failureEvidence?.nextActions?.[0] ? <small className="quality-action">{failureEvidence.nextActions[0]}</small> : null}
+        {compact ? (
+          <div className="compact-result-tags">
+            <span>{evidence.label}</span>
+            {qualityGate?.status ? <span>{qualityGate.status === "passed" ? "质检通过" : "需复核"}</span> : null}
+            {result.metadata.colors ? <span>{textList(result.metadata.colors)}</span> : null}
+          </div>
+        ) : (
+          <>
+            <div className="generation-evidence">
+              <span>{evidence.label}</span>
+              <small>{evidence.detail}</small>
+            </div>
+            {result.metadata.colors ? <small>{textList(result.metadata.colors)}</small> : null}
+            {fabricInputSummary ? <small>{fabricInputSummary}</small> : null}
+            {fabricAnalysis ? <small>{fabricAnalysis}</small> : null}
+            {styleMatchSummary ? <small>{styleMatchSummary}</small> : null}
+            {styleRecommendation ? <small>{styleRecommendation}</small> : null}
+            {editControlSummary ? <small>{editControlSummary}</small> : null}
+            {virtualModelSummary ? <small>{virtualModelSummary}</small> : null}
+            {tryOnSourceSummary ? <small>{tryOnSourceSummary}</small> : null}
+            {postprocessBatchSummary ? <small>{postprocessBatchSummary}</small> : null}
+            {postprocessTuningSummary ? <small>{postprocessTuningSummary}</small> : null}
+            {cutoutQualitySummary ? <small>{cutoutQualitySummary}</small> : null}
+            {workflowActionText(result.metadata.actions) ? <small>{workflowActionText(result.metadata.actions)}</small> : null}
+            {result.mediaType === "profile" && result.metadata.palette ? <small>{textList(result.metadata.palette)}</small> : null}
+            {result.mediaType === "profile" && result.metadata.texture ? <small>{textList(result.metadata.texture)}</small> : null}
+            {qualityGate ? (
+              <small>
+                {qualityGate.status === "passed" ? "素材约束通过" : qualityGate.status === "rework" ? "需返工" : "需人工复核"} · {qualityGate.score ?? 0} · 输入{" "}
+                {qualityGate.assetInputCount ?? 0}
+              </small>
+            ) : null}
+            {qualityGate?.issues?.[0] ? <small className="quality-issue">{qualityGate.issues[0]}</small> : null}
+            {qualityGate?.nextActions?.[0] ? <small className="quality-action">{qualityGate.nextActions[0]}</small> : null}
+            {failureEvidence?.reason ? <small className="quality-issue">{failureEvidence.reason}</small> : null}
+            {failureEvidence?.nextActions?.[0] ? <small className="quality-action">{failureEvidence.nextActions[0]}</small> : null}
+          </>
+        )}
       </div>
     </article>
   );
@@ -824,16 +1067,21 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
   const postprocessBatchPreview = postprocessBatchPreviewText(postprocessControls, postprocessInputCount);
   const activeTab = workflowTabs.find((tab) => tab.id === active) ?? workflowTabs[0];
   const ActiveIcon = activeTab.icon;
+  const fabricHasFabric = fabricInputs.assets.some((asset) => asset.kind === "fabric");
+  const fabricHasSketch = fabricInputs.assets.some((asset) => asset.kind === "sketch");
+  const visibleHistoryAssets =
+    generatedResults.length > 0
+      ? generatedResults.slice(0, 6).map((item) => ({ sourceUrl: item.imageUrl, name: item.title }))
+      : reusablePostprocessAssets;
 
   return (
-    <main className="workflow-center">
-      {/* 顶部：标题 + 横向模块分段控件 + 说明 */}
+    <main className={`workflow-center workflow-module-shell workflow-module-${active}`}>
       <header className="workflow-topbar">
         <div className="workflow-topbar-title">
-          <h1>AI功能中心</h1>
+          <h1>{activeTab.label}</h1>
           <p>{activeTab.short} → {activeTab.outcome}</p>
         </div>
-        <nav className="workflow-segments" role="tablist" aria-label="AI功能模块">
+        <nav className="workflow-step-tabs workflow-segments" role="tablist" aria-label="AI功能模块">
           {workflowTabs.map((tab) => {
             const Icon = tab.icon;
             return (
@@ -859,7 +1107,7 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
         </nav>
         <button className="workflow-help-trigger" aria-expanded={helpOpen} aria-label="查看功能说明" onClick={() => setHelpOpen((open) => !open)} type="button">
           <HelpCircle size={16} />
-          <span>功能说明</span>
+          <span>使用指南</span>
         </button>
       </header>
 
@@ -869,10 +1117,20 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
         {error ? <div className="workflow-alert">{error}</div> : null}
         <WorkflowFailureNotice job={currentJob} />
 
-        {/* 左栏：素材上传（参考《生成》left-panel 节奏） */}
         <section className="workflow-col workflow-col-left panel-scroll" aria-label="素材上传">
+          <PanelHeading
+            eyebrow={active === "postprocess-suite" ? `3/${Math.max(postprocessInputCount, 1)}` : "输入"}
+            title={active === "fabric-to-style" ? "素材" : active === "virtual-model-showcase" ? "服装来源" : "待处理图片"}
+            action={active === "postprocess-suite" ? <button type="button" className="mini-clear" onClick={() => setPostprocessInputs({ assets: [] })}>清空</button> : null}
+          />
           {active === "fabric-to-style" ? (
             <FieldCard step="素材" icon={<SwatchBook size={15} />} title="面料与草图" hint="不传也能试跑">
+              <InputStatus
+                items={[
+                  { label: fabricHasFabric ? "面料已上传" : "面料可上传", active: fabricHasFabric },
+                  { label: fabricHasSketch ? "草图已上传" : "草图可选", active: fabricHasSketch },
+                ]}
+              />
               <div className="upload-tiles">
                 <UploadTile
                   label="上传面料图片"
@@ -897,6 +1155,7 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
                   onChange={(event) => updateFabricInputs({ textDescription: event.target.value })}
                 />
               </Field>
+              <SourceReadinessCard title="输入提示" detail="支持面料图片、设计草图和文字描述组合使用。" items={["JPG/PNG/WEBP", "草图可选", "默认素材可试跑"]} />
             </FieldCard>
           ) : null}
 
@@ -925,19 +1184,34 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
                   onChange={(event) => updateVirtualModelInputs({ description: event.target.value })}
                 />
               </Field>
+              <SourceReadinessCard
+                title={virtualModelInputs.assets.length > 0 ? "来源已就绪" : "可使用默认来源"}
+                detail={virtualSourceFallbackLabel(virtualModelInputs.sourceType)}
+                items={["保留廓形", "保留面料", "保留关键细节"]}
+              />
             </FieldCard>
           ) : null}
 
           {active === "postprocess-suite" ? (
+            <>
             <FieldCard step="素材" icon={<ImageUp size={15} />} title="待处理图片" hint="可多张；不传复用最近图">
-              <UploadTile
-                label="上传批量图片"
-                hint="支持多张"
-                multiple
-                assets={postprocessInputs.assets}
-                onUpload={handlePostprocessAssetUpload}
-                onClear={() => setPostprocessInputs({ assets: [] })}
+              <div className="postprocess-upload-grid">
+                <UploadTile
+                  label="上传批量图片"
+                  hint="支持多张"
+                  multiple
+                  assets={postprocessInputs.assets}
+                  onUpload={handlePostprocessAssetUpload}
+                  onClear={() => setPostprocessInputs({ assets: [] })}
+                />
+              </div>
+              <SourceReadinessCard
+                title={postprocessInputs.assets.length > 0 ? `已选择 ${postprocessInputs.assets.length} 张` : "可复用最近生成图"}
+                detail={reusablePostprocessAssets.length > 0 ? "检测到可复用素材" : "默认批量演示素材"}
+                items={["可拖拽调整顺序", "单次最多 50 张", "批量交付"]}
               />
+            </FieldCard>
+            <FieldCard step="动作" icon={<Scissors size={15} />} title="后期动作" hint="可多选">
               <Field label="后期动作" hint="点选一个或多个。">
                 <ChipToggleGroup
                   ariaLabel="后期动作"
@@ -947,42 +1221,50 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
                 />
               </Field>
             </FieldCard>
+            </>
           ) : null}
         </section>
 
-        {/* 中栏：设定控件（参考《生成》center-panel 节奏） */}
         <section className="workflow-col workflow-col-center panel-scroll" aria-label={`${activeTab.label}设定`}>
+          <PanelHeading eyebrow="控制" title={active === "fabric-to-style" ? "款式设定" : active === "virtual-model-showcase" ? "模特与场景" : "效果调整"} />
           {active === "fabric-to-style" ? (
             <>
               <FieldCard step="设定" icon={<SlidersHorizontal size={15} />} title="款式设定" hint="点选即可">
-                <Field label="服装品类" hint="可输入自定义，如 coat / shirt / skirt。">
-                  <ComboBox
-                    ariaLabel="服装品类"
-                    options={[{ id: "dress", label: "连衣裙" }, { id: "coat", label: "外套" }, { id: "shirt", label: "衬衫" }, { id: "skirt", label: "半裙" }, { id: "top", label: "上衣" }, { id: "pants", label: "裤装" }]}
-                    value={fabricInputs.garmentCategory}
-                    onChange={(value) => updateFabricInputs({ garmentCategory: value })}
-                    placeholder="输入或选择服装品类"
-                  />
-                </Field>
-                <Field label="面料图案">
-                  <ChipGroup ariaLabel="面料图案" options={fabricPatternOptions.map((option) => ({ id: option.id, label: option.label }))} value={fabricControls.pattern} onChange={(value) => updateFabricControls({ pattern: value })} />
-                </Field>
-                <Field label="主色调" hint="9 种电商常用色，或自定义输入。">
-                  <ComboBox ariaLabel="主色调" options={fabricColorOptions.map((option) => ({ id: option.id, label: option.label }))} value={fabricControls.color} onChange={(value) => updateFabricControls({ color: value })} placeholder="选择或输入颜色" />
-                </Field>
-                <Field label="领口">
-                  <ChipGroup ariaLabel="领口" options={necklineOptions.map((option) => ({ id: option.id, label: option.label }))} value={fabricControls.neckline} onChange={(value) => updateFabricControls({ neckline: value })} />
-                </Field>
-                <Field label={`衣长 · ${hemLengthOptions[optionIndex(hemLengthOptions, fabricControls.hemLength)]?.label}`}>
-                  <input aria-label="衣长" type="range" min="0" max={hemLengthOptions.length - 1} value={optionIndex(hemLengthOptions, fabricControls.hemLength)} onChange={(event) => updateFabricControls({ hemLength: hemLengthOptions[Number(event.target.value)]?.id ?? fabricControls.hemLength })} />
-                </Field>
-                <Field label={`袖长 · ${sleeveLengthOptions[optionIndex(sleeveLengthOptions, fabricControls.sleeveLength)]?.label}`}>
-                  <input aria-label="袖长" type="range" min="0" max={sleeveLengthOptions.length - 1} value={optionIndex(sleeveLengthOptions, fabricControls.sleeveLength)} onChange={(event) => updateFabricControls({ sleeveLength: sleeveLengthOptions[Number(event.target.value)]?.id ?? fabricControls.sleeveLength })} />
-                </Field>
-              </FieldCard>
-
-              <FieldCard step="进阶" icon={<SlidersHorizontal size={15} />} title="可视版型调整" hint="拖拽调比例" collapsible defaultOpen={false}>
-                <FabricPreviewEditor controls={fabricControls} onChange={updateFabricControls} />
+                <div className="fabric-design-grid">
+                  <div className="fabric-control-stack">
+                    <Field label="服装品类" hint="可输入自定义，如 coat / shirt / skirt。">
+                      <ComboBox
+                        ariaLabel="服装品类"
+                        options={[{ id: "dress", label: "连衣裙" }, { id: "coat", label: "外套" }, { id: "shirt", label: "衬衫" }, { id: "skirt", label: "半裙" }, { id: "top", label: "上衣" }, { id: "pants", label: "裤装" }]}
+                        value={fabricInputs.garmentCategory}
+                        onChange={(value) => updateFabricInputs({ garmentCategory: value })}
+                        placeholder="输入或选择服装品类"
+                      />
+                    </Field>
+                    <Field label="面料图案">
+                      <ChipGroup ariaLabel="面料图案" options={fabricPatternOptions.slice(0, 6).map((option) => ({ id: option.id, label: option.label }))} value={fabricControls.pattern} onChange={(value) => updateFabricControls({ pattern: value })} />
+                    </Field>
+                    <Field label="主色调" hint="常用电商色板，可继续自定义。">
+                      <ColorOptionGroup ariaLabel="主色调" options={fabricColorOptions.slice(0, 5).map((option) => ({ id: option.id, label: option.label }))} value={fabricControls.color} onChange={(value) => updateFabricControls({ color: value })} />
+                    </Field>
+                    <Field label="领口">
+                      <ChipGroup ariaLabel="领口" options={necklineOptions.slice(0, 4).map((option) => ({ id: option.id, label: option.label }))} value={fabricControls.neckline} onChange={(value) => updateFabricControls({ neckline: value })} />
+                    </Field>
+                    <Field label={`衣长 · ${hemLengthOptions[optionIndex(hemLengthOptions, fabricControls.hemLength)]?.label}`}>
+                      <input aria-label="衣长" type="range" min="0" max={hemLengthOptions.length - 1} value={optionIndex(hemLengthOptions, fabricControls.hemLength)} onChange={(event) => updateFabricControls({ hemLength: hemLengthOptions[Number(event.target.value)]?.id ?? fabricControls.hemLength })} />
+                    </Field>
+                    <Field label={`袖长 · ${sleeveLengthOptions[optionIndex(sleeveLengthOptions, fabricControls.sleeveLength)]?.label}`}>
+                      <input aria-label="袖长" type="range" min="0" max={sleeveLengthOptions.length - 1} value={optionIndex(sleeveLengthOptions, fabricControls.sleeveLength)} onChange={(event) => updateFabricControls({ sleeveLength: sleeveLengthOptions[Number(event.target.value)]?.id ?? fabricControls.sleeveLength })} />
+                    </Field>
+                  </div>
+                  <div className="fabric-outline-panel">
+                    <div className="fabric-outline-head">
+                      <strong>款式轮廓编辑</strong>
+                      <button type="button" onClick={() => updateFabricControls(defaultFabricControls)}>重置</button>
+                    </div>
+                    <FabricPreviewEditor controls={fabricControls} onChange={updateFabricControls} />
+                  </div>
+                </div>
               </FieldCard>
 
               <div className="run-bar">
@@ -1011,6 +1293,19 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
                 <div className="virtual-model-profile" aria-label="虚拟模特资料">
                   <strong>{modelProfileText(virtualModelControls.modelId, activeModelOptions)}</strong>
                   <span>{visibleModelOptions.length} 个可商用画像</span>
+                </div>
+                <div className="model-portrait-rail" aria-label="虚拟模特缩略图">
+                  {visibleModelOptions.slice(0, 6).map((model) => (
+                    <button
+                      type="button"
+                      key={model.id}
+                      className={model.id === virtualModelControls.modelId ? "selected" : ""}
+                      onClick={() => selectVirtualModel(model.id)}
+                    >
+                      <PreviewImage kind="result" note="" alt={model.label} />
+                      <span>{model.label}</span>
+                    </button>
+                  ))}
                 </div>
                 <Field label="展示场景" hint="可输入自定义，如海边、咖啡馆。">
                   <ComboBox ariaLabel="展示场景" options={sceneControlOptions.map((option) => ({ id: option.id, label: option.label }))} value={virtualModelControls.sceneId} onChange={(value) => updateVirtualModelControls({ sceneId: value })} placeholder="选择或输入场景" />
@@ -1044,7 +1339,7 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
                   <span>{postprocessBatchPreview}</span>
                 </div>
                 <Field label="目标颜色">
-                  <ChipGroup ariaLabel="目标颜色" options={targetColorOptions.map((option) => ({ id: option.id, label: option.label }))} value={postprocessControls.targetColor} onChange={(value) => updatePostprocessControls({ targetColor: value })} />
+                  <ColorOptionGroup ariaLabel="目标颜色" options={targetColorOptions.slice(0, 6).map((option) => ({ id: option.id, label: option.label }))} value={postprocessControls.targetColor} onChange={(value) => updatePostprocessControls({ targetColor: value })} />
                 </Field>
                 <Field label="输出比例">
                   <ChipGroup ariaLabel="输出比例" options={targetRatioOptions.map((option) => ({ id: option.id, label: option.label }))} value={postprocessControls.targetRatio} onChange={(value) => updatePostprocessControls({ targetRatio: value })} />
@@ -1072,28 +1367,19 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
           ) : null}
         </section>
 
-        {/* 右栏：结果 + 前序历史/引导（参考《生成》right-panel，始终有内容） */}
         <section className="workflow-col workflow-col-right panel-scroll" aria-label={`${activeTab.label}结果`}>
-          <div className="workflow-output-head">
-            <ActiveIcon size={16} />
-            <strong>{activeTab.label} · 结果</strong>
-          </div>
+          <PanelHeading eyebrow="输出" title="结果" action={<ActiveIcon size={16} />} />
           <WorkflowSteps job={currentJob} />
-          {currentJob ? (
-            <div className="workflow-results-grid">
-              {currentJob.results.map((result) => (
-                <ResultCard result={result} key={result.id} />
-              ))}
-            </div>
-          ) : null}
+          <WorkflowResultArea active={active} job={currentJob} />
+          <WorkflowOutputActions variant={active === "postprocess-suite" ? "postprocess" : "default"} />
 
           <div className="workflow-history-head">
             <Layers3 size={14} />
             <strong>历史与可复用素材</strong>
           </div>
-          {reusablePostprocessAssets.length > 0 || generatedResults.length > 0 ? (
+          {visibleHistoryAssets.length > 0 ? (
             <div className="workflow-history-grid">
-              {(generatedResults.slice(0, 6).map((item) => ({ sourceUrl: item.imageUrl, name: item.title })) || reusablePostprocessAssets).map((asset, index) => (
+              {visibleHistoryAssets.map((asset, index) => (
                 <figure key={`${asset.sourceUrl}-${index}`} className="history-thumb">
                   <img src={asset.sourceUrl} alt={asset.name} loading="lazy" />
                   <figcaption>{asset.name}</figcaption>
