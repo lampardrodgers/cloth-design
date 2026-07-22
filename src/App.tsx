@@ -1,11 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Archive,
   ClipboardList,
+  Coins,
   Images,
   LayoutDashboard,
+  LoaderCircle,
+  LogOut,
   Sparkles,
   UserCog,
+  X,
 } from "lucide-react";
 import {
   creditPolicy as defaultCreditPolicy,
@@ -62,11 +67,17 @@ import { StudioWorkspace } from "./components/StudioWorkspace";
 import { TaskRail } from "./components/TaskRail";
 import { WorkflowCenter } from "./components/WorkflowCenter";
 
-const navigation: Array<{ id: ViewKey; label: string; icon: typeof Images }> = [
-  { id: "studio", label: "生成", icon: Images },
-  { id: "workflows", label: "功能", icon: Sparkles },
-  { id: "account", label: "账户", icon: UserCog },
-  { id: "storage", label: "存储", icon: Archive },
+const navigation: Array<{
+  id: ViewKey;
+  label: string;
+  displayLabel: string;
+  description: string;
+  icon: typeof Images;
+}> = [
+  { id: "studio", label: "生成", displayLabel: "开始创作", description: "图片生成", icon: Images },
+  { id: "workflows", label: "功能", displayLabel: "更多工具", description: "专项流程", icon: Sparkles },
+  { id: "account", label: "账户", displayLabel: "账户与积分", description: "套餐明细", icon: UserCog },
+  { id: "storage", label: "存储", displayLabel: "文件管理", description: "保存归档", icon: Archive },
 ];
 
 const initialSystemPrompts = generationModes.reduce((map, mode) => {
@@ -127,6 +138,7 @@ function useStoredState<T>(key: string, fallback: T) {
 }
 
 const referenceAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+const legacyDemoTaskIds = new Set(["task-1027", "task-1028"]);
 
 function orderedReferenceLabel(index: number) {
   return referenceAlphabet[index] ?? `${index + 1}`;
@@ -173,8 +185,13 @@ function App() {
   const [path, setPath] = useState(() => window.location.pathname);
   const [settings, setSettings] = useStoredState<StudioSettings>("clothdesign:settings", initialSettings);
   const [references, setReferences] = useState<ReferenceImage[]>(initialReferences);
-  const [prompt, setPrompt] = useState(generationModes.find((mode) => mode.id === initialSettings.mode)?.promptStarter ?? "");
+  const [prompt, setPrompt] = useState(
+    generationModes.find((mode) => mode.id === settings.mode)?.promptStarter ?? generationModes[0].promptStarter,
+  );
+  const [modeDrafts, setModeDrafts] = useStoredState<Partial<Record<ModeKey, string>>>("clothdesign:modeDrafts", {});
   const [optimizationNotice, setOptimizationNotice] = useState("");
+  const [generationSubmitting, setGenerationSubmitting] = useState(false);
+  const generationLockRef = useRef(false);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [tasks, setTasks] = useStoredState<GenerationTask[]>("clothdesign:tasks", initialTasks);
   const [results, setResults] = useStoredState<GeneratedResult[]>("clothdesign:results", []);
@@ -208,9 +225,25 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!taskMenuOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setTaskMenuOpen(false);
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [taskMenuOpen]);
+
+  useEffect(() => {
+    setTasks((items) => {
+      const realTasks = items.filter((task) => !legacyDemoTaskIds.has(task.id));
+      return realTasks.length === items.length ? items : realTasks;
+    });
+  }, []);
+
+  useEffect(() => {
     const mode = generationModes.find((item) => item.id === settings.mode);
     if (mode) {
-      setPrompt((current) => (current.trim().length > 0 ? current : mode.promptStarter));
+      setPrompt((current) => modeDrafts[mode.id] ?? (current.trim().length > 0 ? current : mode.promptStarter));
       setReferences((current) => normalizeModeReferences(current, mode.requiredRefs));
     }
   }, [settings.mode]);
@@ -289,19 +322,26 @@ function App() {
 
   const handleModePrompt = (modeId: StudioSettings["mode"]) => {
     const mode = generationModes.find((item) => item.id === modeId);
+    setModeDrafts((current) => ({ ...current, [settings.mode]: prompt }));
     handleSettingsChange({ mode: modeId });
     if (mode) {
-      setPrompt(mode.promptStarter);
+      setPrompt(modeDrafts[modeId] ?? mode.promptStarter);
       setReferences((current) => normalizeModeReferences(current, mode.requiredRefs));
     }
+    setOptimizationNotice("");
   };
 
   const handleOptimize = () => {
-    setPrompt(buildEditablePrompt(prompt, activeMode, references, settings));
+    const optimizedPrompt = buildEditablePrompt(prompt, activeMode, references, settings);
+    setPrompt(optimizedPrompt);
+    setModeDrafts((current) => ({ ...current, [settings.mode]: optimizedPrompt }));
     setOptimizationNotice("已按当前功能、参考图关系和商业出图质量补齐提示词。");
   };
 
   const handleGenerate = async (mode: GenerationMode, cost: number) => {
+    if (generationLockRef.current) return;
+    generationLockRef.current = true;
+    setGenerationSubmitting(true);
     const ratio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
     const taskId = `task-${Date.now()}`;
     const taskPrompt = prompt.trim() || mode.promptStarter;
@@ -390,12 +430,15 @@ function App() {
       );
     } finally {
       window.clearTimeout(progressTimer);
+      generationLockRef.current = false;
+      setGenerationSubmitting(false);
     }
   };
 
   const handleRetryTask = (task: GenerationTask) => {
     const mode = generationModes.find((item) => item.id === task.mode) ?? generationModes[0];
     setPrompt(task.prompt);
+    setModeDrafts((current) => ({ ...current, [mode.id]: task.prompt }));
     setSettings((current) => ({ ...current, mode: mode.id }));
     setView("studio");
     setTaskMenuOpen(false);
@@ -483,9 +526,11 @@ function App() {
           user={currentUser}
           creditPolicy={creditPolicy}
           optimizationNotice={optimizationNotice}
+          isGenerating={generationSubmitting}
           onSettingsChange={(patch) => (patch.mode ? handleModePrompt(patch.mode) : handleSettingsChange(patch))}
           onPromptChange={(value) => {
             setPrompt(value);
+            setModeDrafts((current) => ({ ...current, [settings.mode]: value }));
             setOptimizationNotice("");
           }}
           onReferencesChange={setReferences}
@@ -494,6 +539,7 @@ function App() {
           onUseAsReference={setReferences}
           onSyncResult={handleSyncResult}
           onDeleteResult={handleDeleteResult}
+          onOpenAccount={() => setView("account")}
         />
       );
     }
@@ -527,8 +573,16 @@ function App() {
     );
   };
 
+  const activeNavigationItem = navigation.find((item) => item.id === view) ?? navigation[0];
+
   if (authLoading) {
-    return <main className="auth-shell">正在加载账号...</main>;
+    return (
+      <main className="auth-shell app-loading" aria-live="polite">
+        <span className="app-loading-icon"><LoaderCircle className="spin" size={24} /></span>
+        <strong>正在打开创作台</strong>
+        <span>马上就好…</span>
+      </main>
+    );
   }
 
   if (!currentUser) {
@@ -634,53 +688,95 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <LayoutDashboard size={18} />
-          <strong>ClothDesign AI</strong>
-        </div>
-        <div className="top-status">
-          <span>{activeMode.title}</span>
-          <span>{providerHealth?.label ?? (apiConfig?.mode === "live" ? "图像引擎就绪" : "演示模式")}</span>
-          <span className="credit-pill">{currentUser.credits} 积分</span>
-          <button className="task-menu-button" onClick={handleSignOut}>
-            <span>退出</span>
-          </button>
-          <button className="task-menu-button" onClick={() => setTaskMenuOpen((open) => !open)} aria-expanded={taskMenuOpen}>
-            <ClipboardList size={16} />
-            <span>任务</span>
-            {runningTasks > 0 ? <em>{runningTasks}</em> : null}
-          </button>
-          {taskMenuOpen ? (
-            <div className="task-popover">
-              <TaskRail tasks={tasks} results={results} onRetry={handleRetryTask} />
+    <>
+      <div className="app-shell">
+        <header className="topbar">
+          <div className="topbar-brand-group">
+            <div className="brand">
+              <span className="brand-mark" aria-hidden="true"><Sparkles size={18} /></span>
+              <span className="brand-copy">
+                <strong>ClothDesign AI</strong>
+                <small>服装视觉工作台</small>
+              </span>
             </div>
-          ) : null}
-        </div>
-      </header>
+            <div className="topbar-context">
+              <span>{activeNavigationItem.description}</span>
+              <strong>{activeNavigationItem.displayLabel}</strong>
+            </div>
+          </div>
 
-      <div className="app-body">
-        <nav className="rail" aria-label="主导航">
-          {navigation.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.id}
-                className={view === item.id ? "active" : ""}
-                onClick={() => setView(item.id)}
-                aria-label={item.label}
-                title={item.label}
-              >
-                <Icon size={19} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        {renderView()}
+          <div className="top-status">
+            <span className={`engine-status ${providerHealth?.blocking ? "blocked" : "ready"}`}>
+              <i aria-hidden="true" />
+              {providerHealth?.label ?? (apiConfig?.mode === "live" ? "图像服务已就绪" : "演示模式")}
+            </span>
+            <button className="credit-button" onClick={() => setView("account")} aria-label={`账户余额 ${currentUser.credits} 积分`}>
+              <Coins size={16} />
+              <span><strong>{currentUser.credits}</strong> 积分</span>
+            </button>
+            <button
+              className="task-menu-button"
+              onClick={() => setTaskMenuOpen((open) => !open)}
+              aria-expanded={taskMenuOpen}
+              aria-label="任务"
+            >
+              <ClipboardList size={16} />
+              <span>任务</span>
+              {runningTasks > 0 ? <em>{runningTasks}</em> : null}
+            </button>
+            <span className="user-summary" title={currentUser.name}>
+              <i>{currentUser.name.trim().charAt(0) || "我"}</i>
+              <span>{currentUser.name}</span>
+            </span>
+            <button className="signout-button" onClick={handleSignOut} aria-label="退出">
+              <LogOut size={16} />
+              <span>退出</span>
+            </button>
+            {taskMenuOpen ? (
+              <div className="task-popover">
+                <TaskRail tasks={tasks} results={results} onRetry={handleRetryTask} />
+              </div>
+            ) : null}
+          </div>
+        </header>
+
+        <div className="app-body">
+          <nav className="rail" aria-label="主导航">
+            {navigation.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  className={view === item.id ? "active" : ""}
+                  onClick={() => {
+                    setView(item.id);
+                    setTaskMenuOpen(false);
+                  }}
+                  aria-label={item.displayLabel}
+                  aria-current={view === item.id ? "page" : undefined}
+                  title={item.label}
+                >
+                  <span className="rail-icon"><Icon size={19} /></span>
+                  <span className="rail-copy">
+                    <strong>{item.displayLabel}</strong>
+                    <small>{item.description}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
+          {renderView()}
+        </div>
       </div>
-    </div>
+
+      {authError && !authError.includes("请先登录") ? (
+        <div className="global-notice" role="alert">
+          <AlertTriangle size={17} />
+          <span>{authError}</span>
+          <button type="button" onClick={() => setAuthError("")} aria-label="关闭提示"><X size={15} /></button>
+        </div>
+      ) : null}
+    </>
   );
 }
 

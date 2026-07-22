@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Clock3, ImageIcon, RotateCcw } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock3, ImageIcon, Inbox, RotateCcw } from "lucide-react";
 import { generationModes } from "../data/catalog";
 import type { GeneratedResult, GenerationTask, TaskStatus } from "../types";
 import { Button, Metric, Section } from "./ui";
@@ -41,13 +41,20 @@ export function TaskRail({ tasks, results = [], onRetry }: TaskRailProps) {
   const failed = tasks.filter((task) => task.status === "failed").length;
 
   return (
-    <Section title="任务" className="task-section">
+    <Section title="生成任务" className="task-section">
       <div className="metric-row">
         <Metric label="运行中" value={`${running}`} tone="warn" />
         <Metric label="成功" value={`${success}`} tone="good" />
         <Metric label="失败" value={`${failed}`} />
       </div>
       <div className="task-list">
+        {tasks.length === 0 ? (
+          <div className="empty-task-list">
+            <Inbox size={24} />
+            <strong>还没有生成任务</strong>
+            <span>开始第一次创作后，这里会显示真实进度和结果。</span>
+          </div>
+        ) : null}
         {tasks.map((task) => {
           const mode = generationModes.find((item) => item.id === task.mode);
           const preview = results.find((result) => result.taskId === task.id);
@@ -72,7 +79,7 @@ export function TaskRail({ tasks, results = [], onRetry }: TaskRailProps) {
                 </div>
                 <small>{displayTaskMessage(task.message)}</small>
                 {task.status === "failed" ? (
-                  <Button icon={<RotateCcw size={14} />} onClick={() => onRetry(task)}>重试</Button>
+                  <Button icon={<RotateCcw size={14} />} onClick={() => onRetry(task)}>恢复设置</Button>
                 ) : null}
               </div>
             </article>

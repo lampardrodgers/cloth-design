@@ -1,159 +1,228 @@
-import { Check, Layers, SlidersHorizontal } from "lucide-react";
+import { Check, Settings2, SlidersHorizontal } from "lucide-react";
 import { ratioOptions, resolutionOptions } from "../data/catalog";
 import type { BackgroundMode, ModerationMode, OutputFormat, QualityKey, StudioSettings } from "../types";
-import { Section } from "./ui";
+import { NumberStepper } from "./ui";
 
 interface ParameterPanelProps {
   settings: StudioSettings;
   onChange: (patch: Partial<StudioSettings>) => void;
 }
 
-const qualities: QualityKey[] = ["auto", "low", "medium", "high"];
-const formats: OutputFormat[] = ["png", "jpeg", "webp"];
-const backgrounds: BackgroundMode[] = ["auto", "opaque", "transparent"];
-const moderations: ModerationMode[] = ["auto", "low"];
+const qualityLabels: Record<QualityKey, string> = {
+  auto: "智能选择",
+  low: "快速预览",
+  medium: "标准成片",
+  high: "精细成片",
+};
+
+const formatLabels: Record<OutputFormat, string> = {
+  png: "PNG · 细节完整",
+  jpeg: "JPEG · 文件较小",
+  webp: "WebP · 适合网页",
+};
+
+const backgroundLabels: Record<BackgroundMode, string> = {
+  auto: "自动匹配",
+  opaque: "保留实色背景",
+  transparent: "透明背景",
+};
+
+const moderationLabels: Record<ModerationMode, string> = {
+  auto: "标准审核",
+  low: "宽松审核",
+};
+
+const resolutionLabels: Record<StudioSettings["resolution"], string> = {
+  native: "标准",
+  hd: "高清",
+  fourK: "4K",
+};
+
+const resolutionDescriptions: Record<StudioSettings["resolution"], string> = {
+  native: "适合快速预览和日常使用",
+  hd: "适合电商详情页与社媒发布",
+  fourK: "适合海报和大尺寸交付",
+};
 
 export function ParameterPanel({ settings, onChange }: ParameterPanelProps) {
   const currentRatio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
 
   return (
-    <Section title="参数" action={<SlidersHorizontal size={17} />}>
-      <div className="param-stack">
-        <label className="field">
-          <span>分辨率</span>
-          <select value={settings.resolution} onChange={(event) => onChange({ resolution: event.target.value as StudioSettings["resolution"] })}>
+    <section className="section flow-section parameter-section" aria-labelledby="parameter-heading">
+      <header className="flow-section-head">
+        <span className="flow-step-index" aria-hidden="true">4</span>
+        <div className="flow-section-copy">
+          <span className="flow-kicker">成片设置</span>
+          <h2 id="parameter-heading" aria-label="参数">确认尺寸与数量</h2>
+          <p>已经为你选好常用配置；只有交付要求不同的时候才需要调整。</p>
+        </div>
+        <span className="parameter-summary">
+          {resolutionLabels[settings.resolution]} · {currentRatio.label} · {settings.quantity} 张
+        </span>
+      </header>
+
+      <div className="parameter-grid">
+        <label className="field setting-card">
+          <span>清晰度</span>
+          <select
+            aria-label="分辨率"
+            value={settings.resolution}
+            onChange={(event) => onChange({ resolution: event.target.value as StudioSettings["resolution"] })}
+          >
             {resolutionOptions.map((option) => (
               <option value={option.id} key={option.id}>
-                {option.label} - {option.detail}
+                {option.id === "native"
+                  ? "标准 · 快速预览"
+                  : option.id === "hd"
+                    ? "高清 · 电商与社媒"
+                    : "4K · 大图交付"}
               </option>
             ))}
           </select>
-          <small>这是交付档位：原生直接调用模型尺寸；高清/4K 会后处理放大，并自动限制可选长宽比。</small>
+          <small>{resolutionDescriptions[settings.resolution]}</small>
         </label>
 
-        <div className="field">
-          <span>长宽比</span>
-          <div className="ratio-list" role="listbox" aria-label="长宽比">
+        <div className="field setting-card quantity-field">
+          <span>生成张数</span>
+          <NumberStepper
+            ariaLabel="数量"
+            min={1}
+            max={10}
+            value={settings.quantity}
+            onChange={(quantity) => onChange({ quantity })}
+          />
+          <small>一次最多生成 10 张</small>
+        </div>
+
+        <div className="field setting-card ratio-field">
+          <span>画面比例</span>
+          <div className="ratio-list" role="radiogroup" aria-label="长宽比">
             {ratioOptions.map((ratio) => {
               const disabled = !ratio.allowedResolutions.includes(settings.resolution);
               return (
                 <button
+                  type="button"
+                  role="radio"
+                  aria-checked={settings.ratioId === ratio.id}
                   key={ratio.id}
                   className={`ratio-option ${settings.ratioId === ratio.id ? "active" : ""}`}
                   disabled={disabled}
                   onClick={() => onChange({ ratioId: ratio.id })}
-                  title={disabled ? "当前分辨率不可用" : ratio.native ? "API 原生比例" : "后处理比例"}
+                  title={disabled ? "当前清晰度不支持这个比例" : undefined}
                 >
                   <span className="ratio-box" style={{ aspectRatio: `${ratio.width} / ${ratio.height}` }} />
                   <span>{ratio.label}</span>
-                  {settings.ratioId === ratio.id ? <Check size={13} /> : null}
+                  {settings.ratioId === ratio.id ? <Check size={13} aria-hidden="true" /> : null}
                 </button>
               );
             })}
           </div>
         </div>
 
-        <div className="api-note">
-          <Layers size={15} />
-          <span>前台隐藏模型；后台映射到图像引擎。API size: {currentRatio.apiSize}</span>
-        </div>
+        <label className="field setting-card">
+          <span>成片质量</span>
+          <select value={settings.quality} onChange={(event) => onChange({ quality: event.target.value as QualityKey })}>
+            {(Object.keys(qualityLabels) as QualityKey[]).map((quality) => (
+              <option key={quality} value={quality}>{qualityLabels[quality]}</option>
+            ))}
+          </select>
+          <small>质量越高，细节越丰富</small>
+        </label>
 
-        <div className="two-col">
-          <label className="field">
-            <span>质量</span>
-            <select value={settings.quality} onChange={(event) => onChange({ quality: event.target.value as QualityKey })}>
-              {qualities.map((quality) => (
-                <option key={quality} value={quality}>
-                  {quality}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>数量</span>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={settings.quantity}
-              onChange={(event) => onChange({ quantity: Number(event.target.value) })}
-            />
-          </label>
-        </div>
+        <label className="field setting-card">
+          <span>背景处理</span>
+          <select
+            value={settings.background}
+            onChange={(event) => onChange({ background: event.target.value as BackgroundMode })}
+          >
+            {(Object.keys(backgroundLabels) as BackgroundMode[]).map((background) => (
+              <option key={background} value={background}>{backgroundLabels[background]}</option>
+            ))}
+          </select>
+          <small>商品主图可选择透明背景</small>
+        </label>
 
-        <div className="two-col">
-          <label className="field">
-            <span>格式</span>
-            <select value={settings.outputFormat} onChange={(event) => onChange({ outputFormat: event.target.value as OutputFormat })}>
-              {formats.map((format) => (
-                <option key={format} value={format}>
-                  {format}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>背景</span>
-            <select value={settings.background} onChange={(event) => onChange({ background: event.target.value as BackgroundMode })}>
-              {backgrounds.map((background) => (
-                <option key={background} value={background}>
-                  {background}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+        <label className="field setting-card">
+          <span>文件格式</span>
+          <select
+            value={settings.outputFormat}
+            onChange={(event) => onChange({ outputFormat: event.target.value as OutputFormat })}
+          >
+            {(Object.keys(formatLabels) as OutputFormat[]).map((format) => (
+              <option key={format} value={format}>{formatLabels[format]}</option>
+            ))}
+          </select>
+          <small>不确定时保留 PNG 即可</small>
+        </label>
+      </div>
 
-        {settings.outputFormat !== "png" ? (
-          <label className="field">
-            <span>压缩</span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={settings.compression}
-              onChange={(event) => onChange({ compression: Number(event.target.value) })}
-            />
-          </label>
-        ) : null}
+      <details className="advanced-settings">
+        <summary><Settings2 size={15} aria-hidden="true" /> 更多专业设置</summary>
+        <div className="advanced-settings-body">
+          {settings.outputFormat !== "png" ? (
+            <label className="field">
+              <span>文件压缩程度：{settings.compression}%</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={settings.compression}
+                onChange={(event) => onChange({ compression: Number(event.target.value) })}
+              />
+            </label>
+          ) : null}
 
-        <details className="advanced-settings">
-          <summary>高级参数</summary>
           <div className="two-col">
             <label className="field">
-              <span>安全审核</span>
-              <select value={settings.moderation} onChange={(event) => onChange({ moderation: event.target.value as ModerationMode })}>
-                {moderations.map((moderation) => (
-                  <option key={moderation} value={moderation}>
-                    {moderation}
-                  </option>
+              <span>内容审核</span>
+              <select
+                value={settings.moderation}
+                onChange={(event) => onChange({ moderation: event.target.value as ModerationMode })}
+              >
+                {(Object.keys(moderationLabels) as ModerationMode[]).map((moderation) => (
+                  <option key={moderation} value={moderation}>{moderationLabels[moderation]}</option>
                 ))}
               </select>
-              <small>auto 使用默认安全策略；low 更少拦截但仍保留基础安全检查。</small>
+              <small>建议保持标准审核。</small>
             </label>
             <label className="field">
-              <span>参考图保真</span>
-              <select value={settings.inputFidelity} onChange={(event) => onChange({ inputFidelity: event.target.value as "standard" | "high" })}>
-                <option value="standard">standard</option>
-                <option value="high">high</option>
+              <span>跟随参考图的程度</span>
+              <select
+                value={settings.inputFidelity}
+                onChange={(event) => onChange({ inputFidelity: event.target.value as "standard" | "high" })}
+              >
+                <option value="standard">自然参考</option>
+                <option value="high">严格跟随</option>
               </select>
-              <small>high 会更严格跟随参考图，适合换衣、主图、融合。</small>
+              <small>换衣、主图和融合任务可选择严格跟随。</small>
             </label>
           </div>
 
           <div className="switch-row">
             <label>
-              <input type="checkbox" checked={settings.streamPreview} onChange={(event) => onChange({ streamPreview: event.target.checked })} />
-              <span>流式预览</span>
+              <input
+                type="checkbox"
+                checked={settings.streamPreview}
+                onChange={(event) => onChange({ streamPreview: event.target.checked })}
+              />
+              <span>生成时显示预览</span>
             </label>
             <label>
-              <input type="checkbox" checked={settings.preserveIdentity} onChange={(event) => onChange({ preserveIdentity: event.target.checked })} />
-              <span>锁定人物一致</span>
+              <input
+                type="checkbox"
+                checked={settings.preserveIdentity}
+                onChange={(event) => onChange({ preserveIdentity: event.target.checked })}
+              />
+              <span>保持人物长相与身形</span>
             </label>
           </div>
-          <p className="field-help">锁定人物一致会把脸、发型、身形写入内部提示词，主要服务于模特换衣和多图融合。</p>
-        </details>
-      </div>
-    </Section>
+
+          <div className="api-note">
+            <SlidersHorizontal size={15} aria-hidden="true" />
+            <span>系统会根据这些选择自动匹配合适的图像引擎与输出尺寸。</span>
+          </div>
+        </div>
+      </details>
+    </section>
   );
 }

@@ -253,28 +253,9 @@ export const creditPolicy: CreditPolicy = {
   failureRefundRate: 1,
 };
 
-export const initialTasks: GenerationTask[] = [
-  {
-    id: "task-1027",
-    mode: "tryon",
-    prompt: "参考A模特穿参考B风衣，棚拍。",
-    status: "success",
-    progress: 100,
-    credits: 42,
-    createdAt: "16:34",
-    message: "已同步到 WebDAV",
-  },
-  {
-    id: "task-1028",
-    mode: "campaign",
-    prompt: "春季新品广告图，留白投放。",
-    status: "failed",
-    progress: 100,
-    credits: 0,
-    createdAt: "16:38",
-    message: "参考图缺少服装主体，积分已退回",
-  },
-];
+// New accounts start with a truthful empty task list. Real tasks are added by the
+// generation lifecycle and restored from local storage for returning users.
+export const initialTasks: GenerationTask[] = [];
 
 export const initialUsers: UserAccount[] = [
   {

@@ -283,9 +283,21 @@ interface FieldCardProps {
  */
 export function FieldCard({ index, step, icon, title, hint, children, collapsible = false, defaultOpen = true, footer }: FieldCardProps) {
   const [open, setOpen] = useState(defaultOpen);
+  const toggleFromKeyboard = (event: KeyboardEvent<HTMLElement>) => {
+    if (!collapsible || !["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    setOpen((current) => !current);
+  };
   return (
     <section className={`field-card${collapsible ? " collapsible" : ""}${open ? "" : " collapsed"}`}>
-      <header className="field-card-head" role={collapsible ? "button" : undefined} tabIndex={collapsible ? 0 : undefined} onClick={collapsible ? () => setOpen((current) => !current) : undefined}>
+      <header
+        className="field-card-head"
+        role={collapsible ? "button" : undefined}
+        tabIndex={collapsible ? 0 : undefined}
+        aria-expanded={collapsible ? open : undefined}
+        onClick={collapsible ? () => setOpen((current) => !current) : undefined}
+        onKeyDown={collapsible ? toggleFromKeyboard : undefined}
+      >
         <div className="field-card-title">
           {index ? <span className="field-card-index">{index}</span> : null}
           {step ? <span className="field-card-step">{step}</span> : null}

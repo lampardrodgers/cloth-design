@@ -596,12 +596,13 @@ function SourceReadinessCard({
 }
 
 function WorkflowOutputActions({ variant = "default" }: { variant?: "default" | "postprocess" }) {
+  const unavailableTitle = "该操作尚未接入，暂不可用";
   return (
-    <div className="workflow-output-actions">
-      <Button icon={<RefreshCcw size={14} />}>继续编辑</Button>
-      <Button icon={<Bookmark size={14} />}>{variant === "postprocess" ? "作为参考" : "作为后期素材"}</Button>
-      <Button icon={<Download size={14} />}>{variant === "postprocess" ? "下载全部" : "下载"}</Button>
-      <Button icon={<Cloud size={14} />}>{variant === "postprocess" ? "同步 WebDAV" : "WebDAV"}</Button>
+    <div className="workflow-output-actions" aria-label="结果操作暂不可用">
+      <Button icon={<RefreshCcw size={14} />} disabled title={unavailableTitle}>继续编辑</Button>
+      <Button icon={<Bookmark size={14} />} disabled title={unavailableTitle}>{variant === "postprocess" ? "作为参考" : "作为后期素材"}</Button>
+      <Button icon={<Download size={14} />} disabled title={unavailableTitle}>{variant === "postprocess" ? "下载全部" : "下载"}</Button>
+      <Button icon={<Cloud size={14} />} disabled title={unavailableTitle}>{variant === "postprocess" ? "同步 WebDAV" : "WebDAV"}</Button>
     </div>
   );
 }
@@ -697,9 +698,25 @@ function WorkflowResultArea({ active, job }: { active: CoreWorkflowType; job?: W
     );
   }
 
-  if (active === "virtual-model-showcase") return <VirtualFallbackResults />;
-  if (active === "postprocess-suite") return <PostprocessFallbackResults />;
-  return <FabricFallbackResults />;
+  const examplePreview =
+    active === "virtual-model-showcase"
+      ? <VirtualFallbackResults />
+      : active === "postprocess-suite"
+        ? <PostprocessFallbackResults />
+        : <FabricFallbackResults />;
+
+  return (
+    <div className="workflow-example-preview" aria-label="示例预览">
+      <div className="source-readiness-card workflow-example-notice" role="note">
+        <CircleAlert size={17} />
+        <div>
+          <strong>示例预览</strong>
+          <span>尚未生成真实结果，以下图片仅用于说明输出形式。</span>
+        </div>
+      </div>
+      {examplePreview}
+    </div>
+  );
 }
 
 function ModuleHelpPopover({ active, onClose }: { active: CoreWorkflowType; onClose: () => void }) {
