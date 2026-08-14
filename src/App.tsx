@@ -1,17 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  AlertTriangle,
-  Archive,
-  ClipboardList,
-  Coins,
-  Images,
-  LayoutDashboard,
-  LoaderCircle,
-  LogOut,
-  Sparkles,
-  UserCog,
-  X,
-} from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   creditPolicy as defaultCreditPolicy,
   generationModes,
@@ -62,6 +49,7 @@ import type {
 import { AccountPanel } from "./components/AccountPanel";
 import { AdminPanel } from "./components/AdminPanel";
 import { AuthPanel } from "./components/AuthPanel";
+import { ReferencePanel } from "./components/ReferencePanel";
 import { StoragePanel } from "./components/StoragePanel";
 import { StudioWorkspace } from "./components/StudioWorkspace";
 import { TaskRail } from "./components/TaskRail";
@@ -72,12 +60,11 @@ const navigation: Array<{
   label: string;
   displayLabel: string;
   description: string;
-  icon: typeof Images;
 }> = [
-  { id: "studio", label: "生成", displayLabel: "开始创作", description: "图片生成", icon: Images },
-  { id: "workflows", label: "功能", displayLabel: "更多工具", description: "专项流程", icon: Sparkles },
-  { id: "account", label: "账户", displayLabel: "账户与积分", description: "套餐明细", icon: UserCog },
-  { id: "storage", label: "存储", displayLabel: "文件管理", description: "保存归档", icon: Archive },
+  { id: "studio", label: "生成", displayLabel: "开始创作", description: "图片生成" },
+  { id: "workflows", label: "功能", displayLabel: "更多工具", description: "专项流程" },
+  { id: "account", label: "账户", displayLabel: "账户与积分", description: "套餐明细" },
+  { id: "storage", label: "存储", displayLabel: "文件管理", description: "保存归档" },
 ];
 
 const initialSystemPrompts = generationModes.reduce((map, mode) => {
@@ -212,6 +199,12 @@ function App() {
   const [apiConfig, setApiConfig] = useState<ApiConfig | null>(null);
   const providerHealth = apiConfig?.providerHealth;
 
+  // 左栏素材卡与描述里「参考 X」标记之间的连线，用来说明素材和文字的对应关系。
+  const referenceCardEls = useRef<Record<string, HTMLElement | null>>({});
+  const referenceTokenEls = useRef<Record<string, HTMLElement | null>>({});
+  const [hoveredReferenceId, setHoveredReferenceId] = useState("");
+  const [referenceLinkPath, setReferenceLinkPath] = useState("");
+
   const activeMode = useMemo(() => {
     const mode = generationModes.find((item) => item.id === settings.mode) ?? generationModes[0];
     return { ...mode, systemTemplate: systemPrompts[mode.id] ?? mode.systemTemplate };
@@ -223,6 +216,34 @@ function App() {
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
+
+  useLayoutEffect(() => {
+    const compute = () => {
+      const card = referenceCardEls.current[hoveredReferenceId];
+      const token = referenceTokenEls.current[hoveredReferenceId];
+      if (!hoveredReferenceId || !card || !token) {
+        setReferenceLinkPath("");
+        return;
+      }
+      const cardBox = card.getBoundingClientRect();
+      const tokenBox = token.getBoundingClientRect();
+      const startX = cardBox.right;
+      const startY = cardBox.top + cardBox.height / 2;
+      const endX = tokenBox.left;
+      const endY = tokenBox.top + tokenBox.height / 2;
+      const bend = Math.max(70, (endX - startX) / 2);
+      setReferenceLinkPath(
+        `M ${startX.toFixed(1)} ${startY.toFixed(1)} C ${(startX + bend).toFixed(1)} ${startY.toFixed(1)} ${(endX - bend).toFixed(1)} ${endY.toFixed(1)} ${endX.toFixed(1)} ${endY.toFixed(1)}`,
+      );
+    };
+    compute();
+    window.addEventListener("resize", compute);
+    window.addEventListener("scroll", compute, true);
+    return () => {
+      window.removeEventListener("resize", compute);
+      window.removeEventListener("scroll", compute, true);
+    };
+  }, [hoveredReferenceId, references, view]);
 
   useEffect(() => {
     if (!taskMenuOpen) return;
@@ -525,8 +546,15 @@ function App() {
           results={results}
           user={currentUser}
           creditPolicy={creditPolicy}
+          autoSyncOriginals={storagePolicy.autoSyncOriginals}
           optimizationNotice={optimizationNotice}
           isGenerating={generationSubmitting}
+          hoveredReferenceId={hoveredReferenceId}
+          onHoverReference={setHoveredReferenceId}
+          registerTokenEl={(id, element) => {
+            referenceTokenEls.current[id] = element;
+          }}
+          onAutoSyncChange={(value) => setStoragePolicy((current) => ({ ...current, autoSyncOriginals: value }))}
           onSettingsChange={(patch) => (patch.mode ? handleModePrompt(patch.mode) : handleSettingsChange(patch))}
           onPromptChange={(value) => {
             setPrompt(value);
@@ -578,7 +606,7 @@ function App() {
   if (authLoading) {
     return (
       <main className="auth-shell app-loading" aria-live="polite">
-        <span className="app-loading-icon"><LoaderCircle className="spin" size={24} /></span>
+        <span className="app-loading-icon" aria-hidden="true">◇</span>
         <strong>正在打开创作台</strong>
         <span>马上就好…</span>
       </main>
@@ -602,7 +630,7 @@ function App() {
         <div className="admin-shell">
           <header className="admin-topbar">
             <div className="brand">
-              <LayoutDashboard size={18} />
+              <span className="brand-mark" aria-hidden="true" />
               <strong>ClothDesign Admin</strong>
             </div>
             <button className="btn btn-secondary" onClick={() => handleSetAdminPath("/")}>
@@ -620,7 +648,7 @@ function App() {
       <div className="admin-shell">
         <header className="admin-topbar">
           <div className="brand">
-            <LayoutDashboard size={18} />
+            <span className="brand-mark" aria-hidden="true" />
             <strong>ClothDesign Admin</strong>
           </div>
           <button className="btn btn-secondary" onClick={() => handleSetAdminPath("/")}>
@@ -628,6 +656,12 @@ function App() {
           </button>
         </header>
         <main className="admin-page panel-scroll">
+          <header className="admin-page-head">
+            <div>
+              <span>ClothDesign Admin</span>
+              <h1>后台控制台</h1>
+            </div>
+          </header>
           <AdminPanel
             routes={routes}
             onRoutesChange={setRoutes}
@@ -687,18 +721,21 @@ function App() {
     );
   }
 
+  const isAdminUser = ["owner", "admin"].includes(currentUser.role);
+
   return (
     <>
       <div className="app-shell">
         <header className="topbar">
           <div className="topbar-brand-group">
             <div className="brand">
-              <span className="brand-mark" aria-hidden="true"><Sparkles size={18} /></span>
+              <span className="brand-mark" aria-hidden="true" />
               <span className="brand-copy">
                 <strong>ClothDesign AI</strong>
                 <small>服装视觉工作台</small>
               </span>
             </div>
+            <span className="topbar-divider" aria-hidden="true" />
             <div className="topbar-context">
               <span>{activeNavigationItem.description}</span>
               <strong>{activeNavigationItem.displayLabel}</strong>
@@ -711,8 +748,7 @@ function App() {
               {providerHealth?.label ?? (apiConfig?.mode === "live" ? "图像服务已就绪" : "演示模式")}
             </span>
             <button className="credit-button" onClick={() => setView("account")} aria-label={`账户余额 ${currentUser.credits} 积分`}>
-              <Coins size={16} />
-              <span><strong>{currentUser.credits}</strong> 积分</span>
+              <strong>{currentUser.credits}</strong> 积分
             </button>
             <button
               className="task-menu-button"
@@ -720,31 +756,22 @@ function App() {
               aria-expanded={taskMenuOpen}
               aria-label="任务"
             >
-              <ClipboardList size={16} />
-              <span>任务</span>
-              {runningTasks > 0 ? <em>{runningTasks}</em> : null}
+              任务 <em>{runningTasks > 0 ? runningTasks : tasks.length}</em>
             </button>
             <span className="user-summary" title={currentUser.name}>
-              <i>{currentUser.name.trim().charAt(0) || "我"}</i>
+              <i aria-hidden="true">{currentUser.name.trim().charAt(0) || "我"}</i>
               <span>{currentUser.name}</span>
             </span>
             <button className="signout-button" onClick={handleSignOut} aria-label="退出">
-              <LogOut size={16} />
-              <span>退出</span>
+              退出
             </button>
-            {taskMenuOpen ? (
-              <div className="task-popover">
-                <TaskRail tasks={tasks} results={results} onRetry={handleRetryTask} />
-              </div>
-            ) : null}
           </div>
         </header>
 
         <div className="app-body">
-          <nav className="rail" aria-label="主导航">
-            {navigation.map((item) => {
-              const Icon = item.icon;
-              return (
+          <aside className="rail" aria-label="主导航">
+            <nav className="rail-nav">
+              {navigation.map((item) => (
                 <button
                   key={item.id}
                   className={view === item.id ? "active" : ""}
@@ -756,24 +783,81 @@ function App() {
                   aria-current={view === item.id ? "page" : undefined}
                   title={item.label}
                 >
-                  <span className="rail-icon"><Icon size={19} /></span>
+                  <span className="rail-icon" aria-hidden="true" />
                   <span className="rail-copy">
                     <strong>{item.displayLabel}</strong>
                     <small>{item.description}</small>
                   </span>
                 </button>
-              );
-            })}
-          </nav>
+              ))}
+              {isAdminUser ? (
+                <button
+                  className={path.startsWith("/admin") ? "active" : ""}
+                  onClick={() => handleSetAdminPath("/admin")}
+                  aria-label="管理后台"
+                  title="后台"
+                >
+                  <span className="rail-icon" aria-hidden="true" />
+                  <span className="rail-copy">
+                    <strong>管理后台</strong>
+                    <small>owner / admin</small>
+                  </span>
+                </button>
+              ) : null}
+            </nav>
+
+            <div className="rail-divider" aria-hidden="true" />
+
+            {view === "studio" ? (
+              <ReferencePanel
+                references={references}
+                requiredRefs={activeMode.requiredRefs}
+                recommendedRefs={activeMode.recommendedRefs}
+                onChange={setReferences}
+                hoveredId={hoveredReferenceId}
+                onHover={setHoveredReferenceId}
+                registerCardEl={(id, element) => {
+                  referenceCardEls.current[id] = element;
+                }}
+              />
+            ) : (
+              <section className="rail-section session-summary">
+                <header className="rail-section-head">
+                  <span className="rail-kicker">本次会话</span>
+                </header>
+                <div className="session-rows">
+                  <div><span>参考素材</span><strong>{references.filter((item) => item.previewUrl).length} / {references.length}</strong></div>
+                  <div><span>成片</span><strong>{results.length}</strong></div>
+                  <div><span>任务</span><strong>{tasks.length}</strong></div>
+                </div>
+                <button type="button" className="btn btn-secondary" onClick={() => setView("studio")}>
+                  回到创作台
+                </button>
+                <small className="muted-text">素材、成片与设置在切换界面时保留，不会刷新。</small>
+              </section>
+            )}
+          </aside>
           {renderView()}
         </div>
       </div>
 
+      <svg className="reference-link-layer" aria-hidden="true">
+        {referenceLinkPath ? <path d={referenceLinkPath} /> : null}
+      </svg>
+
+      {taskMenuOpen ? (
+        <>
+          <div className="task-scrim" onClick={() => setTaskMenuOpen(false)} />
+          <div className="task-popover" role="dialog" aria-label="生成任务">
+            <TaskRail tasks={tasks} results={results} onRetry={handleRetryTask} onClose={() => setTaskMenuOpen(false)} />
+          </div>
+        </>
+      ) : null}
+
       {authError && !authError.includes("请先登录") ? (
         <div className="global-notice" role="alert">
-          <AlertTriangle size={17} />
           <span>{authError}</span>
-          <button type="button" onClick={() => setAuthError("")} aria-label="关闭提示"><X size={15} /></button>
+          <button type="button" onClick={() => setAuthError("")} aria-label="关闭提示">×</button>
         </div>
       ) : null}
     </>

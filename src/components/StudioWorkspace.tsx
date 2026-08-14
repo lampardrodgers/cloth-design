@@ -1,14 +1,19 @@
-import { useMemo } from "react";
-import { AlertTriangle, Check, CircleDollarSign, LoaderCircle, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { generationModes, ratioOptions, roleLabels } from "../data/catalog";
 import { estimateCredits } from "../lib/costing";
-import type { CreditPolicy, GeneratedResult, GenerationMode, ReferenceImage, StudioSettings, UserAccount } from "../types";
-import { Button } from "./ui";
+import type {
+  CreditPolicy,
+  GeneratedResult,
+  GenerationMode,
+  ModeKey,
+  ReferenceImage,
+  StudioSettings,
+  UserAccount,
+} from "../types";
 import { ModePicker } from "./ModePicker";
-import { OutputGallery, resultToReference } from "./OutputGallery";
+import { ResultPanelList, ResultStage, resultToReference } from "./OutputGallery";
 import { ParameterPanel } from "./ParameterPanel";
 import { PromptComposer } from "./PromptComposer";
-import { ReferencePanel } from "./ReferencePanel";
 
 const referenceAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 
@@ -17,6 +22,46 @@ function nextReferenceLabel(references: ReferenceImage[]) {
   return referenceAlphabet.find((label) => !used.has(label)) ?? `${references.length + 1}`;
 }
 
+interface DeliveryPreset {
+  id: string;
+  label: string;
+  detail: string;
+  mode: ModeKey;
+  patch: Partial<StudioSettings>;
+}
+
+/** 交付预设：一次点击套用「用途 + 成片设置」，避免逐项调整。 */
+const deliveryPresets: DeliveryPreset[] = [
+  {
+    id: "product",
+    label: "电商主图",
+    detail: "1:1 · 高清 · PNG",
+    mode: "product",
+    patch: { ratioId: "1-1", resolution: "hd", quality: "high", outputFormat: "png", background: "opaque" },
+  },
+  {
+    id: "campaign",
+    label: "广告大片",
+    detail: "3:2 · 标准 · JPEG",
+    mode: "campaign",
+    patch: { ratioId: "3-2", resolution: "native", quality: "high", outputFormat: "jpeg", background: "auto" },
+  },
+  {
+    id: "fabric",
+    label: "面料平铺",
+    detail: "1:1 · 标准 · PNG",
+    mode: "fabric",
+    patch: { ratioId: "1-1", resolution: "native", quality: "medium", outputFormat: "png", background: "opaque" },
+  },
+  {
+    id: "social",
+    label: "社媒竖版",
+    detail: "2:3 · 高清 · WebP",
+    mode: "lookbook",
+    patch: { ratioId: "2-3", resolution: "hd", quality: "high", outputFormat: "webp", background: "auto" },
+  },
+];
+
 interface StudioWorkspaceProps {
   settings: StudioSettings;
   prompt: string;
@@ -24,11 +69,16 @@ interface StudioWorkspaceProps {
   results: GeneratedResult[];
   user: UserAccount;
   creditPolicy: CreditPolicy;
+  autoSyncOriginals: boolean;
   optimizationNotice?: string;
   isGenerating?: boolean;
+  hoveredReferenceId?: string;
+  onHoverReference?: (id: string) => void;
+  registerTokenEl?: (id: string, element: HTMLElement | null) => void;
   onSettingsChange: (patch: Partial<StudioSettings>) => void;
   onPromptChange: (prompt: string) => void;
   onReferencesChange: (references: ReferenceImage[]) => void;
+  onAutoSyncChange: (value: boolean) => void;
   onOptimize: () => void;
   onGenerate: (mode: GenerationMode, cost: number) => void;
   onUseAsReference: (references: ReferenceImage[]) => void;
@@ -44,11 +94,16 @@ export function StudioWorkspace({
   results,
   user,
   creditPolicy,
+  autoSyncOriginals,
   optimizationNotice,
   isGenerating = false,
+  hoveredReferenceId,
+  onHoverReference,
+  registerTokenEl,
   onSettingsChange,
   onPromptChange,
   onReferencesChange,
+  onAutoSyncChange,
   onOptimize,
   onGenerate,
   onUseAsReference,
@@ -56,123 +111,194 @@ export function StudioWorkspace({
   onDeleteResult,
   onOpenAccount,
 }: StudioWorkspaceProps) {
+  const [level, setLevel] = useState<"novice" | "expert">("novice");
+  const [selectedId, setSelectedId] = useState("");
+
   const mode = generationModes.find((item) => item.id === settings.mode) ?? generationModes[0];
-  const cost = useMemo(() => estimateCredits(mode, settings, references, creditPolicy), [mode, references, settings, creditPolicy]);
   const ratio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
-  const missingRoles = mode.requiredRefs.filter((role) => !references.some((reference) => reference.role === role && reference.previewUrl));
-  const missingRoleText = missingRoles.map((role) => roleLabels[role]).join("、");
+  const cost = useMemo(
+    () => estimateCredits(mode, settings, references, creditPolicy),
+    [mode, references, settings, creditPolicy],
+  );
+
+  const filledReferences = references.filter((reference) => Boolean(reference.previewUrl));
+  const missingRoles = mode.requiredRefs.filter(
+    (role) => !references.some((reference) => reference.role === role && reference.previewUrl),
+  );
   const ratioAllowed = ratio.allowedResolutions.includes(settings.resolution);
   const hasEnoughCredits = cost <= user.credits;
-  const baseCanGenerate = missingRoles.length === 0 && hasEnoughCredits && ratioAllowed;
-  const canGenerate = baseCanGenerate && !isGenerating;
-  const readinessSteps = [
-    { label: "用途", ready: true },
-    { label: mode.requiredRefs.length > 0 ? "必需素材" : "素材可选", ready: missingRoles.length === 0 },
-    { label: "画面描述", ready: prompt.trim().length > 0 },
-  ];
-  const readyCount = readinessSteps.filter((step) => step.ready).length;
+  const canGenerate = missingRoles.length === 0 && hasEnoughCredits && ratioAllowed && !isGenerating;
 
-  const blockingMessage = isGenerating
-    ? "正在生成上一批成片，请稍候"
+  useEffect(() => {
+    if (!results.length) {
+      setSelectedId("");
+      return;
+    }
+    if (!selectedId || !results.some((result) => result.id === selectedId)) {
+      setSelectedId(results[0].id);
+    }
+  }, [results, selectedId]);
+
+  const statusMessage = isGenerating
+    ? "生成中，可继续调整设置"
     : missingRoles.length > 0
-      ? `还需上传：${missingRoleText}`
+      ? `还需上传：${missingRoles.map((role) => roleLabels[role]).join("、")}`
       : !hasEnoughCredits
-        ? `当前有 ${user.credits} 积分，本次预计需要 ${cost} 积分`
+        ? `积分不足 · 需要 ${cost}`
         : !ratioAllowed
           ? "当前清晰度不支持所选画面比例"
-          : "已准备好，可以开始生成";
+          : "已就绪 · ⌘ + Enter 生成";
+  const statusBlocked = !isGenerating && (missingRoles.length > 0 || !hasEnoughCredits || !ratioAllowed);
+
+  const costBreakdown = [
+    `${mode.shortTitle} 基础 ${mode.baseCredits}`,
+    `参考图 ${filledReferences.length}×${creditPolicy.perReference}`,
+    settings.quality === "high" ? "精细成片" : null,
+    settings.resolution === "fourK" ? "4K 交付" : null,
+    `${settings.quantity} 张`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const acceptFiles = (files: FileList) => {
+    const images = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    if (!images.length) return;
+    let next = [...references];
+    images.forEach((file, index) => {
+      const previewUrl = URL.createObjectURL(file);
+      const note = file.name.replace(/\.[^.]+$/, "");
+      const target = next.find((reference) => !reference.previewUrl);
+      if (target) {
+        next = next.map((reference) =>
+          reference.id === target.id ? { ...reference, previewUrl, fileName: file.name, file, note } : reference,
+        );
+      } else {
+        next = [
+          ...next,
+          {
+            id: `ref-drop-${Date.now()}-${index}`,
+            label: nextReferenceLabel(next),
+            role: "style",
+            note,
+            fileName: file.name,
+            file,
+            previewUrl,
+          },
+        ];
+      }
+    });
+    onReferencesChange(next);
+  };
 
   const useResult = (result: GeneratedResult) => {
-    const nextLabel = nextReferenceLabel(references);
-    onUseAsReference([...references, resultToReference(result, nextLabel)]);
+    onUseAsReference([...references, resultToReference(result, nextReferenceLabel(references))]);
   };
+
+  const applyPreset = (preset: DeliveryPreset) => {
+    onSettingsChange({ mode: preset.mode });
+    onSettingsChange(preset.patch);
+  };
+
+  const presetActive = (preset: DeliveryPreset) =>
+    settings.mode === preset.mode &&
+    (Object.keys(preset.patch) as Array<keyof StudioSettings>).every((key) => settings[key] === preset.patch[key]);
 
   return (
     <main className="workspace studio-workspace">
-      <header className="studio-hero">
-        <div className="studio-hero-copy">
-          <span className="studio-eyebrow"><Sparkles size={14} /> AI 服装创作台</span>
-          <h1>从一个想法，快速得到可用成片</h1>
-          <p>按顺序完成下面几步。常用设置已经替你选好，不懂参数也能直接开始。</p>
-        </div>
-        <div className="studio-readiness" aria-label={`创作准备进度 ${readyCount} / ${readinessSteps.length}`}>
-          <div className="studio-readiness-head">
-            <span>准备进度</span>
-            <strong>{readyCount}/{readinessSteps.length}</strong>
-          </div>
-          <div className="studio-readiness-track" aria-hidden="true">
-            <span style={{ width: `${(readyCount / readinessSteps.length) * 100}%` }} />
-          </div>
-          <div className="studio-readiness-steps">
-            {readinessSteps.map((step) => (
-              <span className={step.ready ? "ready" : ""} key={step.label}>
-                <Check size={12} aria-hidden="true" /> {step.label}
-              </span>
-            ))}
-          </div>
-        </div>
-      </header>
+      <section className="studio-main">
+        <ModePicker activeMode={settings.mode} onChange={(modeId) => onSettingsChange({ mode: modeId })} />
 
-      <div className="studio-layout">
-        <div className="creation-panel panel-scroll">
-          <ModePicker activeMode={settings.mode} onChange={(modeId) => onSettingsChange({ mode: modeId })} />
-          <ReferencePanel
-            references={references}
-            requiredRefs={mode.requiredRefs}
-            recommendedRefs={mode.recommendedRefs}
-            onChange={onReferencesChange}
-          />
-          <PromptComposer
-            mode={mode}
-            prompt={prompt}
-            optimizationNotice={optimizationNotice}
-            onPromptChange={onPromptChange}
-            onOptimize={onOptimize}
-          />
-          <ParameterPanel settings={settings} onChange={onSettingsChange} />
+        <ResultStage
+          results={results}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          isGenerating={isGenerating}
+          beforeUrl={filledReferences[0]?.previewUrl}
+          onDelete={onDeleteResult}
+          onDropFiles={acceptFiles}
+        />
 
-          <div className={`generation-bar ${canGenerate ? "ready" : "blocked"}`}>
-            <div className="generation-status" aria-live="polite">
-              <span className="generation-status-icon" aria-hidden="true">
-                {isGenerating ? <LoaderCircle className="spin" size={20} /> : baseCanGenerate ? <Check size={20} /> : <AlertTriangle size={20} />}
-              </span>
-              <div>
-                <strong>{blockingMessage}</strong>
-                <span>预计消耗 {cost} 积分 · 生成 {settings.quantity} 张</span>
-              </div>
+        <PromptComposer
+          mode={mode}
+          prompt={prompt}
+          references={references}
+          optimizationNotice={optimizationNotice}
+          statusMessage={statusMessage}
+          statusBlocked={statusBlocked}
+          generateLabel={isGenerating ? "正在生成…" : `生成 ${settings.quantity} 张 · ${cost} 积分`}
+          generateDisabled={!canGenerate}
+          onPromptChange={onPromptChange}
+          onOptimize={onOptimize}
+          onGenerate={() => onGenerate(mode, cost)}
+          hoveredId={hoveredReferenceId}
+          onHover={onHoverReference}
+          registerTokenEl={registerTokenEl}
+        />
+      </section>
+
+      <aside className="settings-aside panel-scroll" aria-label="成片设置">
+        <div className="settings-aside-head">
+          <span className="rail-kicker">成片设置</span>
+          <div className="level-switch" role="group" aria-label="设置深度">
+            <button type="button" className={level === "novice" ? "active" : ""} onClick={() => setLevel("novice")}>
+              新手
+            </button>
+            <button type="button" className={level === "expert" ? "active" : ""} onClick={() => setLevel("expert")}>
+              专家
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-aside-body">
+          <ParameterPanel
+            settings={settings}
+            onChange={onSettingsChange}
+            showAdvanced={level === "expert"}
+            onExpandAdvanced={() => setLevel("expert")}
+            autoSyncOriginals={autoSyncOriginals}
+            onAutoSyncChange={onAutoSyncChange}
+          />
+
+          <div className="settings-block cost-block">
+            <div className="cost-head">
+              <span>预计消耗</span>
+              <strong>{cost}</strong>
             </div>
-
-            {!hasEnoughCredits && missingRoles.length === 0 ? (
-              <Button variant="primary" icon={<CircleDollarSign size={17} />} onClick={onOpenAccount}>
-                获取积分后生成
-              </Button>
-            ) : (
-              <div className="prompt-footer">
-                <span className="sr-only">预计 {cost} 积分</span>
-                <Button
-                  variant="primary"
-                  aria-label="生成"
-                  icon={isGenerating ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}
-                  onClick={() => onGenerate(mode, cost)}
-                  disabled={!canGenerate}
-                >
-                  {isGenerating ? "正在生成" : `开始生成 ${settings.quantity} 张`}
-                </Button>
-              </div>
-            )}
+            <small>{costBreakdown}</small>
+            {!hasEnoughCredits ? (
+              <button type="button" className="btn btn-primary" onClick={onOpenAccount}>
+                积分不足 · 去充值
+              </button>
+            ) : null}
           </div>
-        </div>
 
-        <aside className="preview-panel panel-scroll" aria-label="成片结果">
-          <OutputGallery
+          <div className="settings-block preset-block">
+            <span className="rail-kicker">交付预设</span>
+            <div className="preset-list">
+              {deliveryPresets.map((preset) => (
+                <button
+                  type="button"
+                  key={preset.id}
+                  className={`preset-option ${presetActive(preset) ? "active" : ""}`}
+                  onClick={() => applyPreset(preset)}
+                >
+                  <strong>{preset.label}</strong>
+                  <small>{preset.detail}</small>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <ResultPanelList
             results={results}
-            isGenerating={isGenerating}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
             onUseAsReference={useResult}
             onSync={onSyncResult}
             onDelete={onDeleteResult}
           />
-        </aside>
-      </div>
+        </div>
+      </aside>
     </main>
   );
 }

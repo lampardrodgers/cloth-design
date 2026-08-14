@@ -1,14 +1,6 @@
-import { Lightbulb, WandSparkles } from "lucide-react";
-import type { GenerationMode, ModeKey } from "../types";
-import { Button } from "./ui";
-
-interface PromptComposerProps {
-  mode: GenerationMode;
-  prompt: string;
-  optimizationNotice?: string;
-  onPromptChange: (prompt: string) => void;
-  onOptimize: () => void;
-}
+import type { KeyboardEvent } from "react";
+import { roleLabels } from "../data/catalog";
+import type { GenerationMode, ModeKey, ReferenceImage } from "../types";
 
 const promptSuggestions: Record<ModeKey, string[]> = {
   text: ["干净棚拍", "突出面料质感", "高级电商风格"],
@@ -21,65 +13,131 @@ const promptSuggestions: Record<ModeKey, string[]> = {
   lookbook: ["系列感统一", "自然搭配层次", "杂志编辑风格"],
 };
 
+interface PromptComposerProps {
+  mode: GenerationMode;
+  prompt: string;
+  references: ReferenceImage[];
+  optimizationNotice?: string;
+  statusMessage: string;
+  statusBlocked?: boolean;
+  generateLabel: string;
+  generateDisabled: boolean;
+  onPromptChange: (prompt: string) => void;
+  onOptimize: () => void;
+  onGenerate: () => void;
+  hoveredId?: string;
+  onHover?: (id: string) => void;
+  registerTokenEl?: (id: string, element: HTMLElement | null) => void;
+}
+
 export function PromptComposer({
   mode,
   prompt,
+  references,
   optimizationNotice,
+  statusMessage,
+  statusBlocked = false,
+  generateLabel,
+  generateDisabled,
   onPromptChange,
   onOptimize,
+  onGenerate,
+  hoveredId = "",
+  onHover,
+  registerTokenEl,
 }: PromptComposerProps) {
+  const filledReferences = references.filter((reference) => Boolean(reference.previewUrl));
+
   const addSuggestion = (suggestion: string) => {
     if (prompt.includes(suggestion)) return;
-    const separator = prompt.trim().length > 0 && !/[，。；,.!?！？]$/.test(prompt.trim()) ? "，" : "";
-    onPromptChange(`${prompt.trim()}${separator}${suggestion}`);
+    const trimmed = prompt.trim();
+    const separator = trimmed.length > 0 && !/[，。；,.!?！？]$/.test(trimmed) ? "，" : "";
+    onPromptChange(`${trimmed}${separator}${suggestion}`);
+  };
+
+  const insertToken = (reference: ReferenceImage) => {
+    const token = `参考${reference.label}`;
+    if (prompt.includes(token)) return;
+    const trimmed = prompt.trim();
+    onPromptChange(`${trimmed}${trimmed ? "，" : ""}${token}`);
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      if (!generateDisabled) onGenerate();
+    }
   };
 
   return (
-    <section className="section flow-section prompt-section" aria-labelledby="prompt-heading">
-      <header className="flow-section-head">
-        <span className="flow-step-index" aria-hidden="true">3</span>
-        <div className="flow-section-copy">
-          <span className="flow-kicker">描述效果</span>
-          <h2 id="prompt-heading" aria-label="提示词">告诉 AI 你想要的画面</h2>
-          <p>像和摄影师沟通一样，说明主体、场景或风格即可，不需要学习专业写法。</p>
+    <section className="prompt-dock prompt-section" aria-labelledby="prompt-heading">
+      <div className="prompt-dock-head">
+        <span className="rail-kicker" id="prompt-heading">画面描述</span>
+        <div className="prompt-tokens">
+          {filledReferences.map((reference) => (
+            <button
+              type="button"
+              key={reference.id}
+              className={`prompt-token ${hoveredId === reference.id ? "active" : ""}`}
+              ref={(node) => registerTokenEl?.(reference.id, node)}
+              title="插入到描述"
+              onClick={() => insertToken(reference)}
+              onPointerEnter={() => onHover?.(reference.id)}
+              onPointerLeave={() => onHover?.("")}
+            >
+              参考{reference.label} · {roleLabels[reference.role]}
+            </button>
+          ))}
         </div>
-        <Button className="prompt-optimize" icon={<WandSparkles size={15} />} onClick={onOptimize}>
-          帮我完善
-        </Button>
-      </header>
+      </div>
 
-      <div className="prompt-composer-body">
+      <div className="prompt-dock-row">
         <label className="prompt-input-wrap">
           <span className="sr-only">画面描述</span>
           <textarea
             aria-label="画面描述"
             value={prompt}
-            onChange={(event) => onPromptChange(event.target.value)}
+            rows={2}
             placeholder={mode.promptStarter}
-            rows={6}
+            onChange={(event) => onPromptChange(event.target.value)}
+            onKeyDown={handleKeyDown}
           />
           <span className="prompt-count">{prompt.trim().length} 字</span>
         </label>
 
-        <div className="prompt-suggestions" aria-label="描述建议">
-          <span><Lightbulb size={14} aria-hidden="true" /> 快速补充</span>
-          <div>
-            {promptSuggestions[mode.id].map((suggestion) => (
-              <button
-                type="button"
-                className={prompt.includes(suggestion) ? "selected" : ""}
-                aria-pressed={prompt.includes(suggestion)}
-                key={suggestion}
-                onClick={() => addSuggestion(suggestion)}
-              >
-                {suggestion}
-              </button>
-            ))}
-          </div>
+        <div className="prompt-footer">
+          <button type="button" className="btn btn-secondary prompt-optimize" onClick={onOptimize}>
+            帮我完善描述
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary prompt-generate"
+            onClick={onGenerate}
+            disabled={generateDisabled}
+          >
+            {generateLabel}
+          </button>
         </div>
       </div>
 
-      {optimizationNotice ? <p className="prompt-notice" aria-live="polite">{optimizationNotice}</p> : null}
+      <div className="prompt-dock-foot">
+        <div className="prompt-suggestions" aria-label="描述建议">
+          {promptSuggestions[mode.id].map((suggestion) => (
+            <button
+              type="button"
+              key={suggestion}
+              className={`chip ${prompt.includes(suggestion) ? "selected" : ""}`}
+              aria-pressed={prompt.includes(suggestion)}
+              onClick={() => addSuggestion(suggestion)}
+            >
+              {suggestion}
+            </button>
+          ))}
+        </div>
+        <span className={`prompt-status ${statusBlocked ? "blocked" : ""}`} aria-live="polite">
+          {optimizationNotice || statusMessage}
+        </span>
+      </div>
     </section>
   );
 }

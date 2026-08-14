@@ -1,17 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
-import { Download, ImageDown, LoaderCircle, RotateCw, Send, Sparkles, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
 import { resultFileName } from "../lib/resultFiles";
 import type { GeneratedResult, ReferenceImage, StorageStatus } from "../types";
-import { Button } from "./ui";
-
-interface OutputGalleryProps {
-  results: GeneratedResult[];
-  isGenerating?: boolean;
-  onUseAsReference: (result: GeneratedResult) => void;
-  onSync: (id: string) => void;
-  onDelete: (id: string) => void;
-}
 
 const storageStatusLabels: Record<StorageStatus, string> = {
   "local-cache": "本地暂存",
@@ -20,112 +10,330 @@ const storageStatusLabels: Record<StorageStatus, string> = {
   expired: "文件已过期",
 };
 
-export function OutputGallery({ results, isGenerating = false, onUseAsReference, onSync, onDelete }: OutputGalleryProps) {
-  const [selectedId, setSelectedId] = useState<string | null>(results[0]?.id ?? null);
-  const selectedResult = useMemo(
-    () => results.find((result) => result.id === selectedId) ?? results[0],
-    [results, selectedId],
-  );
+interface Annotation {
+  id: string;
+  left: number;
+  top: number;
+  text: string;
+}
+
+interface ResultStageProps {
+  results: GeneratedResult[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  isGenerating?: boolean;
+  /** 前后对比里的「原图」，通常是第一张参考素材。 */
+  beforeUrl?: string;
+  onDelete: (id: string) => void;
+  onDropFiles: (files: FileList) => void;
+}
+
+/** 创作台中央的深色画布：成片展示、前后对比、放大、标注与拖拽投放。 */
+export function ResultStage({
+  results,
+  selectedId,
+  onSelect,
+  isGenerating = false,
+  beforeUrl,
+  onDelete,
+  onDropFiles,
+}: ResultStageProps) {
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+  const [zoomOpen, setZoomOpen] = useState(false);
+  const [compareOn, setCompareOn] = useState(false);
+  const [comparePos, setComparePos] = useState(50);
+  const [annotateMode, setAnnotateMode] = useState(false);
+  const [annotations, setAnnotations] = useState<Record<string, Annotation[]>>({});
+
+  const selected = results.find((result) => result.id === selectedId) ?? results[0];
+  const pins = selected ? annotations[selected.id] ?? [] : [];
 
   useEffect(() => {
-    if (!results.length) {
-      setSelectedId(null);
-      return;
-    }
-    if (!selectedId || !results.some((result) => result.id === selectedId)) {
-      setSelectedId(results[0].id);
-    }
-  }, [results, selectedId]);
+    if (!zoomOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setZoomOpen(false);
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [zoomOpen]);
+
+  useEffect(() => {
+    setCompareOn(false);
+  }, [selectedId]);
+
+  const patchPins = (next: Annotation[]) => {
+    if (!selected) return;
+    setAnnotations((current) => ({ ...current, [selected.id]: next }));
+  };
+
+  const canvasPoint = (clientX: number, clientY: number) => {
+    const box = canvasRef.current?.getBoundingClientRect();
+    if (!box) return { left: 50, top: 50 };
+    return {
+      left: Math.min(96, Math.max(4, ((clientX - box.left) / box.width) * 100)),
+      top: Math.min(96, Math.max(8, ((clientY - box.top) / box.height) * 100)),
+    };
+  };
+
+  const handleCanvasClick = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!annotateMode || !selected) return;
+    if ((event.target as HTMLElement).closest("input,button,a,select,figure")) return;
+    const point = canvasPoint(event.clientX, event.clientY);
+    patchPins([...pins, { id: `pin-${Date.now()}`, ...point, text: "" }]);
+  };
+
+  const startPinDrag = (id: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const move = (moveEvent: PointerEvent) => {
+      const point = canvasPoint(moveEvent.clientX, moveEvent.clientY);
+      setAnnotations((current) => {
+        if (!selected) return current;
+        const list = (current[selected.id] ?? []).map((pin) => (pin.id === id ? { ...pin, ...point } : pin));
+        return { ...current, [selected.id]: list };
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const startCompare = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    const move = (moveEvent: PointerEvent | ReactPointerEvent<HTMLDivElement>) => {
+      setComparePos(Math.min(98, Math.max(2, ((moveEvent.clientX - box.left) / box.width) * 100)));
+    };
+    move(event);
+    const up = () => {
+      window.removeEventListener("pointermove", move as (event: PointerEvent) => void);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move as (event: PointerEvent) => void);
+    window.addEventListener("pointerup", up);
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDropActive(false);
+    if (event.dataTransfer.files?.length) onDropFiles(event.dataTransfer.files);
+  };
+
+  const annotateHint = !selected
+    ? "生成成片后可标注"
+    : annotateMode
+      ? "点击画面添加标注"
+      : pins.length
+        ? `${pins.length} 条标注`
+        : "点「标注」后在成片上批注";
 
   return (
-    <section className="section gallery-section" aria-labelledby="gallery-heading" aria-busy={isGenerating}>
-      <header className="gallery-head">
-        <div>
-          <span className="flow-kicker">创作结果</span>
-          <h2 id="gallery-heading" aria-label="出图">成片预览</h2>
-        </div>
-        <span className="gallery-count">{results.length} 张</span>
-      </header>
-
-      {!selectedResult ? (
-        <div className={`empty-gallery ${isGenerating ? "is-generating" : ""}`} aria-live="polite">
-          <span className="empty-gallery-icon" aria-hidden="true">
-            {isGenerating ? <LoaderCircle className="spin" size={30} /> : <ImageDown size={30} />}
-          </span>
-          <strong>{isGenerating ? "正在为你生成成片" : "你的成片会出现在这里"}</strong>
-          <p>
-            {isGenerating
-              ? "可以先继续浏览当前设置，完成后会自动显示结果。"
-              : "完成左侧的用途、素材和画面描述后，点击“开始生成”即可。"}
-          </p>
-          {!isGenerating ? (
-            <ol className="empty-gallery-steps">
-              <li><span>1</span> 选择用途</li>
-              <li><span>2</span> 准备素材</li>
-              <li><span>3</span> 描述并生成</li>
-            </ol>
-          ) : null}
-        </div>
-      ) : (
-        <div className="gallery-stage">
-          <article className="result-card">
-            <div className="result-image-wrap">
-              <img src={selectedResult.imageUrl} alt={selectedResult.title} />
-              <span className="result-ready-badge"><Sparkles size={13} /> 成片已就绪</span>
-            </div>
-            <div className="result-meta">
-              <div>
-                <strong>{selectedResult.title}</strong>
-                <span>
-                  {selectedResult.ratioLabel} · {storageStatusLabels[selectedResult.storageStatus]}
-                  <span className="sr-only"> · {selectedResult.storageStatus}</span>
-                </span>
-              </div>
-              <span>{selectedResult.credits} 积分</span>
-            </div>
-            <div className={`result-quality quality-${selectedResult.qualityGate?.status ?? "unknown"}`}>
-              <span>{imageQualityLabel(selectedResult.qualityGate)}</span>
-              <small>{imageQualitySummary({ qualityGate: selectedResult.qualityGate, imageInspection: selectedResult.imageInspection })}</small>
-            </div>
-            <div className="result-actions">
-              <Button aria-label="继续" icon={<RotateCw size={14} />} onClick={() => onUseAsReference(selectedResult)}>
-                以此图继续编辑
-              </Button>
-              <Button aria-label="WebDAV" icon={<Send size={14} />} onClick={() => onSync(selectedResult.id)}>
-                保存到云盘
-              </Button>
-              <a
-                className="btn btn-secondary result-download"
-                href={selectedResult.imageUrl}
-                download={resultFileName(selectedResult)}
-                aria-label="下载"
-              >
-                <Download size={15} />
-                <span>下载</span>
-              </a>
-              <button className="icon-button result-delete" onClick={() => onDelete(selectedResult.id)} aria-label="删除">
-                <Trash2 size={15} />
-              </button>
-            </div>
-          </article>
-          <div className="thumbnail-strip" aria-label="出图缩略图">
-            {results.map((result) => (
-              <button
-                type="button"
-                className={`result-thumb ${selectedResult.id === result.id ? "active" : ""}`}
-                key={result.id}
-                onClick={() => setSelectedId(result.id)}
-                aria-label={`查看 ${result.title}`}
-                aria-pressed={selectedResult.id === result.id}
-              >
-                <img src={result.imageUrl} alt="" />
-                <span>{storageStatusLabels[result.storageStatus]}</span>
-              </button>
-            ))}
+    <div className="studio-stage">
+      <div
+        className={`stage-canvas ${dropActive ? "drop-active" : ""} ${annotateMode && selected ? "annotating" : ""}`}
+        ref={canvasRef}
+        onClick={handleCanvasClick}
+        onDragOver={(event) => {
+          event.preventDefault();
+          if (!dropActive) setDropActive(true);
+        }}
+        onDragLeave={() => setDropActive(false)}
+        onDrop={handleDrop}
+      >
+        <div className="stage-toolbar">
+          <div className="stage-toolbar-left">
+            <button
+              type="button"
+              className={`stage-tool ${annotateMode ? "active" : ""}`}
+              disabled={!selected}
+              onClick={() => {
+                setAnnotateMode((value) => !value);
+                setCompareOn(false);
+              }}
+            >
+              标注
+            </button>
+            <span className="stage-toolbar-hint">{annotateHint}</span>
+          </div>
+          <div className="stage-toolbar-right">
+            <button
+              type="button"
+              className={`stage-tool ${compareOn ? "active" : ""}`}
+              disabled={!selected || !beforeUrl}
+              onClick={() => {
+                setCompareOn((value) => !value);
+                setAnnotateMode(false);
+              }}
+            >
+              前后对比
+            </button>
+            <button type="button" className="stage-tool" disabled={!selected} onClick={() => setZoomOpen(true)}>
+              放大
+            </button>
+            {selected ? (
+              <a className="stage-tool" href={selected.imageUrl} download={resultFileName(selected)}>下载</a>
+            ) : (
+              <span className="stage-tool disabled">下载</span>
+            )}
+            <button type="button" className="stage-tool" disabled={!selected} onClick={() => selected && onDelete(selected.id)}>
+              删除
+            </button>
           </div>
         </div>
-      )}
-    </section>
+
+        {selected ? (
+          <figure className="stage-plate" title={`${selected.title} · ${selected.ratioLabel}`}>
+            <img src={selected.imageUrl} alt={selected.title} />
+            {compareOn && beforeUrl ? (
+              <div className="stage-compare" onPointerDown={startCompare}>
+                <div className="stage-compare-before" style={{ clipPath: `inset(0 ${100 - comparePos}% 0 0)` }}>
+                  <img src={beforeUrl} alt="原图" />
+                  <span>原图</span>
+                </div>
+                <i className="stage-compare-line" style={{ left: `${comparePos}%` }} />
+                <i className="stage-compare-handle" style={{ left: `${comparePos}%` }} />
+              </div>
+            ) : null}
+            <figcaption>
+              <span>{selected.title}</span>
+              <span>
+                {selected.ratioLabel} · {storageStatusLabels[selected.storageStatus]} · {selected.credits} 积分
+                <span className="sr-only"> · {selected.storageStatus}</span>
+              </span>
+            </figcaption>
+          </figure>
+        ) : (
+          <div className="stage-empty" aria-live="polite">
+            <span className="stage-empty-mark" aria-hidden="true">◇</span>
+            <strong>{isGenerating ? "正在为你生成成片" : "成片会出现在这里"}</strong>
+            <p>
+              {isGenerating
+                ? "可以继续调整设置，完成后会自动显示结果。"
+                : "左栏放入参考素材\n⌘ + Enter 生成，之后可在成片上标注"}
+            </p>
+          </div>
+        )}
+
+        {pins.map((pin, index) => (
+          <div
+            className={`stage-pin ${pin.left > 52 ? "flip" : ""}`}
+            key={pin.id}
+            style={{ left: `${pin.left}%`, top: `${pin.top}%` }}
+          >
+            <button type="button" className="stage-pin-dot" title="拖动标注" onPointerDown={(event) => startPinDrag(pin.id, event)}>
+              {index + 1}
+            </button>
+            <span className="stage-pin-body">
+              <input
+                value={pin.text}
+                placeholder="写下修改意见"
+                aria-label={`标注 ${index + 1}`}
+                onChange={(event) => patchPins(pins.map((item) => (item.id === pin.id ? { ...item, text: event.target.value } : item)))}
+              />
+              <button type="button" aria-label={`删除标注 ${index + 1}`} onClick={() => patchPins(pins.filter((item) => item.id !== pin.id))}>
+                ×
+              </button>
+            </span>
+          </div>
+        ))}
+
+        {dropActive ? <div className="stage-dropzone">松手加入左栏参考素材</div> : null}
+        {isGenerating ? <div className="stage-progress" aria-hidden="true"><i /></div> : null}
+      </div>
+
+      {results.length > 0 ? (
+        <div className="stage-filmstrip" aria-label="成片缩略图">
+          {results.map((result) => (
+            <button
+              type="button"
+              key={result.id}
+              className={`result-thumb ${selected?.id === result.id ? "active" : ""}`}
+              title={result.title}
+              aria-label={`查看 ${result.title}`}
+              aria-pressed={selected?.id === result.id}
+              onClick={() => onSelect(result.id)}
+            >
+              <img src={result.imageUrl} alt="" />
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {zoomOpen && selected ? (
+        <div className="stage-zoom" role="dialog" aria-label="成片放大" onClick={() => setZoomOpen(false)}>
+          <figure>
+            <img src={selected.imageUrl} alt={`${selected.title} 放大`} />
+            <figcaption>{selected.title} · {selected.ratioLabel} · 点击任意处关闭</figcaption>
+          </figure>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+interface ResultPanelListProps {
+  results: GeneratedResult[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  onUseAsReference: (result: GeneratedResult) => void;
+  onSync: (id: string) => void;
+  onDelete: (id: string) => void;
+}
+
+/** 右栏「最近成片」：查看、以此继续、归档与删除。 */
+export function ResultPanelList({
+  results,
+  selectedId,
+  onSelect,
+  onUseAsReference,
+  onSync,
+  onDelete,
+}: ResultPanelListProps) {
+  return (
+    <div className="settings-block recent-results">
+      <div className="settings-block-head">
+        <span className="rail-kicker">最近成片</span>
+        <small>{results.length ? `${results.length} 张` : ""}</small>
+      </div>
+      {results.length === 0 ? (
+        <p className="muted-text">还没有成片。生成后可在这里快速回看、继续编辑或下载。</p>
+      ) : null}
+      {results.slice(0, 6).map((result) => (
+        <article className={`result-card ${selectedId === result.id ? "active" : ""}`} key={result.id}>
+          <button type="button" className="result-thumb" title="在画布上查看" onClick={() => onSelect(result.id)}>
+            <img src={result.imageUrl} alt="" />
+          </button>
+          <div className="result-meta">
+            <strong>{result.title}</strong>
+            <small>
+              {result.ratioLabel} · {result.credits} 积分 · {storageStatusLabels[result.storageStatus]}
+              <span className="sr-only"> · {result.storageStatus}</span>
+            </small>
+            <small className={`result-quality quality-${result.qualityGate?.status ?? "unknown"}`}>
+              {imageQualityLabel(result.qualityGate)}
+              <span className="sr-only"> {imageQualitySummary({ qualityGate: result.qualityGate, imageInspection: result.imageInspection })}</span>
+            </small>
+            <div className="result-actions">
+              <button type="button" className="text-button" aria-label="继续" onClick={() => onUseAsReference(result)}>
+                以此继续
+              </button>
+              <button type="button" className="text-button" aria-label="WebDAV" onClick={() => onSync(result.id)}>
+                保存到云盘
+              </button>
+              <a className="text-button" href={result.imageUrl} download={resultFileName(result)} aria-label="下载">
+                下载
+              </a>
+              <button type="button" className="text-button result-delete" aria-label="删除" onClick={() => onDelete(result.id)}>
+                删除
+              </button>
+            </div>
+          </div>
+        </article>
+      ))}
+    </div>
   );
 }
 

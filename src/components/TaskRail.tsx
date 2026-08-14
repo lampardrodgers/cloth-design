@@ -1,18 +1,10 @@
-import { AlertCircle, CheckCircle2, Clock3, ImageIcon, Inbox, RotateCcw } from "lucide-react";
 import { generationModes } from "../data/catalog";
 import type { GeneratedResult, GenerationTask, TaskStatus } from "../types";
-import { Button, Metric, Section } from "./ui";
 
 const statusLabel: Record<TaskStatus, string> = {
   running: "运行中",
-  success: "成功",
+  success: "完成",
   failed: "失败",
-};
-
-const statusIcon = {
-  running: <Clock3 size={15} />,
-  success: <CheckCircle2 size={15} />,
-  failed: <AlertCircle size={15} />,
 };
 
 function displayTaskMessage(message: string) {
@@ -33,26 +25,34 @@ interface TaskRailProps {
   tasks: GenerationTask[];
   results?: GeneratedResult[];
   onRetry: (task: GenerationTask) => void;
+  onClose?: () => void;
 }
 
-export function TaskRail({ tasks, results = [], onRetry }: TaskRailProps) {
+export function TaskRail({ tasks, results = [], onRetry, onClose }: TaskRailProps) {
   const running = tasks.filter((task) => task.status === "running").length;
   const success = tasks.filter((task) => task.status === "success").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
 
   return (
-    <Section title="生成任务" className="task-section">
+    <section className="task-section">
+      <header className="task-section-head">
+        <strong>生成任务</strong>
+        {onClose ? (
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭任务面板">×</button>
+        ) : null}
+      </header>
+
       <div className="metric-row">
-        <Metric label="运行中" value={`${running}`} tone="warn" />
-        <Metric label="成功" value={`${success}`} tone="good" />
-        <Metric label="失败" value={`${failed}`} />
+        <div className="metric metric-warn"><span>运行中</span><strong>{running}</strong></div>
+        <div className="metric metric-good"><span>成功</span><strong>{success}</strong></div>
+        <div className="metric metric-default"><span>失败</span><strong>{failed}</strong></div>
       </div>
+
       <div className="task-list">
         {tasks.length === 0 ? (
           <div className="empty-task-list">
-            <Inbox size={24} />
-            <strong>还没有生成任务</strong>
-            <span>开始第一次创作后，这里会显示真实进度和结果。</span>
+            <strong>还没有任务</strong>
+            <span>生成后这里显示实时进度</span>
           </div>
         ) : null}
         {tasks.map((task) => {
@@ -60,17 +60,14 @@ export function TaskRail({ tasks, results = [], onRetry }: TaskRailProps) {
           const preview = results.find((result) => result.taskId === task.id);
           return (
             <article className={`task-item task-${task.status}`} key={task.id}>
-              <div className="task-preview">
-                {preview ? <img src={preview.imageUrl} alt={preview.title} /> : <ImageIcon size={19} />}
-              </div>
+              <div className="task-preview">{preview ? <img src={preview.imageUrl} alt="" /> : null}</div>
               <div className="task-body">
                 <div className="task-title">
-                  <span>{statusIcon[task.status]}</span>
                   <strong>{mode?.shortTitle ?? task.mode}</strong>
                   <em>{statusLabel[task.status]}</em>
                 </div>
                 <p>{task.prompt}</p>
-                <div className="progress-track">
+                <div className="progress-track" aria-hidden="true">
                   <span style={{ width: `${task.progress}%` }} />
                 </div>
                 <div className="task-foot">
@@ -79,13 +76,13 @@ export function TaskRail({ tasks, results = [], onRetry }: TaskRailProps) {
                 </div>
                 <small>{displayTaskMessage(task.message)}</small>
                 {task.status === "failed" ? (
-                  <Button icon={<RotateCcw size={14} />} onClick={() => onRetry(task)}>恢复设置</Button>
+                  <button type="button" className="btn btn-secondary" onClick={() => onRetry(task)}>恢复设置</button>
                 ) : null}
               </div>
             </article>
           );
         })}
       </div>
-    </Section>
+    </section>
   );
 }
