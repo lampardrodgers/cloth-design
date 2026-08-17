@@ -152,6 +152,8 @@ assert(freeStudioSource.includes('<ErrorBoundary'), "canvas must sit behind an e
 // 白屏兜底：自检 + 切回前台时强制重绘（合成层漏画时 DOM 是好的，自检看不出来）。
 assert(canvasSource.includes("useCanvasWatchdog"), "canvas must self-check for blank rendering");
 assert(canvasSource.includes("visibilitychange"), "canvas must force a repaint when the tab comes back to the front");
+// 字体不能挡住渲染：tldraw 默认等字体加载完才画，卡一个就全白。
+assert(canvasSource.includes("maxFontsToLoadBeforeRender: 0"), "canvas must not block rendering on font loading");
 assert(canvasSource.includes("multiple"), "Attachment inputs must accept multiple images");
 assert(simpleSource.includes("multiple") || attachmentSource.includes("multiple"), "Simple mode must accept multiple images");
 

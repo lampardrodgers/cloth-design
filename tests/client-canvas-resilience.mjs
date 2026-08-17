@@ -73,6 +73,13 @@ try {
     blockCanvasChunk ? route.fulfill({ status: 404, body: "not found" }) : route.continue(),
   );
 
+  // 字体请求卡住的情形：tldraw 默认会等字体加载完才渲染，卡住就一直空白
+  let stallFonts = false;
+  await page.route(/\.woff2?(\?|$)/, async (route) => {
+    if (!stallFonts) return route.continue();
+    await new Promise(() => undefined);
+  });
+
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.locator("input[autocomplete='name']").fill("Canvas Resilience");
   await page.locator("#auth-email").fill("canvas-resilience@example.test");
@@ -167,6 +174,37 @@ try {
 
   const admin = await page.evaluate(async () => (await fetch("/api/admin/client-errors").then((r) => r.json())).errors);
   assert.ok(admin.some((item) => item.message === "匿名也能报"), "匿名上报也要记下来");
+
+  // ── 4. 字体拉不动时，画布照样得画出来 ────────────────────────────────────
+  //
+  // 线上白屏的真正原因：画布上有带文字的图形时，tldraw 默认要等这些字体全部加载完
+  // 才渲染编辑器（maxFontsToLoadBeforeRender: Infinity），字体请求一卡住就永远空白。
+  await page.reload({ waitUntil: "networkidle" });
+  await page.locator(".tl-container").waitFor({ state: "visible", timeout: 40000 });
+  await page.locator(".tlui-toolbar").first().waitFor({ state: "visible", timeout: 20000 });
+
+  await page.locator(".tl-canvas").click({ position: { x: 600, y: 400 } });
+  await page.keyboard.press("t");
+  await page.mouse.click(600, 400);
+  await page.keyboard.type("袖子改短一点");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(1500);
+  assert.ok((await page.locator(".tl-shape").count()) > 0, "画布上要先有一个带文字的图形");
+
+  stallFonts = true;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator(".canvas-shell").waitFor({ state: "visible", timeout: 30000 });
+  await page.locator(".tlui-toolbar").first().waitFor({ state: "visible", timeout: 25000 });
+  const withStalledFonts = await page.evaluate(() => ({
+    container: !!document.querySelector(".tl-container"),
+    toolbar: !!document.querySelector(".tlui-toolbar"),
+    loading: !!document.querySelector(".tl-loading"),
+  }));
+  assert.deepEqual(
+    withStalledFonts,
+    { container: true, toolbar: true, loading: false },
+    "字体拉不动时不能卡在加载态：画布和工具栏都要正常出现",
+  );
 
   console.log("canvas resilience tests passed");
 } finally {

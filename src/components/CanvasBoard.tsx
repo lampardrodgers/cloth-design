@@ -1627,6 +1627,17 @@ function FramePanel({
 const shapeUtils = [AiFrameShapeUtil];
 const tools = [AnnotationTool];
 
+/**
+ * tldraw 默认（maxFontsToLoadBeforeRender: Infinity）要等当前页用到的字体全部加载完
+ * 才肯渲染编辑器 —— 画布、工具栏、面板一个都不出来。字体有十几个、加起来 1MB 出头，
+ * 只要有一个请求卡住（网络慢、标签页在后台时浏览器压着不发），画布就一直是空白，
+ * 而它的「加载中」遮罩带 0.2s 淡入动画，在后台标签页里动画不跑，opacity 停在 0，
+ * 于是连转圈都看不见 —— 线上的白屏就是这么来的。
+ *
+ * 改成 0：先把画布画出来，字体在后台自己加载，图形上的文字最多先用后备字体显示一下。
+ */
+const editorOptions = { maxFontsToLoadBeforeRender: 0 };
+
 /* ────────────────────────────────────────────────────────────────────────────
  * 空白自检
  *
@@ -1799,6 +1810,7 @@ export function CanvasBoard({ costFor, credits, results, pendingImages, onGenera
             <Tldraw
               key={mountKey}
               persistenceKey={PERSISTENCE_KEY}
+              options={editorOptions}
               assetUrls={assetUrls}
               shapeUtils={shapeUtils}
               tools={tools}
