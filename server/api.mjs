@@ -687,7 +687,7 @@ export function registerBusinessRoutes(app) {
       userAgent: String(req.headers["user-agent"] ?? "").slice(0, 300),
     };
     recordClientError(entry);
-    console.warn(`[client-error] ${entry.scope} | ${entry.message} | ${entry.url} | user=${entry.userId ?? "-"}`);
+    console.warn(`[client-error] ${entry.at} | ${entry.scope} | ${entry.message} | ${entry.url} | user=${entry.userId ?? "-"}`);
     if (entry.detail) console.warn(`[client-error] detail ${JSON.stringify(entry.detail)}`);
     res.status(204).end();
   });
