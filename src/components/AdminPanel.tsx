@@ -1,4 +1,5 @@
-import { DatabaseZap, KeyRound, Settings2, ShieldCheck, WalletCards } from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { DatabaseZap, KeyRound, Settings2, ShieldCheck, UserPlus, WalletCards } from "lucide-react";
 import { generationModes } from "../data/catalog";
 import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
 import type {
@@ -15,6 +16,7 @@ import type {
   SystemPromptMap,
   UserAccount,
 } from "../types";
+import type { AdminSummary } from "../lib/api";
 import { Metric, Section } from "./ui";
 
 interface AdminPanelProps {
@@ -24,6 +26,10 @@ interface AdminPanelProps {
   onUsersChange: (users: UserAccount[]) => void;
   onUserPatch?: (id: string, patch: Partial<UserAccount>) => void;
   onCreditAdjust?: (id: string, amount: number) => void;
+  summary?: AdminSummary;
+  /** 后台建号 / 重置密码；返回字符串表示失败原因。 */
+  onCreateUser?: (input: { email: string; password: string; name: string; role: UserAccount["role"]; unlimited: boolean; credits: number }) => Promise<string | void>;
+  onResetPassword?: (id: string, password: string) => Promise<string | void>;
   packages: RechargePackage[];
   onPackagesChange: (packages: RechargePackage[]) => void;
   onPackagePatch?: (id: string, patch: Partial<RechargePackage>) => void;
@@ -55,6 +61,9 @@ export function AdminPanel({
   onUsersChange,
   onUserPatch,
   onCreditAdjust,
+  summary,
+  onCreateUser,
+  onResetPassword,
   packages: packagesList,
   onPackagesChange,
   onPackagePatch,
@@ -79,6 +88,35 @@ export function AdminPanel({
     onPackagePatch?.(id, patch);
   };
 
+  const [draft, setDraft] = useState({ email: "", password: "", name: "", role: "user" as UserAccount["role"], unlimited: false, credits: 0 });
+  const [creating, setCreating] = useState(false);
+  const [createNotice, setCreateNotice] = useState("");
+
+  const submitNewUser = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!onCreateUser || creating) return;
+    setCreating(true);
+    setCreateNotice("");
+    try {
+      const error = await onCreateUser(draft);
+      if (error) setCreateNotice(error);
+      else {
+        setCreateNotice(`已创建 ${draft.email}，把邮箱和这个密码发给对方即可登录。`);
+        setDraft({ email: "", password: "", name: "", role: "user", unlimited: false, credits: 0 });
+      }
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const resetPassword = async (user: UserAccount) => {
+    if (!onResetPassword) return;
+    const next = window.prompt(`给「${user.name}」设置新密码（至少 8 位）：`);
+    if (!next) return;
+    const error = await onResetPassword(user.id, next);
+    setCreateNotice(error || `已重置「${user.name}」的密码，请把新密码告诉对方。`);
+  };
+
   const updateUser = (id: string, patch: Partial<UserAccount>) => {
     onUsersChange(users.map((user) => (user.id === id ? { ...user, ...patch } : user)));
     onUserPatch?.(id, patch);
@@ -86,6 +124,18 @@ export function AdminPanel({
 
   return (
     <div className="admin-layout">
+      {summary ? (
+        <Section title="运行概览">
+          <div className="metric-row admin-summary">
+            <Metric label="账号" value={String(summary.users.total)} tone={summary.users.pending ? "warn" : "default"} hint={summary.users.pending ? `${summary.users.pending} 个待开通` : "全部已开通"} />
+            <Metric label="今日活跃" value={String(summary.users.active24h)} tone="default" hint={`${summary.users.unlimited} 个无限额度 · ${summary.users.withOwnKey} 个自备 Key`} />
+            <Metric label="今日生成" value={String(summary.tasks.last24h)} tone={summary.tasks.failed24h ? "warn" : "good"} hint={summary.tasks.failed24h ? `其中 ${summary.tasks.failed24h} 次失败` : "没有失败任务"} />
+            <Metric label="累计成片" value={String(summary.images.total)} tone="default" hint={`今日 +${summary.images.last24h}`} />
+            <Metric label="30 天耗分" value={String(summary.creditsSpent30d)} tone="default" hint={summary.selfSignupAllowed ? "自助注册：开放" : "自助注册：已关闭"} />
+          </div>
+        </Section>
+      ) : null}
+
       <Section title="模型路由" action={<Settings2 size={17} />}>
         <div className="route-table admin-table">
           <div className="table-row table-head">
@@ -241,21 +291,62 @@ export function AdminPanel({
         </Section>
       </section>
 
-      <Section title="用户与用量">
+      <Section title="用户与用量" action={<UserPlus size={17} />}>
         <p className="admin-note">
-          新注册的账号默认「待开通」，登录后会被拦住；在这里点「开通」才放行。用量按任务数 / 成片数 / 消耗积分统计，
-          带自备 Key 的账号生成不扣积分，单独计入「自备 Key」一栏。
+          {summary && !summary.selfSignupAllowed
+            ? "自助注册已关闭：账号只能在这里创建。建好后把邮箱和初始密码发给对方，他们直接登录即可。"
+            : "自助注册开放中：别人注册后默认「待开通」，需要在这里点「开通」才放行。"}
+          {" "}勾了「无限」的账号生成不扣积分，登录后顶栏会显示 ∞；用量按任务数 / 成片数 / 消耗积分统计。
         </p>
+
+        {onCreateUser ? (
+          <form className="admin-create-user" onSubmit={submitNewUser}>
+            <label className="field">
+              <span>邮箱</span>
+              <input type="email" required value={draft.email} onChange={(e) => setDraft({ ...draft, email: e.target.value })} placeholder="friend@example.com" autoComplete="off" />
+            </label>
+            <label className="field">
+              <span>初始密码</span>
+              <input type="text" required minLength={8} value={draft.password} onChange={(e) => setDraft({ ...draft, password: e.target.value })} placeholder="至少 8 位" autoComplete="off" />
+            </label>
+            <label className="field">
+              <span>显示名</span>
+              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="可留空" />
+            </label>
+            <label className="field">
+              <span>角色</span>
+              <select value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value as UserAccount["role"] })}>
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+                <option value="owner">owner</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>初始积分</span>
+              <input type="number" min={0} value={draft.credits} onChange={(e) => setDraft({ ...draft, credits: Number(e.target.value) })} />
+            </label>
+            <label className="admin-create-check">
+              <input type="checkbox" checked={draft.unlimited} onChange={(e) => setDraft({ ...draft, unlimited: e.target.checked })} />
+              <span>无限额度</span>
+            </label>
+            <button type="submit" className="btn btn-primary" disabled={creating}>
+              {creating ? "创建中…" : "创建账号"}
+            </button>
+          </form>
+        ) : null}
+        {createNotice ? <p className="admin-create-notice">{createNotice}</p> : null}
+
         <div className="user-table admin-table">
           <div className="table-row table-head" role="row">
             <span>用户</span>
             <span>角色</span>
             <span>开通</span>
+            <span>无限</span>
             <span>余额</span>
             <span>用量</span>
             <span>Key</span>
             <span>状态</span>
-            <span>调分</span>
+            <span>操作</span>
           </div>
           {users.map((user) => {
             const usage = user.usage;
@@ -286,7 +377,17 @@ export function AdminPanel({
                     </button>
                   )}
                 </span>
-                <input className="admin-input" type="number" min={0} value={user.credits} readOnly aria-label="余额" />
+                <span>
+                  <button
+                    type="button"
+                    className={`btn ${user.unlimited ? "btn-primary" : "btn-secondary"} admin-approve`}
+                    title={user.unlimited ? "取消无限额度，恢复按积分计费" : "开无限额度：生成不扣积分，登录后顶栏显示 ∞"}
+                    onClick={() => updateUser(user.id, { unlimited: !user.unlimited })}
+                  >
+                    {user.unlimited ? "∞ 已开" : "开"}
+                  </button>
+                </span>
+                <input className="admin-input" type="number" min={0} value={user.unlimited ? 0 : user.credits} readOnly aria-label="余额" />
                 <span className="admin-usage" title={lastActive ? `最近活跃 ${lastActive.toLocaleString("zh-CN")}` : "还没有生成记录"}>
                   <strong>{usage?.taskCount ?? 0} 次</strong>
                   <small>
@@ -307,8 +408,11 @@ export function AdminPanel({
                   <option value="locked">锁定</option>
                 </select>
                 <span className="admin-route-actions">
-                  <button className="btn btn-secondary" onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
-                  <button className="btn btn-secondary" onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>
+                  <button className="btn btn-secondary" title="加 100 积分" onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
+                  <button className="btn btn-secondary" title="扣 100 积分" onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>
+                  {onResetPassword ? (
+                    <button className="btn btn-secondary" title="重置这个账号的登录密码" onClick={() => void resetPassword(user)}>改密</button>
+                  ) : null}
                 </span>
               </div>
             );

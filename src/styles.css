@@ -2714,40 +2714,6 @@ a.stage-tool {
   font-size: 14px;
 }
 
-.auth-debug-entry {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 2px;
-  padding: 11px 12px;
-  border: 1px dashed rgba(79, 122, 74, 0.45);
-  border-radius: var(--radius);
-  background: rgba(79, 122, 74, 0.05);
-}
-
-.auth-debug-entry > div {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.auth-debug-entry strong {
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.auth-debug-entry span {
-  font-size: 10.5px;
-  line-height: 1.45;
-  color: var(--muted);
-}
-
-.auth-debug-entry .btn {
-  flex: none;
-  border-color: rgba(79, 122, 74, 0.45);
-  color: var(--good);
-}
 
 .auth-form-description {
   margin: 18px 0 0;
@@ -3058,7 +3024,69 @@ a.stage-tool {
 }
 
 .user-table .table-row {
-  grid-template-columns: 1.3fr 0.55fr 0.6fr 0.5fr 1.4fr 0.7fr 0.55fr 0.75fr;
+  grid-template-columns: 1.25fr 0.5fr 0.55fr 0.45fr 0.45fr 1.3fr 0.65fr 0.5fr 0.95fr;
+}
+
+.admin-summary {
+  flex-wrap: wrap;
+}
+
+.metric-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+/* 后台建号表单 */
+.admin-create-user {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+}
+
+.admin-create-user .field {
+  flex: 1 1 150px;
+  min-width: 0;
+  gap: 4px;
+}
+
+.admin-create-user .field span {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.admin-create-user input,
+.admin-create-user select {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--field);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.admin-create-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.admin-create-notice {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--gold-deep);
 }
 
 .user-table .table-row-pending {

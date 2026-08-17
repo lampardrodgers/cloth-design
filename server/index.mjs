@@ -4,7 +4,7 @@ import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
-import { authHandler, requireAccount, runAuthMigrations } from "./auth.mjs";
+import { authHandler, requireAccount, runAuthMigrations, selfSignupAllowed } from "./auth.mjs";
 import { registerBusinessRoutes, serializeAccount } from "./api.mjs";
 import { migrateBusinessDatabase, nowIso, sqlite } from "./db.mjs";
 import { debugUnlimitedAvailable } from "./debug.mjs";
@@ -42,6 +42,11 @@ if (isProduction && process.env.PAYMENT_DEMO_MODE !== "false") {
   console.warn("Payment demo mode is active in production. Set PAYMENT_DEMO_MODE=false after configuring Alipay and WeChat Pay credentials.");
 }
 
+// 关掉自助注册时，直接在 HTTP 层挡住注册端点；后台建号走的是服务端 API，不经过这里。
+app.post("/api/auth/sign-up/{*any}", (req, res, next) => {
+  if (selfSignupAllowed()) return next();
+  res.status(403).json({ error: "本站不开放自助注册，请联系管理员开通账号。" });
+});
 app.all("/api/auth/{*any}", authHandler);
 
 app.post("/api/payments/alipay/notify", express.urlencoded({ extended: false }), async (req, res) => {
@@ -98,6 +103,7 @@ function publicConfig() {
     providerReady,
     imageModelConfigured: Boolean(process.env.OPENAI_IMAGE_MODEL),
     authEnabled: true,
+    selfSignupAllowed: selfSignupAllowed(),
     debugUnlimitedAvailable: debugUnlimitedAvailable(),
     port,
     providerHealth: imageProviderHealth({ mode, providerReady }),

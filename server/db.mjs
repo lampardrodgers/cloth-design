@@ -191,6 +191,10 @@ function createBusinessTables() {
     // 老账号默认视为已开通，不然升级一发所有人都被拦在门外。
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN approved INTEGER NOT NULL DEFAULT 1 CHECK (approved IN (0, 1))");
   }
+  if (!profileColumns.has("unlimited")) {
+    // 管理员给某个账号开「无限额度」：生成不扣积分，顶栏显示 ∞。
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN unlimited INTEGER NOT NULL DEFAULT 0 CHECK (unlimited IN (0, 1))");
+  }
   if (!profileColumns.has("api_key_encrypted")) {
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_encrypted TEXT");
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_hint TEXT");

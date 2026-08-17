@@ -3,8 +3,8 @@ import { signInEmail, signUpEmail } from "../lib/api";
 
 interface AuthPanelProps {
   onAuthenticated: () => Promise<void> | void;
-  debugUnlimitedAvailable?: boolean;
-  onDebugAuthenticated?: () => Promise<void> | void;
+  /** 关掉自助注册后只剩登录，账号由管理员在后台创建。 */
+  selfSignupAllowed?: boolean;
 }
 
 type AuthMode = "signin" | "signup";
@@ -17,8 +17,8 @@ const onboardingSteps = [
 
 const capabilities = ["商品图与广告图", "模特换衣与多图融合", "面料款式与批量后期"] as const;
 
-export function AuthPanel({ debugUnlimitedAvailable = false, onAuthenticated, onDebugAuthenticated }: AuthPanelProps) {
-  const [mode, setMode] = useState<AuthMode>("signup");
+export function AuthPanel({ selfSignupAllowed = true, onAuthenticated }: AuthPanelProps) {
+  const [mode, setMode] = useState<AuthMode>(selfSignupAllowed ? "signup" : "signin");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -31,6 +31,7 @@ export function AuthPanel({ debugUnlimitedAvailable = false, onAuthenticated, on
   };
 
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (!selfSignupAllowed) return;
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     const nextMode: AuthMode = event.key === "ArrowLeft" || event.key === "Home" ? "signup" : "signin";
@@ -51,19 +52,6 @@ export function AuthPanel({ debugUnlimitedAvailable = false, onAuthenticated, on
       await onAuthenticated();
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleDebugStart = async () => {
-    if (!onDebugAuthenticated) return;
-    setSubmitting(true);
-    setError("");
-    try {
-      await onDebugAuthenticated();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "开发调试模式启动失败");
     } finally {
       setSubmitting(false);
     }
@@ -113,6 +101,7 @@ export function AuthPanel({ debugUnlimitedAvailable = false, onAuthenticated, on
               {mode === "signup" ? "创建账号，保存创作记录" : "欢迎回来"}
             </h2>
 
+            {selfSignupAllowed ? (
             <div className="auth-tabs" role="tablist" aria-label="账号操作">
               <button
                 id="auth-tab-signup"
@@ -141,6 +130,7 @@ export function AuthPanel({ debugUnlimitedAvailable = false, onAuthenticated, on
                 登录
               </button>
             </div>
+            ) : null}
 
             <div className="auth-fields">
               <div
@@ -207,28 +197,14 @@ export function AuthPanel({ debugUnlimitedAvailable = false, onAuthenticated, on
                 {submitting ? "处理中" : mode === "signup" ? "创建账号" : "登录"}
               </button>
 
-              {debugUnlimitedAvailable && onDebugAuthenticated ? (
-                <div className="auth-debug-entry">
-                  <div>
-                    <strong>只做本地调试？</strong>
-                    <span>跳过账号和积分扣除，直接进入无限额度工作台。</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={handleDebugStart}
-                    disabled={submitting}
-                  >
-                    ∞ 开发调试
-                  </button>
-                </div>
-              ) : null}
             </div>
 
             <p className="auth-form-description">
-              {mode === "signup"
-                ? "注册后需要管理员在后台开通才能使用；开通后可在「账户」页填入自己的图像接口 Key。"
-                : "首个注册账号成为 owner；也可由 ADMIN_EMAILS 指定管理员。"}
+              {!selfSignupAllowed
+                ? "本站不开放自助注册。账号由管理员在后台创建，拿到邮箱和初始密码后在这里登录。"
+                : mode === "signup"
+                  ? "注册后需要管理员在后台开通才能使用；开通后可在「账户」页填入自己的图像接口 Key。"
+                  : "首个注册账号成为 owner；也可由 ADMIN_EMAILS 指定管理员。"}
             </p>
           </form>
         </section>

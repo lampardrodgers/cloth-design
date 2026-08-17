@@ -22,6 +22,7 @@ export interface ApiConfig {
   imageModelConfigured: boolean;
   providerHealth?: import("../types").ImageProviderHealth;
   authEnabled: boolean;
+  selfSignupAllowed?: boolean;
   debugUnlimitedAvailable?: boolean;
   port: number;
 }
@@ -62,7 +63,16 @@ export interface MeResponse {
   paymentConfig: PaymentConfigStatus;
 }
 
+export interface AdminSummary {
+  users: { total: number; pending: number; locked: number; unlimited: number; withOwnKey: number; active24h: number };
+  tasks: { total: number; last24h: number; failed: number; failed24h: number };
+  images: { total: number; last24h: number };
+  creditsSpent30d: number;
+  selfSignupAllowed: boolean;
+}
+
 export interface AdminOverviewResponse {
+  summary?: AdminSummary;
   users: UserAccount[];
   packages: RechargePackage[];
   orders: PaymentOrder[];
@@ -301,6 +311,33 @@ export async function updateAdminUser(id: string, patch: Partial<UserAccount>) {
     body: JSON.stringify(patch),
   });
   return parseJson<{ user: UserAccount }>(response);
+}
+
+export async function createAdminUser(input: {
+  email: string;
+  password: string;
+  name?: string;
+  role?: UserAccount["role"];
+  unlimited?: boolean;
+  credits?: number;
+}) {
+  const response = await fetch("/api/admin/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ user: UserAccount }>(response);
+}
+
+export async function resetAdminUserPassword(id: string, password: string) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ password }),
+  });
+  return parseJson<{ ok: boolean }>(response);
 }
 
 export async function updateAdminPackage(id: string, patch: Partial<RechargePackage>) {

@@ -177,6 +177,8 @@ export interface UserAccount {
   status: "active" | "locked";
   /** 新账号默认待管理员开通；owner/admin 始终为 true。 */
   approved?: boolean;
+  /** 管理员开的「无限额度」：生成不扣积分，顶栏显示 ∞。 */
+  unlimited?: boolean;
   /** 账号自备了图像接口 Key（用它生成不扣积分）。 */
   hasOwnApiKey?: boolean;
   apiKeyHint?: string | null;

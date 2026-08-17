@@ -11,7 +11,7 @@ delete process.env.OPENAI_API_KEY;
 const { migrateBusinessDatabase, sqlite, nowIso } = await import("../server/db.mjs");
 migrateBusinessDatabase();
 const keys = await import("../server/user-keys.mjs");
-const { signupApprovalRequired, ensureUserProfile } = await import("../server/auth.mjs");
+const { signupApprovalRequired, selfSignupAllowed, ensureUserProfile } = await import("../server/auth.mjs");
 const { ensureDebugUserProfile, newDebugSeat, debugUserIdFromSeat } = await import("../server/debug.mjs");
 
 /* ── 迁移：老库升级后老账号视为已开通，任务表带 key_source ───────────────── */
@@ -42,6 +42,37 @@ sqlite
   )
   .run(timestamp, timestamp);
 assert.equal(sqlite.prepare("SELECT approved FROM user_profile WHERE user_id = 'u-legacy'").get().approved, 1, "老账号默认已开通");
+
+/* ── 自助注册开关 ────────────────────────────────────────────────────────── */
+delete process.env.ALLOW_SELF_SIGNUP;
+assert.equal(selfSignupAllowed(), true, "默认允许自助注册，本地开发和首次装机要能拿到 owner");
+process.env.ALLOW_SELF_SIGNUP = "false";
+assert.equal(selfSignupAllowed(), false, "关掉后只能后台建号");
+delete process.env.ALLOW_SELF_SIGNUP;
+
+/* ── 无限额度账号不走积分账本 ────────────────────────────────────────────── */
+const { consumeCredits } = await import("../server/payments.mjs");
+sqlite
+  .prepare("UPDATE user_profile SET credits = 5, unlimited = 1 WHERE user_id = 'u-second-real'")
+  .run();
+consumeCredits({ userId: "u-second-real", taskId: "unlimited-task", amount: 9999, reason: "无限额度扣费" });
+assert.equal(
+  sqlite.prepare("SELECT credits FROM user_profile WHERE user_id = 'u-second-real'").get().credits,
+  5,
+  "开了无限额度的账号余额不该被扣",
+);
+assert.equal(
+  sqlite.prepare("SELECT COUNT(*) AS c FROM credit_ledger WHERE user_id = 'u-second-real'").get().c,
+  0,
+  "无限额度也不写流水",
+);
+// 关掉之后恢复正常扣费
+sqlite.prepare("UPDATE user_profile SET unlimited = 0 WHERE user_id = 'u-second-real'").run();
+assert.throws(
+  () => consumeCredits({ userId: "u-second-real", taskId: "t2", amount: 9999, reason: "普通扣费" }),
+  /积分余额不足/,
+  "取消无限额度后要恢复按余额校验",
+);
 
 /* ── 注册审批开关 ────────────────────────────────────────────────────────── */
 delete process.env.SIGNUP_APPROVAL;
@@ -96,6 +127,20 @@ const api = await fs.readFile("server/api.mjs", "utf8");
 assert(api.includes('app.put("/api/me/api-key"') && api.includes('app.delete("/api/me/api-key"'), "账户要能保存 / 清除自备 Key");
 assert(api.includes("export function usageByUser"), "后台按账号汇总用量");
 assert(api.includes("nextApproved"), "后台能开通 / 收回账号");
+assert(api.includes("nextUnlimited"), "后台能开 / 关无限额度");
+assert(api.includes('app.post("/api/admin/users"'), "后台能直接建账号");
+assert(api.includes('app.post("/api/admin/users/:id/password"'), "后台能重置密码");
+assert(api.includes("export function adminSummary"), "后台要有一眼概览");
+const indexSrc = await fs.readFile("server/index.mjs", "utf8");
+assert(indexSrc.includes('app.post("/api/auth/sign-up/{*any}"'), "关掉自助注册时要在 HTTP 层挡住注册端点");
+assert(indexSrc.includes("selfSignupAllowed: selfSignupAllowed()"), "前端要能知道注册是否开放");
+const authPanel = await fs.readFile("src/components/AuthPanel.tsx", "utf8");
+assert(authPanel.includes("selfSignupAllowed ? ("), "关掉自助注册后登录页不显示注册 tab");
+// 调试入口不能出现在登录页；无限额度改由管理员按账号授予
+assert(!authPanel.includes("开发调试"), "登录页不该再有开发调试入口");
+const appSrc = await fs.readFile("src/App.tsx", "utf8");
+assert(!appSrc.includes("debug-mode-button"), "顶栏不该再有开发调试切换按钮");
+assert(appSrc.includes('currentUser?.unlimited === true'), "顶栏的 ∞ 要跟着账号上的无限额度走");
 assert(!api.includes("api_key_encrypted:") , "接口不回传密文");
 const auth = await fs.readFile("server/auth.mjs", "utf8");
 assert(auth.includes("pendingApproval: true"), "未开通的账号要被明确拦下并说明原因");

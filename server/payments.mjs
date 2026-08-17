@@ -325,9 +325,10 @@ function insertPaymentEvent({ provider, eventKey, orderId, transactionId, payloa
 }
 
 function addCreditLedger({ userId, orderId, taskId = null, kind, amount, reason, createdBy = null }) {
-  const profile = sqlite.prepare("SELECT credits FROM user_profile WHERE user_id = ?").get(userId);
+  const profile = sqlite.prepare("SELECT credits, unlimited FROM user_profile WHERE user_id = ?").get(userId);
   if (!profile) throw new Error("用户不存在。");
-  if (isDebugUserId(userId)) return DEBUG_UNLIMITED_CREDITS;
+  // 调试座位和管理员开了「无限额度」的账号都不走积分账本。
+  if (isDebugUserId(userId) || Number(profile.unlimited ?? 0) === 1) return DEBUG_UNLIMITED_CREDITS;
   const balanceAfter = profile.credits + amount;
   if (balanceAfter < 0) throw new Error("积分余额不足。");
   const timestamp = nowIso();

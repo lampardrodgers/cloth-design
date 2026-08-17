@@ -34,6 +34,14 @@ function adminEmails() {
   );
 }
 
+/**
+ * 关掉自助注册后，账号只能由管理员在后台创建。
+ * 默认允许，方便本地开发和首次装机拿到 owner；对外部署建议设成 false。
+ */
+export function selfSignupAllowed() {
+  return String(process.env.ALLOW_SELF_SIGNUP ?? "true").trim().toLowerCase() !== "false";
+}
+
 /** 新注册的账号默认要等管理员开通；SIGNUP_APPROVAL=false 可放开为注册即用。 */
 export function signupApprovalRequired() {
   return String(process.env.SIGNUP_APPROVAL ?? "true").toLowerCase() !== "false";

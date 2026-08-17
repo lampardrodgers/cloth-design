@@ -46,11 +46,23 @@ export function Section({
   );
 }
 
-export function Metric({ label, value, tone = "default" }: { label: string; value: string; tone?: "default" | "good" | "warn" }) {
+export function Metric({
+  label,
+  value,
+  tone = "default",
+  hint,
+}: {
+  label: string;
+  value: string;
+  tone?: "default" | "good" | "warn";
+  /** 数字下面的一行小字，用来说明这个数是怎么来的。 */
+  hint?: string;
+}) {
   return (
     <div className={`metric metric-${tone}`}>
       <span>{label}</span>
       <strong>{value}</strong>
+      {hint ? <small className="metric-hint">{hint}</small> : null}
     </div>
   );
 }

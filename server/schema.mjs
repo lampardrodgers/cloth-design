@@ -9,6 +9,7 @@ export const userProfile = sqliteTable("user_profile", {
   monthlyUsed: integer("monthly_used").notNull(),
   status: text("status").notNull(),
   approved: integer("approved", { mode: "boolean" }).notNull(),
+  unlimited: integer("unlimited", { mode: "boolean" }).notNull(),
   apiKeyEncrypted: text("api_key_encrypted"),
   apiKeyHint: text("api_key_hint"),
   apiKeyUpdatedAt: text("api_key_updated_at"),

@@ -11,6 +11,8 @@ import {
 import {
   adjustAdminCredits,
   clearMyApiKey,
+  createAdminUser,
+  resetAdminUserPassword,
   completeDemoPayment,
   createPaymentOrder,
   deleteGenerationResult,
@@ -22,7 +24,6 @@ import {
   saveMyApiKey,
   endDebugSession,
   signOut,
-  startDebugSession,
   updateAdminPackage,
   updateGenerationResultStorageStatus,
   updateAdminUser,
@@ -276,6 +277,7 @@ function App() {
           providerReady: false,
           imageModelConfigured: false,
           authEnabled: true,
+          selfSignupAllowed: true,
           debugUnlimitedAvailable: false,
           port: 8888,
         }),
@@ -327,9 +329,17 @@ function App() {
     return () => window.clearInterval(timer);
   }, [activeOrder?.id, activeOrder?.status]);
 
+  const loadAdminOverview = async () => {
+    try {
+      setAdminOverview(await fetchAdminOverview());
+    } catch {
+      setAdminOverview(null);
+    }
+  };
+
   useEffect(() => {
     if (!path.startsWith("/admin") || !currentUser || !["owner", "admin"].includes(currentUser.role)) return;
-    fetchAdminOverview().then(setAdminOverview).catch(() => setAdminOverview(null));
+    void loadAdminOverview();
   }, [path, currentUser?.id, currentUser?.role]);
 
   const handleSettingsChange = (patch: Partial<StudioSettings>) => {
@@ -628,20 +638,6 @@ function App() {
     setActiveOrder(null);
   };
 
-  const handleDebugToggle = async () => {
-    try {
-      if (debugUnlimited) {
-        await endDebugSession();
-      } else {
-        await startDebugSession();
-      }
-      await loadAccount();
-      setView("free");
-    } catch (error) {
-      setAuthError(error instanceof Error ? error.message : "切换开发调试模式失败");
-    }
-  };
-
   const handleSetAdminPath = (nextPath: string) => {
     window.history.pushState({}, "", nextPath);
     setPath(nextPath);
@@ -681,6 +677,9 @@ function App() {
       setAuthError(error instanceof Error ? error.message : "删除生成结果失败");
     }
   };
+
+  // 调试座位和管理员开过「无限额度」的账号，在界面上是同一种状态：显示 ∞、不校验余额。
+  const unlimitedCredits = debugUnlimited || currentUser?.unlimited === true;
 
   const renderView = () => {
     if (!currentUser) return null;
@@ -725,7 +724,7 @@ function App() {
       return (
         <FreeStudio
           results={results.filter((result) => result.mode === "free")}
-          credits={debugUnlimited ? Number.MAX_SAFE_INTEGER : currentUser.credits}
+          credits={unlimitedCredits ? Number.MAX_SAFE_INTEGER : currentUser.credits}
           creditPolicy={creditPolicy}
           settings={settings}
           apiConfig={apiConfig}
@@ -747,7 +746,7 @@ function App() {
             orders={orders}
             ledger={ledger}
             paymentCapabilities={paymentCapabilities}
-            debugUnlimited={debugUnlimited}
+            debugUnlimited={unlimitedCredits}
             generationResults={results}
             activeOrder={activeOrder}
             onRecharge={handleRecharge}
@@ -803,11 +802,7 @@ function App() {
           onAuthenticated={async () => {
             await loadAccount();
           }}
-          debugUnlimitedAvailable={Boolean(apiConfig?.debugUnlimitedAvailable)}
-          onDebugAuthenticated={async () => {
-            await startDebugSession();
-            await loadAccount();
-          }}
+          selfSignupAllowed={apiConfig?.selfSignupAllowed !== false}
         />
         {authError && !authError.includes("请先登录") ? <div className="auth-error">{authError}</div> : null}
       </>
@@ -855,6 +850,22 @@ function App() {
           <AdminPanel
             routes={routes}
             onRoutesChange={setRoutes}
+            summary={adminOverview?.summary}
+            onCreateUser={async (input) => {
+              try {
+                await createAdminUser(input);
+                await loadAdminOverview();
+              } catch (error) {
+                return error instanceof Error ? error.message : "创建账号失败";
+              }
+            }}
+            onResetPassword={async (id, password) => {
+              try {
+                await resetAdminUserPassword(id, password);
+              } catch (error) {
+                return error instanceof Error ? error.message : "重置密码失败";
+              }
+            }}
             users={adminOverview?.users ?? [currentUser]}
             onUsersChange={(items) => setAdminOverview((current) => (current ? { ...current, users: items } : current))}
             onUserPatch={(id, patch) => {
@@ -950,20 +961,10 @@ function App() {
             <button
               className="credit-button"
               onClick={() => setView("account")}
-              aria-label={debugUnlimited ? "开发调试无限额度" : `账户余额 ${currentUser.credits} 积分`}
+              aria-label={unlimitedCredits ? "无限额度" : `账户余额 ${currentUser.credits} 积分`}
             >
-              <strong>{debugUnlimited ? "∞" : currentUser.credits}</strong> {debugUnlimited ? "无限额度" : "积分"}
+              <strong>{unlimitedCredits ? "∞" : currentUser.credits}</strong> {unlimitedCredits ? "无限额度" : "积分"}
             </button>
-            {apiConfig?.debugUnlimitedAvailable ? (
-              <button
-                type="button"
-                className={`debug-mode-button ${debugUnlimited ? "active" : ""}`}
-                onClick={handleDebugToggle}
-                title={debugUnlimited ? "退出开发调试模式" : "切换到开发调试模式"}
-              >
-                {debugUnlimited ? "∞ 调试中" : "开发调试"}
-              </button>
-            ) : null}
             <button
               className={`task-menu-button ${runningTasks > 0 ? "running" : ""}`}
               onClick={() => setTaskMenuOpen((open) => !open)}

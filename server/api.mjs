@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { requireAccount, requireAdmin } from "./auth.mjs";
+import { auth, ensureUserProfile, requireAccount, requireAdmin, selfSignupAllowed } from "./auth.mjs";
 import { nowIso, sqlite } from "./db.mjs";
 import {
   DEBUG_UNLIMITED_CREDITS,
@@ -36,6 +36,8 @@ export function serializeAccount(user, profile) {
     status: "active",
   };
   const debugUser = isDebugUserId(user.id);
+  // 管理员开过「无限额度」的账号，和调试座位一样不受积分限制。
+  const unlimited = debugUser || Number(safeProfile.unlimited ?? 0) === 1;
   return {
     id: user.id,
     email: user.email,
@@ -43,7 +45,8 @@ export function serializeAccount(user, profile) {
     name: safeProfile.display_name || (debugUser ? "开发调试" : user.name || user.email),
     role: safeProfile.role,
     plan: debugUser ? "无限调试" : safeProfile.plan,
-    credits: debugUser ? DEBUG_UNLIMITED_CREDITS : safeProfile.credits,
+    credits: unlimited ? DEBUG_UNLIMITED_CREDITS : safeProfile.credits,
+    unlimited,
     monthlyUsed: debugUser ? 0 : safeProfile.monthly_used,
     status: safeProfile.status,
     approved: Number(safeProfile.approved ?? 1) === 1,
@@ -234,6 +237,64 @@ function getProfileWithUser(userId) {
     .get(userId);
 }
 
+/** 后台首屏的一眼概览：账号、待办、今天/本月的实际用量。 */
+export function adminSummary() {
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const profiles = sqlite
+    .prepare(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN approved = 0 THEN 1 ELSE 0 END) AS pending,
+         SUM(CASE WHEN status = 'locked' THEN 1 ELSE 0 END) AS locked,
+         SUM(CASE WHEN unlimited = 1 THEN 1 ELSE 0 END) AS unlimited,
+         SUM(CASE WHEN api_key_encrypted IS NOT NULL THEN 1 ELSE 0 END) AS with_own_key
+       FROM user_profile`,
+    )
+    .get();
+  const tasks = sqlite
+    .prepare(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_24h,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+         SUM(CASE WHEN status = 'failed' AND created_at >= ? THEN 1 ELSE 0 END) AS failed_24h
+       FROM generation_task`,
+    )
+    .get(dayAgo, dayAgo);
+  const images = sqlite
+    .prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_24h FROM generated_result")
+    .get(dayAgo);
+  const credits = sqlite
+    .prepare(
+      `SELECT SUM(CASE WHEN kind IN ('consume', 'refund') THEN -amount ELSE 0 END) AS spent_30d
+       FROM credit_ledger WHERE created_at >= ?`,
+    )
+    .get(monthAgo);
+  const activeUsers = sqlite
+    .prepare("SELECT COUNT(DISTINCT user_id) AS count FROM generation_task WHERE created_at >= ?")
+    .get(dayAgo);
+  return {
+    users: {
+      total: profiles.total || 0,
+      pending: profiles.pending || 0,
+      locked: profiles.locked || 0,
+      unlimited: profiles.unlimited || 0,
+      withOwnKey: profiles.with_own_key || 0,
+      active24h: activeUsers.count || 0,
+    },
+    tasks: {
+      total: tasks.total || 0,
+      last24h: tasks.last_24h || 0,
+      failed: tasks.failed || 0,
+      failed24h: tasks.failed_24h || 0,
+    },
+    images: { total: images.total || 0, last24h: images.last_24h || 0 },
+    creditsSpent30d: Math.max(0, credits.spent_30d || 0),
+    selfSignupAllowed: selfSignupAllowed(),
+  };
+}
+
 function serializeAdminUser(row, usage = usageByUser().get(row.user_id)) {
   return {
     id: row.user_id,
@@ -245,6 +306,7 @@ function serializeAdminUser(row, usage = usageByUser().get(row.user_id)) {
     monthlyUsed: row.monthly_used,
     status: row.status,
     approved: Number(row.approved ?? 1) === 1,
+    unlimited: Number(row.unlimited ?? 0) === 1,
     hasOwnApiKey: Boolean(row.api_key_encrypted),
     apiKeyHint: row.api_key_hint || null,
     createdAt: row.created_at,
@@ -488,6 +550,7 @@ export function registerBusinessRoutes(app) {
       }));
     const ledger = sqlite.prepare("SELECT * FROM credit_ledger ORDER BY created_at DESC LIMIT 80").all().map(serializeLedger);
     res.json({
+      summary: adminSummary(),
       users,
       packages: getAllPackages(),
       orders,
@@ -515,19 +578,111 @@ export function registerBusinessRoutes(app) {
     const nextName =
       typeof req.body.name === "string" && req.body.name.trim() ? req.body.name.trim().slice(0, 80) : current.display_name;
     const nextApproved = typeof req.body.approved === "boolean" ? (req.body.approved ? 1 : 0) : Number(current.approved ?? 1);
+    const nextUnlimited = typeof req.body.unlimited === "boolean" ? (req.body.unlimited ? 1 : 0) : Number(current.unlimited ?? 0);
     sqlite
       .prepare(
-        "UPDATE user_profile SET display_name = ?, role = ?, plan = ?, status = ?, approved = ?, updated_at = ? WHERE user_id = ?",
+        "UPDATE user_profile SET display_name = ?, role = ?, plan = ?, status = ?, approved = ?, unlimited = ?, updated_at = ? WHERE user_id = ?",
       )
-      .run(nextName, nextRole, nextPlan, nextStatus, nextApproved, nowIso(), req.params.id);
+      .run(nextName, nextRole, nextPlan, nextStatus, nextApproved, nextUnlimited, nowIso(), req.params.id);
     insertAudit({
       actorUserId: account.user.id,
       action: "user.update",
       targetType: "user",
       targetId: req.params.id,
-      detail: { role: nextRole, status: nextStatus, plan: nextPlan, name: nextName, approved: Boolean(nextApproved) },
+      detail: {
+        role: nextRole,
+        status: nextStatus,
+        plan: nextPlan,
+        name: nextName,
+        approved: Boolean(nextApproved),
+        unlimited: Boolean(nextUnlimited),
+      },
     });
     res.json({ user: serializeAdminUser(getProfileWithUser(req.params.id)) });
+  });
+
+  /**
+   * 后台建号：不走自助注册端点，所以关掉 ALLOW_SELF_SIGNUP 之后这条路依然可用。
+   * signUpEmail 只负责建 better-auth 的用户和密码，业务侧的角色/开通/额度在这里补齐。
+   */
+  app.post("/api/admin/users", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
+    const name = String(req.body?.name || "").trim().slice(0, 80) || email.split("@")[0] || "未命名用户";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      res.status(400).json({ error: "请填写正确的邮箱。" });
+      return;
+    }
+    if (password.length < 8) {
+      res.status(400).json({ error: "密码至少 8 位。" });
+      return;
+    }
+    const exists = sqlite.prepare('SELECT id FROM "user" WHERE lower(email) = ?').get(email);
+    if (exists) {
+      res.status(409).json({ error: "这个邮箱已经有账号了。" });
+      return;
+    }
+    try {
+      const created = await auth.api.signUpEmail({ body: { name, email, password } });
+      const userId = created?.user?.id;
+      if (!userId) throw new Error("创建账号失败。");
+      // signUpEmail 只建 better-auth 的用户；业务档案是首次登录时才补的，
+      // 这里先手动建出来，否则下面的 UPDATE 命中 0 行、新号还得等自己开通。
+      ensureUserProfile({ id: userId, email, name });
+      const role = ["owner", "admin", "user"].includes(req.body?.role) ? req.body.role : "user";
+      const unlimited = req.body?.unlimited === true ? 1 : 0;
+      const credits = Number.isFinite(Number(req.body?.credits)) ? Math.max(0, Math.floor(Number(req.body.credits))) : 0;
+      // 后台建的号默认直接可用，不用再点一次开通。
+      sqlite
+        .prepare(
+          `UPDATE user_profile
+           SET display_name = ?, role = ?, approved = 1, unlimited = ?, credits = ?, updated_at = ?
+           WHERE user_id = ?`,
+        )
+        .run(name, role, unlimited, credits, nowIso(), userId);
+      insertAudit({
+        actorUserId: account.user.id,
+        action: "user.create",
+        targetType: "user",
+        targetId: userId,
+        detail: { email, role, unlimited: Boolean(unlimited), credits },
+      });
+      res.status(201).json({ user: serializeAdminUser(getProfileWithUser(userId)) });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : "创建账号失败。" });
+    }
+  });
+
+  /** 重置某个账号的密码。没有配邮件服务，忘密码只能由管理员在这里改。 */
+  app.post("/api/admin/users/:id/password", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const password = String(req.body?.password || "");
+    if (password.length < 8) {
+      res.status(400).json({ error: "密码至少 8 位。" });
+      return;
+    }
+    const target = getProfileWithUser(req.params.id);
+    if (!target) {
+      res.status(404).json({ error: "用户不存在。" });
+      return;
+    }
+    try {
+      const ctx = await auth.$context;
+      await ctx.internalAdapter.updatePassword(req.params.id, await ctx.password.hash(password));
+      insertAudit({
+        actorUserId: account.user.id,
+        action: "user.password_reset",
+        targetType: "user",
+        targetId: req.params.id,
+        detail: {},
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : "重置密码失败。" });
+    }
   });
 
   app.patch("/api/admin/packages/:id", async (req, res) => {
