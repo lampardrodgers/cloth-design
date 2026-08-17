@@ -491,8 +491,17 @@ export function AdminPanel({
             return (
               <div className={`table-row ${approved ? "" : "table-row-pending"}`} role="row" key={user.id}>
                 <span className="admin-user-cell">
-                  <input className="admin-input" value={user.name} onChange={(event) => updateUser(user.id, { name: event.target.value })} aria-label={`${user.username ?? user.id} 显示名`} />
-                  <small>{user.username ?? user.email ?? user.id}</small>
+                  <i className="admin-user-avatar" aria-hidden="true">{(user.name || user.username || "?").trim().charAt(0)}</i>
+                  <span className="admin-user-lines">
+                    <input
+                      className="admin-user-name"
+                      value={user.name}
+                      onChange={(event) => updateUser(user.id, { name: event.target.value })}
+                      aria-label={`${user.username ?? user.id} 显示名`}
+                      title="点这里改显示名"
+                    />
+                    <small>{user.username ?? user.email ?? user.id}</small>
+                  </span>
                 </span>
                 {user.id === currentUserId ? (
                   <span className="admin-self-role" title="这是你自己的账号，角色不能在这里改，防止误点后进不了后台">
@@ -515,7 +524,7 @@ export function AdminPanel({
                       title={approved ? "收回开通：该账号将无法登录使用" : "放行：开通后该账号即可登录使用"}
                       onClick={() => updateUser(user.id, { approved: !approved })}
                     >
-                      {approved ? "已开通" : "开通"}
+                      {approved ? "已开通" : "待开通"}
                     </button>
                   )}
                 </span>
@@ -526,10 +535,14 @@ export function AdminPanel({
                     title={user.unlimited ? "取消无限额度，恢复按积分计费" : "开无限额度：生成不扣积分，登录后顶栏显示 ∞"}
                     onClick={() => updateUser(user.id, { unlimited: !user.unlimited })}
                   >
-                    {user.unlimited ? "∞ 已开" : "开"}
+                    {/* 显示状态而不是动作：写「开」会让人分不清是已开还是点了才开 */}
+                    {user.unlimited ? "∞ 已开" : "关"}
                   </button>
                 </span>
-                <input className="admin-input" type="number" min={0} value={user.unlimited ? 0 : user.credits} readOnly aria-label="余额" />
+                {/* 只读值就别做成输入框，看着能改其实不能 */}
+                <span className={`admin-balance ${user.unlimited ? "admin-balance-unlimited" : ""}`}>
+                  {user.unlimited ? "∞" : user.credits}
+                </span>
                 <span className="admin-usage" title={lastActive ? `最近活跃 ${lastActive.toLocaleString("zh-CN")}` : "还没有生成记录"}>
                   <strong>{usage?.taskCount ?? 0} 次</strong>
                   <small>
@@ -558,8 +571,8 @@ export function AdminPanel({
                   </select>
                 )}
                 <span className="admin-route-actions">
-                  <button className="btn btn-secondary" title="加 100 积分" onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
-                  <button className="btn btn-secondary" title="扣 100 积分" onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>
+                  <button className="btn btn-secondary" title="加 100 积分" disabled={user.unlimited} onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
+                  <button className="btn btn-secondary" title="扣 100 积分" disabled={user.unlimited} onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>
                   {onResetPassword ? (
                     <button className="btn btn-secondary" title="重置这个账号的登录密码" onClick={() => void resetPassword(user)}>改密</button>
                   ) : null}
