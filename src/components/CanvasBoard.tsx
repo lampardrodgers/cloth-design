@@ -1642,10 +1642,13 @@ const editorOptions = { maxFontsToLoadBeforeRender: 0 };
  * 空白自检
  *
  * 有过「画布开着开着整片变白」的反馈：外壳还在、DOM 结构看不出问题，就是画不出来。
- * 复现不了的东西也得能自己爬起来，所以这里每 5 秒量一次 tldraw 容器：
- * 连着两次量不到（没有容器 / 尺寸为 0 / 工具栏没了）就重挂一次编辑器，
+ * 复现不了的东西也得能自己爬起来，所以这里每 5 秒量一次 tldraw 的画布层：
+ * 连着两次量不到（没有容器 / 画布层缺失 / 尺寸为 0）就重挂一次编辑器，
  * 画布内容存在 IndexedDB 里，重挂不会丢。重挂两次还是白的就不再折腾，
  * 显示一条提示让用户刷新，同时把现场尺寸发回服务端，好定位真正的原因。
+ *
+ * 注意不能拿工具栏当健康信号：tldraw 的专注模式（⌘/Ctrl + .）会合法地隐藏工具栏，
+ * 旧判定会因此每隔十秒误重挂，最终把正常画布送进「显示不出来」错误页。
  * ──────────────────────────────────────────────────────────────────────────── */
 
 const WATCHDOG_INTERVAL_MS = 5000;
@@ -1653,6 +1656,8 @@ const WATCHDOG_STRIKES = 2;
 const WATCHDOG_MAX_REMOUNTS = 2;
 // 重挂之后编辑器要重新从 IndexedDB 读一遍，这段时间不算它空白。
 const WATCHDOG_GRACE_MS = 8000;
+// 标签页刚回到前台时先留一小段合成层恢复时间，避免浏览器尚未完成布局就误判。
+const WATCHDOG_VISIBILITY_GRACE_MS = 2000;
 
 function useCanvasWatchdog(shellRef: React.RefObject<HTMLDivElement | null>, onRemount: () => void) {
   const [gaveUp, setGaveUp] = useState(false);
@@ -1665,16 +1670,37 @@ function useCanvasWatchdog(shellRef: React.RefObject<HTMLDivElement | null>, onR
   }, []);
 
   useEffect(() => {
+    const handleVisibilityChange = () => {
+      const state = stateRef.current;
+      state.strikes = 0;
+      if (!document.hidden) {
+        state.graceUntil = Math.max(state.graceUntil, Date.now() + WATCHDOG_VISIBILITY_GRACE_MS);
+      }
+    };
+
     const timer = window.setInterval(() => {
       const state = stateRef.current;
-      if (state.gaveUp || Date.now() < state.graceUntil) return;
+      // 后台标签页会被浏览器节流甚至暂时不给布局尺寸；这不是画布故障。
+      if (state.gaveUp || document.hidden || Date.now() < state.graceUntil) return;
       const shell = shellRef.current;
       if (!shell) return;
 
       const container = shell.querySelector(".tl-container");
       const rect = container?.getBoundingClientRect();
+      const canvas = shell.querySelector(".tl-canvas");
+      const canvasRect = canvas?.getBoundingClientRect();
       const toolbar = Boolean(shell.querySelector(".tlui-toolbar"));
-      const healthy = Boolean(container && rect && rect.width > 2 && rect.height > 2 && toolbar);
+      const focusMode = Boolean(shell.querySelector(".tlui-focus-button"));
+      const healthy = Boolean(
+        container &&
+          rect &&
+          rect.width > 2 &&
+          rect.height > 2 &&
+          canvas &&
+          canvasRect &&
+          canvasRect.width > 2 &&
+          canvasRect.height > 2,
+      );
 
       if (healthy) {
         state.healthySeen = true;
@@ -1693,9 +1719,12 @@ function useCanvasWatchdog(shellRef: React.RefObject<HTMLDivElement | null>, onR
         hasContainer: Boolean(container),
         containerW: Math.round(rect?.width ?? -1),
         containerH: Math.round(rect?.height ?? -1),
+        canvasW: Math.round(canvasRect?.width ?? -1),
+        canvasH: Math.round(canvasRect?.height ?? -1),
         shellW: Math.round(shellRect.width),
         shellH: Math.round(shellRect.height),
         toolbar,
+        focusMode,
         hidden: document.hidden,
         remounts: state.remounts,
         viewport: `${window.innerWidth}x${window.innerHeight}`,
@@ -1713,7 +1742,11 @@ function useCanvasWatchdog(shellRef: React.RefObject<HTMLDivElement | null>, onR
       reportClientError({ scope: "canvas-blank", message: "画布空白，自动重挂编辑器", detail });
       onRemount();
     }, WATCHDOG_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [onRemount, shellRef]);
 
   return { gaveUp, markReady };

@@ -122,6 +122,24 @@ try {
   // 等自检至少量到一次「正常」，否则它会以为画布还没起来
   await page.waitForTimeout(6000);
 
+  // tldraw 的专注模式会合法地隐藏整条工具栏。旧自检把「没工具栏」误判成白屏，
+  // 每 10 秒重挂一次画布，最终正好落进用户看到的「画布显示不出来了」。
+  await page.locator(".tl-container").evaluate((element) => {
+    element.setAttribute("data-watchdog-marker", "focus-mode-kept");
+  });
+  await page.locator(".tl-canvas").click({ position: { x: 600, y: 400 } });
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+." : "Control+.");
+  await page.locator(".tlui-focus-button").waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(12000);
+  assert.equal(await page.locator(".canvas-blank-notice").count(), 0, "专注模式不是白屏，不能显示故障页");
+  assert.equal(
+    await page.locator('.tl-container[data-watchdog-marker="focus-mode-kept"]').count(),
+    1,
+    "专注模式期间不能重挂编辑器",
+  );
+  await page.locator(".tlui-focus-button").click();
+  await page.locator(".tlui-toolbar").first().waitFor({ state: "visible", timeout: 5000 });
+
   // 模拟「画布还在 DOM 里但一片空白」：把容器藏起来，自检应该重挂一个新的出来
   await page.evaluate(() => {
     const container = document.querySelector(".tl-container");
