@@ -13,6 +13,7 @@ import {
   clearMyApiKey,
   createAdminUser,
   resetAdminUserPassword,
+  setAdminUserApiKey,
   completeDemoPayment,
   createPaymentOrder,
   deleteGenerationResult,
@@ -864,6 +865,14 @@ function App() {
                 await resetAdminUserPassword(id, password);
               } catch (error) {
                 return error instanceof Error ? error.message : "重置密码失败";
+              }
+            }}
+            onSetApiKey={async (id, apiKey) => {
+              try {
+                await setAdminUserApiKey(id, apiKey);
+                await loadAdminOverview();
+              } catch (error) {
+                return error instanceof Error ? error.message : "配置 Key 失败";
               }
             }}
             users={adminOverview?.users ?? [currentUser]}

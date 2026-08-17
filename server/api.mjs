@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { auth, ensureUserProfile, requireAccount, requireAdmin, selfSignupAllowed } from "./auth.mjs";
+import { emailToUsername, normalizeUsername, usernameToEmail } from "./accounts.mjs";
 import { nowIso, sqlite } from "./db.mjs";
 import {
   DEBUG_UNLIMITED_CREDITS,
@@ -41,6 +42,7 @@ export function serializeAccount(user, profile) {
   return {
     id: user.id,
     email: user.email,
+    username: emailToUsername(user.email),
     // 调试座位各有各的名字（开发调试 · a1b2c3），顶栏和后台才分得清是谁。
     name: safeProfile.display_name || (debugUser ? "开发调试" : user.name || user.email),
     role: safeProfile.role,
@@ -299,7 +301,8 @@ function serializeAdminUser(row, usage = usageByUser().get(row.user_id)) {
   return {
     id: row.user_id,
     email: row.email,
-    name: row.display_name || row.name || row.email,
+    username: emailToUsername(row.email),
+    name: row.display_name || row.name || emailToUsername(row.email),
     role: row.role,
     plan: row.plan,
     credits: row.credits,
@@ -608,20 +611,32 @@ export function registerBusinessRoutes(app) {
   app.post("/api/admin/users", async (req, res) => {
     const account = await requireAdmin(req, res);
     if (!account) return;
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const password = String(req.body?.password || "");
-    const name = String(req.body?.name || "").trim().slice(0, 80) || email.split("@")[0] || "未命名用户";
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      res.status(400).json({ error: "请填写正确的邮箱。" });
+    const normalized = normalizeUsername(req.body?.username ?? req.body?.email);
+    if (normalized.error) {
+      res.status(400).json({ error: normalized.error });
       return;
     }
+    const username = normalized.value;
+    const email = usernameToEmail(username);
+    const password = String(req.body?.password || "");
+    const name = String(req.body?.name || "").trim().slice(0, 80) || username;
     if (password.length < 8) {
       res.status(400).json({ error: "密码至少 8 位。" });
       return;
     }
+    // 管理员可以在建号时就把这个账号要用的图像接口 Key 配好，对方登录即可用。
+    let presetKey = "";
+    if (String(req.body?.apiKey || "").trim()) {
+      const key = normalizeApiKey(req.body.apiKey);
+      if (key.error) {
+        res.status(400).json({ error: key.error });
+        return;
+      }
+      presetKey = key.value;
+    }
     const exists = sqlite.prepare('SELECT id FROM "user" WHERE lower(email) = ?').get(email);
     if (exists) {
-      res.status(409).json({ error: "这个邮箱已经有账号了。" });
+      res.status(409).json({ error: "这个账号名已经被占用了。" });
       return;
     }
     try {
@@ -631,7 +646,8 @@ export function registerBusinessRoutes(app) {
       // signUpEmail 只建 better-auth 的用户；业务档案是首次登录时才补的，
       // 这里先手动建出来，否则下面的 UPDATE 命中 0 行、新号还得等自己开通。
       ensureUserProfile({ id: userId, email, name });
-      const role = ["owner", "admin", "user"].includes(req.body?.role) ? req.body.role : "user";
+      // 后台发的号一律是普通用户，保证只有管理员账号能进 /admin。
+      const role = "user";
       const unlimited = req.body?.unlimited === true ? 1 : 0;
       const credits = Number.isFinite(Number(req.body?.credits)) ? Math.max(0, Math.floor(Number(req.body.credits))) : 0;
       // 后台建的号默认直接可用，不用再点一次开通。
@@ -642,17 +658,44 @@ export function registerBusinessRoutes(app) {
            WHERE user_id = ?`,
         )
         .run(name, role, unlimited, credits, nowIso(), userId);
+      if (presetKey) setUserApiKey(userId, presetKey);
       insertAudit({
         actorUserId: account.user.id,
         action: "user.create",
         targetType: "user",
         targetId: userId,
-        detail: { email, role, unlimited: Boolean(unlimited), credits },
+        detail: { username, role, unlimited: Boolean(unlimited), credits, apiKey: presetKey ? "preset" : "none" },
       });
       res.status(201).json({ user: serializeAdminUser(getProfileWithUser(userId)) });
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : "创建账号失败。" });
     }
+  });
+
+  /** 给某个账号配 / 清图像接口 Key。配好之后对方登录就能直接用，不用自己填。 */
+  app.put("/api/admin/users/:id/api-key", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const target = getProfileWithUser(req.params.id);
+    if (!target) {
+      res.status(404).json({ error: "用户不存在。" });
+      return;
+    }
+    const raw = String(req.body?.apiKey ?? "").trim();
+    if (!raw) {
+      clearUserApiKey(req.params.id);
+      insertAudit({ actorUserId: account.user.id, action: "user.api_key.clear", targetType: "user", targetId: req.params.id, detail: {} });
+      res.json({ user: serializeAdminUser(getProfileWithUser(req.params.id)) });
+      return;
+    }
+    const key = normalizeApiKey(raw);
+    if (key.error) {
+      res.status(400).json({ error: key.error });
+      return;
+    }
+    const saved = setUserApiKey(req.params.id, key.value);
+    insertAudit({ actorUserId: account.user.id, action: "user.api_key.set", targetType: "user", targetId: req.params.id, detail: { hint: saved.apiKeyHint } });
+    res.json({ user: serializeAdminUser(getProfileWithUser(req.params.id)) });
   });
 
   /** 重置某个账号的密码。没有配邮件服务，忘密码只能由管理员在这里改。 */

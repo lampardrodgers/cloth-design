@@ -3074,6 +3074,25 @@ a.stage-tool {
   font-size: 12.5px;
 }
 
+.admin-create-user .admin-create-key {
+  flex: 2 1 240px;
+}
+
+.admin-tag-button {
+  cursor: pointer;
+  background: transparent;
+  font: inherit;
+  font-size: 10.5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-tag-button:hover:not(:disabled) {
+  border-color: var(--gold);
+  color: var(--gold-deep);
+}
+
 .admin-create-check {
   display: flex;
   align-items: center;

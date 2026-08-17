@@ -28,8 +28,9 @@ interface AdminPanelProps {
   onCreditAdjust?: (id: string, amount: number) => void;
   summary?: AdminSummary;
   /** 后台建号 / 重置密码；返回字符串表示失败原因。 */
-  onCreateUser?: (input: { email: string; password: string; name: string; role: UserAccount["role"]; unlimited: boolean; credits: number }) => Promise<string | void>;
+  onCreateUser?: (input: { username: string; password: string; name: string; apiKey: string; unlimited: boolean; credits: number }) => Promise<string | void>;
   onResetPassword?: (id: string, password: string) => Promise<string | void>;
+  onSetApiKey?: (id: string, apiKey: string) => Promise<string | void>;
   packages: RechargePackage[];
   onPackagesChange: (packages: RechargePackage[]) => void;
   onPackagePatch?: (id: string, patch: Partial<RechargePackage>) => void;
@@ -64,6 +65,7 @@ export function AdminPanel({
   summary,
   onCreateUser,
   onResetPassword,
+  onSetApiKey,
   packages: packagesList,
   onPackagesChange,
   onPackagePatch,
@@ -88,7 +90,7 @@ export function AdminPanel({
     onPackagePatch?.(id, patch);
   };
 
-  const [draft, setDraft] = useState({ email: "", password: "", name: "", role: "user" as UserAccount["role"], unlimited: false, credits: 0 });
+  const [draft, setDraft] = useState({ username: "", password: "", name: "", apiKey: "", unlimited: false, credits: 0 });
   const [creating, setCreating] = useState(false);
   const [createNotice, setCreateNotice] = useState("");
 
@@ -101,8 +103,8 @@ export function AdminPanel({
       const error = await onCreateUser(draft);
       if (error) setCreateNotice(error);
       else {
-        setCreateNotice(`已创建 ${draft.email}，把邮箱和这个密码发给对方即可登录。`);
-        setDraft({ email: "", password: "", name: "", role: "user", unlimited: false, credits: 0 });
+        setCreateNotice(`已创建账号「${draft.username}」，把账号名和这个密码发给对方就能登录。`);
+        setDraft({ username: "", password: "", name: "", apiKey: "", unlimited: false, credits: 0 });
       }
     } finally {
       setCreating(false);
@@ -111,10 +113,21 @@ export function AdminPanel({
 
   const resetPassword = async (user: UserAccount) => {
     if (!onResetPassword) return;
-    const next = window.prompt(`给「${user.name}」设置新密码（至少 8 位）：`);
+    const next = window.prompt(`给「${user.username ?? user.name}」设置新密码（至少 8 位）：`);
     if (!next) return;
     const error = await onResetPassword(user.id, next);
-    setCreateNotice(error || `已重置「${user.name}」的密码，请把新密码告诉对方。`);
+    setCreateNotice(error || `已重置「${user.username ?? user.name}」的密码，请把新密码告诉对方。`);
+  };
+
+  const editApiKey = async (user: UserAccount) => {
+    if (!onSetApiKey) return;
+    const next = window.prompt(
+      `给「${user.username ?? user.name}」配置图像接口 Key。\n留空并确定 = 清除，改用站点共享 Key。`,
+      "",
+    );
+    if (next === null) return;
+    const error = await onSetApiKey(user.id, next.trim());
+    setCreateNotice(error || (next.trim() ? `已给「${user.username ?? user.name}」配好 Key。` : `已清除「${user.username ?? user.name}」的 Key。`));
   };
 
   const updateUser = (id: string, patch: Partial<UserAccount>) => {
@@ -294,16 +307,17 @@ export function AdminPanel({
       <Section title="用户与用量" action={<UserPlus size={17} />}>
         <p className="admin-note">
           {summary && !summary.selfSignupAllowed
-            ? "自助注册已关闭：账号只能在这里创建。建好后把邮箱和初始密码发给对方，他们直接登录即可。"
+            ? "自助注册已关闭：账号只能在这里创建，建出来的一律是普通用户，进不了后台。把账号名和初始密码发给对方即可登录。"
             : "自助注册开放中：别人注册后默认「待开通」，需要在这里点「开通」才放行。"}
-          {" "}勾了「无限」的账号生成不扣积分，登录后顶栏会显示 ∞；用量按任务数 / 成片数 / 消耗积分统计。
+          {" "}勾了「无限」的账号生成不扣积分、顶栏显示 ∞；不勾就按「初始积分」计费。
+          配了专属 Key 的账号出图走自己那把 Key，不占站点额度也不扣积分。
         </p>
 
         {onCreateUser ? (
           <form className="admin-create-user" onSubmit={submitNewUser}>
             <label className="field">
-              <span>邮箱</span>
-              <input type="email" required value={draft.email} onChange={(e) => setDraft({ ...draft, email: e.target.value })} placeholder="friend@example.com" autoComplete="off" />
+              <span>账号名</span>
+              <input required value={draft.username} onChange={(e) => setDraft({ ...draft, username: e.target.value })} placeholder="xiaoli" autoComplete="off" spellCheck={false} />
             </label>
             <label className="field">
               <span>初始密码</span>
@@ -313,13 +327,9 @@ export function AdminPanel({
               <span>显示名</span>
               <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="可留空" />
             </label>
-            <label className="field">
-              <span>角色</span>
-              <select value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value as UserAccount["role"] })}>
-                <option value="user">user</option>
-                <option value="admin">admin</option>
-                <option value="owner">owner</option>
-              </select>
+            <label className="field admin-create-key">
+              <span>图像接口 Key（可选）</span>
+              <input value={draft.apiKey} onChange={(e) => setDraft({ ...draft, apiKey: e.target.value })} placeholder="配了对方登录就能直接用" autoComplete="off" spellCheck={false} />
             </label>
             <label className="field">
               <span>初始积分</span>
@@ -355,8 +365,8 @@ export function AdminPanel({
             return (
               <div className={`table-row ${approved ? "" : "table-row-pending"}`} role="row" key={user.id}>
                 <span className="admin-user-cell">
-                  <input className="admin-input" value={user.name} onChange={(event) => updateUser(user.id, { name: event.target.value })} aria-label={`${user.email ?? user.id} 显示名`} />
-                  <small>{user.email ?? user.id}</small>
+                  <input className="admin-input" value={user.name} onChange={(event) => updateUser(user.id, { name: event.target.value })} aria-label={`${user.username ?? user.id} 显示名`} />
+                  <small>{user.username ?? user.email ?? user.id}</small>
                 </span>
                 <select className="admin-input" value={user.role} onChange={(event) => updateUser(user.id, { role: event.target.value as UserAccount["role"] })}>
                   <option value="owner">owner</option>
@@ -397,11 +407,15 @@ export function AdminPanel({
                   </small>
                 </span>
                 <span>
-                  {user.hasOwnApiKey ? (
-                    <small className="admin-tag admin-tag-ok" title={user.apiKeyHint ?? ""}>自备 {user.apiKeyHint ?? ""}</small>
-                  ) : (
-                    <small className="admin-tag">共享</small>
-                  )}
+                  <button
+                    type="button"
+                    className={`admin-tag admin-tag-button ${user.hasOwnApiKey ? "admin-tag-ok" : ""}`}
+                    title={user.hasOwnApiKey ? `已配 ${user.apiKeyHint ?? ""}，点击更换或清除` : "点击给这个账号配专属 Key"}
+                    onClick={() => void editApiKey(user)}
+                    disabled={!onSetApiKey}
+                  >
+                    {user.hasOwnApiKey ? user.apiKeyHint ?? "已配" : "共享"}
+                  </button>
                 </span>
                 <select className="admin-input" value={user.status} onChange={(event) => updateUser(user.id, { status: event.target.value as UserAccount["status"] })}>
                   <option value="active">正常</option>

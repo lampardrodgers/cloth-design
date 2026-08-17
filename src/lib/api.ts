@@ -314,10 +314,10 @@ export async function updateAdminUser(id: string, patch: Partial<UserAccount>) {
 }
 
 export async function createAdminUser(input: {
-  email: string;
+  username: string;
   password: string;
   name?: string;
-  role?: UserAccount["role"];
+  apiKey?: string;
   unlimited?: boolean;
   credits?: number;
 }) {
@@ -326,6 +326,16 @@ export async function createAdminUser(input: {
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(input),
+  });
+  return parseJson<{ user: UserAccount }>(response);
+}
+
+export async function setAdminUserApiKey(id: string, apiKey: string) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}/api-key`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ apiKey }),
   });
   return parseJson<{ user: UserAccount }>(response);
 }

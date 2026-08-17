@@ -115,13 +115,13 @@ const providerLabel = apiConfig.providerHealth?.label ?? (apiConfig.mode === "li
 async function ensureAuthenticated() {
   if ((await page.getByText("账号登录").count()) === 0) return;
   await page.locator("input[autocomplete='name']").fill("Smoke Owner");
-  await page.locator("input[autocomplete='email']").fill("owner@example.test");
+  await page.locator("#auth-email").fill("owner@example.test");
   await page.locator("input[autocomplete='new-password']").fill("clothdesign123");
   await page.getByRole("button", { name: "创建账号" }).click();
   await page.waitForTimeout(800);
   if ((await page.getByText("账号登录").count()) > 0) {
     await page.getByRole("button", { name: "登录" }).click();
-    await page.locator("input[autocomplete='email']").fill("owner@example.test");
+    await page.locator("#auth-email").fill("owner@example.test");
     await page.locator("input[autocomplete='current-password']").fill("clothdesign123");
     await page.getByRole("button", { name: "登录" }).last().click();
   }

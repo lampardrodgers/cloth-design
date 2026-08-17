@@ -65,7 +65,7 @@ try {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
 
   await page.locator("input[autocomplete='name']").fill("Task Alignment Owner");
-  await page.locator("input[autocomplete='email']").fill("task-alignment@example.test");
+  await page.locator("#auth-email").fill("task-alignment@example.test");
   await page.locator("input[autocomplete='new-password']").fill("clothdesign123");
   await page.getByRole("button", { name: "创建账号" }).click();
   await page.getByText("ClothDesign AI").waitFor({ state: "visible", timeout: 10000 });

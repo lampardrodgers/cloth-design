@@ -169,6 +169,8 @@ export interface AccountUsage {
 export interface UserAccount {
   id: string;
   email?: string;
+  /** 对外显示的账号名（内部邮箱去掉 @clothdesign.local）。 */
+  username?: string;
   name: string;
   role: "owner" | "admin" | "user";
   plan: string;

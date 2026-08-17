@@ -43,6 +43,23 @@ sqlite
   .run(timestamp, timestamp);
 assert.equal(sqlite.prepare("SELECT approved FROM user_profile WHERE user_id = 'u-legacy'").get().approved, 1, "老账号默认已开通");
 
+/* ── 账号名 ↔ 内部邮箱 ───────────────────────────────────────────────────── */
+const accounts = await import("../server/accounts.mjs");
+assert.equal(accounts.normalizeUsername("  Admin  ").value, "admin", "账号名统一小写并去空格");
+assert.equal(accounts.usernameToEmail("admin"), "admin@clothdesign.local");
+assert.equal(accounts.emailToUsername("admin@clothdesign.local"), "admin");
+assert.equal(accounts.emailToUsername("someone@gmail.com"), "someone@gmail.com", "真实邮箱原样显示，不能截成 someone");
+assert(accounts.normalizeUsername("has space").error, "账号名不能有空格");
+assert(accounts.normalizeUsername("a@b").error.includes("@"), "带 @ 要单独提示");
+assert(accounts.normalizeUsername("x").error, "太短不行");
+assert(accounts.normalizeUsername("_lead").error, "不能以下划线开头");
+assert.equal(accounts.normalizeUsername("xiao.li-01_a").value, "xiao.li-01_a");
+
+// 客户端那份规则要跟服务端一致，否则登录框补出来的邮箱对不上
+const clientAccounts = await fs.readFile("src/lib/accounts.ts", "utf8");
+assert(clientAccounts.includes('INTERNAL_EMAIL_DOMAIN = "clothdesign.local"'), "两侧的内部域名必须相同");
+assert(clientAccounts.includes("loginIdentifierToEmail"), "登录框要把账号名补成内部邮箱");
+
 /* ── 自助注册开关 ────────────────────────────────────────────────────────── */
 delete process.env.ALLOW_SELF_SIGNUP;
 assert.equal(selfSignupAllowed(), true, "默认允许自助注册，本地开发和首次装机要能拿到 owner");
@@ -129,6 +146,10 @@ assert(api.includes("export function usageByUser"), "后台按账号汇总用量
 assert(api.includes("nextApproved"), "后台能开通 / 收回账号");
 assert(api.includes("nextUnlimited"), "后台能开 / 关无限额度");
 assert(api.includes('app.post("/api/admin/users"'), "后台能直接建账号");
+assert(api.includes('app.put("/api/admin/users/:id/api-key"'), "后台能给账号配 Key");
+assert(api.includes('const role = "user";'), "后台发的号一律普通用户，保证只有管理员能进 /admin");
+assert(api.includes("if (presetKey) setUserApiKey(userId, presetKey);"), "建号时填的 Key 要落到这个账号上");
+assert(api.includes("username: emailToUsername(user.email)"), "账号信息里要带账号名");
 assert(api.includes('app.post("/api/admin/users/:id/password"'), "后台能重置密码");
 assert(api.includes("export function adminSummary"), "后台要有一眼概览");
 const indexSrc = await fs.readFile("server/index.mjs", "utf8");

@@ -1,4 +1,5 @@
 import { useState, type FormEvent, type KeyboardEvent } from "react";
+import { loginIdentifierToEmail } from "../lib/accounts";
 import { signInEmail, signUpEmail } from "../lib/api";
 
 interface AuthPanelProps {
@@ -44,10 +45,12 @@ export function AuthPanel({ selfSignupAllowed = true, onAuthenticated }: AuthPan
     setSubmitting(true);
     setError("");
     try {
+      // 登录框接受账号名或邮箱，账号名会补成内部邮箱。
+      const identifier = loginIdentifierToEmail(email);
       if (mode === "signup") {
-        await signUpEmail(name, email, password);
+        await signUpEmail(name, identifier, password);
       } else {
-        await signInEmail(email, password);
+        await signInEmail(identifier, password);
       }
       await onAuthenticated();
     } catch (err) {
@@ -154,15 +157,16 @@ export function AuthPanel({ selfSignupAllowed = true, onAuthenticated }: AuthPan
               </div>
 
               <label className="field auth-field" htmlFor="auth-email">
-                <span>邮箱</span>
+                <span>{selfSignupAllowed ? "邮箱" : "账号"}</span>
                 <input
                   id="auth-email"
-                  type="email"
+                  type={selfSignupAllowed ? "email" : "text"}
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  autoComplete="email"
+                  autoComplete="username"
                   autoCapitalize="none"
                   spellCheck={false}
+                  placeholder={selfSignupAllowed ? undefined : "管理员给你的账号名"}
                   required
                 />
               </label>
