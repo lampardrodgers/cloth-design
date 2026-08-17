@@ -1,6 +1,7 @@
-import type { KeyboardEvent } from "react";
+import { useMemo, type KeyboardEvent } from "react";
 import { roleLabels } from "../data/catalog";
 import type { GenerationMode, ModeKey, ReferenceImage } from "../types";
+import { PromptChipBar, usePromptChips } from "./PromptChips";
 
 const promptSuggestions: Record<ModeKey, string[]> = {
   text: ["干净棚拍", "突出面料质感", "高级电商风格"],
@@ -23,6 +24,8 @@ interface PromptComposerProps {
   generateLabel: string;
   generateDisabled: boolean;
   onPromptChange: (prompt: string) => void;
+  onClear?: () => void;
+  canClear?: boolean;
   onOptimize: () => void;
   onGenerate: () => void;
   hoveredId?: string;
@@ -40,6 +43,8 @@ export function PromptComposer({
   generateLabel,
   generateDisabled,
   onPromptChange,
+  onClear,
+  canClear = false,
   onOptimize,
   onGenerate,
   hoveredId = "",
@@ -47,6 +52,19 @@ export function PromptComposer({
   registerTokenEl,
 }: PromptComposerProps) {
   const filledReferences = references.filter((reference) => Boolean(reference.previewUrl));
+
+  // `@` 引用的就是这次真会传给接口的参考图，插入的标记与提示词构建器认的是同一个。
+  const galleryChips = useMemo(
+    () =>
+      filledReferences.map((reference) => ({
+        id: reference.id,
+        name: `参考${reference.label} · ${roleLabels[reference.role]}`,
+        insert: `参考${reference.label}`,
+        previewUrl: reference.previewUrl,
+      })),
+    [filledReferences],
+  );
+  const chips = usePromptChips({ value: prompt, onChange: onPromptChange, gallery: galleryChips });
 
   const addSuggestion = (suggestion: string) => {
     if (prompt.includes(suggestion)) return;
@@ -63,6 +81,8 @@ export function PromptComposer({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // chip 选择器开着时先给它——否则回车会越过选项直接触发生成。
+    if (chips.handleKeyDown(event)) return;
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
       if (!generateDisabled) onGenerate();
@@ -73,6 +93,17 @@ export function PromptComposer({
     <section className="prompt-dock prompt-section" aria-labelledby="prompt-heading">
       <div className="prompt-dock-head">
         <span className="rail-kicker" id="prompt-heading">画面描述</span>
+        {onClear ? (
+          <button
+            type="button"
+            className="text-button prompt-clear"
+            disabled={!canClear}
+            title="清空描述和参考图，成片与设置保留"
+            onClick={onClear}
+          >
+            清空
+          </button>
+        ) : null}
         <div className="prompt-tokens">
           {filledReferences.map((reference) => (
             <button
@@ -92,17 +123,18 @@ export function PromptComposer({
       </div>
 
       <div className="prompt-dock-row">
-        <label className="prompt-input-wrap">
+        <label className="prompt-input-wrap chip-anchor">
           <span className="sr-only">画面描述</span>
           <textarea
             aria-label="画面描述"
             value={prompt}
             rows={2}
             placeholder={mode.promptStarter}
-            onChange={(event) => onPromptChange(event.target.value)}
             onKeyDown={handleKeyDown}
+            {...chips.textareaProps}
           />
           <span className="prompt-count">{prompt.trim().length} 字</span>
+          {chips.picker}
         </label>
 
         <div className="prompt-footer">
@@ -121,6 +153,7 @@ export function PromptComposer({
       </div>
 
       <div className="prompt-dock-foot">
+        <PromptChipBar onOpenKind={chips.openKind} activeKind={chips.openKindActive} galleryCount={galleryChips.length} />
         <div className="prompt-suggestions" aria-label="描述建议">
           {promptSuggestions[mode.id].map((suggestion) => (
             <button

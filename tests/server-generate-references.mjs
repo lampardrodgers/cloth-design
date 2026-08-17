@@ -126,6 +126,8 @@ const app = spawn(process.execPath, ["server/index.mjs"], {
     VIDEO_ASSET_DIR: path.join(tmpDir, "generated-videos"),
     VIDEO_ASSET_PUBLIC_PATH: "/generated-videos",
     AUTH_SECRET: "test-generate-reference-secret-1234567890",
+    // 这里要验证的是「别人的成片碰不到」，第二个账号得能登录，先关掉注册审批。
+    SIGNUP_APPROVAL: "false",
     PUBLIC_APP_URL: `http://127.0.0.1:${appPort}`,
     NODE_ENV: "test",
     PAYMENT_DEMO_MODE: "true",

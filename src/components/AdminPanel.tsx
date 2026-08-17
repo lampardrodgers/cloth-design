@@ -241,48 +241,78 @@ export function AdminPanel({
         </Section>
       </section>
 
-      <Section title="用户额度">
+      <Section title="用户与用量">
+        <p className="admin-note">
+          新注册的账号默认「待开通」，登录后会被拦住；在这里点「开通」才放行。用量按任务数 / 成片数 / 消耗积分统计，
+          带自备 Key 的账号生成不扣积分，单独计入「自备 Key」一栏。
+        </p>
         <div className="user-table admin-table">
           <div className="table-row table-head" role="row">
             <span>用户</span>
             <span>角色</span>
+            <span>开通</span>
             <span>余额</span>
-            <span>月消耗</span>
+            <span>用量</span>
+            <span>Key</span>
             <span>状态</span>
             <span>调分</span>
           </div>
-          {users.map((user) => (
-            <div className="table-row" role="row" key={user.id}>
-              <input className="admin-input" value={user.name} onChange={(event) => updateUser(user.id, { name: event.target.value })} />
-              <select className="admin-input" value={user.role} onChange={(event) => updateUser(user.id, { role: event.target.value as UserAccount["role"] })}>
-                <option value="owner">owner</option>
-                <option value="admin">admin</option>
-                <option value="user">user</option>
-              </select>
-              <input
-                className="admin-input"
-                type="number"
-                min={0}
-                value={user.credits}
-                readOnly
-              />
-              <input
-                className="admin-input"
-                type="number"
-                min={0}
-                value={user.monthlyUsed}
-                onChange={(event) => updateUser(user.id, { monthlyUsed: Number(event.target.value) })}
-              />
-              <select className="admin-input" value={user.status} onChange={(event) => updateUser(user.id, { status: event.target.value as UserAccount["status"] })}>
-                <option value="active">正常</option>
-                <option value="locked">锁定</option>
-              </select>
-              <span className="admin-route-actions">
-                <button className="btn btn-secondary" onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
-                <button className="btn btn-secondary" onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>
-              </span>
-            </div>
-          ))}
+          {users.map((user) => {
+            const usage = user.usage;
+            const approved = user.approved !== false;
+            const lastActive = usage?.lastActiveAt ? new Date(usage.lastActiveAt) : null;
+            return (
+              <div className={`table-row ${approved ? "" : "table-row-pending"}`} role="row" key={user.id}>
+                <span className="admin-user-cell">
+                  <input className="admin-input" value={user.name} onChange={(event) => updateUser(user.id, { name: event.target.value })} aria-label={`${user.email ?? user.id} 显示名`} />
+                  <small>{user.email ?? user.id}</small>
+                </span>
+                <select className="admin-input" value={user.role} onChange={(event) => updateUser(user.id, { role: event.target.value as UserAccount["role"] })}>
+                  <option value="owner">owner</option>
+                  <option value="admin">admin</option>
+                  <option value="user">user</option>
+                </select>
+                <span>
+                  {["owner", "admin"].includes(user.role) ? (
+                    <small className="admin-tag admin-tag-ok">管理员</small>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`btn ${approved ? "btn-secondary" : "btn-primary"} admin-approve`}
+                      title={approved ? "收回开通：该账号将无法登录使用" : "放行：开通后该账号即可登录使用"}
+                      onClick={() => updateUser(user.id, { approved: !approved })}
+                    >
+                      {approved ? "已开通" : "开通"}
+                    </button>
+                  )}
+                </span>
+                <input className="admin-input" type="number" min={0} value={user.credits} readOnly aria-label="余额" />
+                <span className="admin-usage" title={lastActive ? `最近活跃 ${lastActive.toLocaleString("zh-CN")}` : "还没有生成记录"}>
+                  <strong>{usage?.taskCount ?? 0} 次</strong>
+                  <small>
+                    {usage?.imageCount ?? 0} 张 · 耗 {usage?.creditsSpent ?? 0} 分
+                    {usage?.taskCount30d ? ` · 30 天 ${usage.taskCount30d} 次` : ""}
+                    {usage?.ownKeyTaskCount ? ` · 自备 Key ${usage.ownKeyTaskCount} 次` : ""}
+                  </small>
+                </span>
+                <span>
+                  {user.hasOwnApiKey ? (
+                    <small className="admin-tag admin-tag-ok" title={user.apiKeyHint ?? ""}>自备 {user.apiKeyHint ?? ""}</small>
+                  ) : (
+                    <small className="admin-tag">共享</small>
+                  )}
+                </span>
+                <select className="admin-input" value={user.status} onChange={(event) => updateUser(user.id, { status: event.target.value as UserAccount["status"] })}>
+                  <option value="active">正常</option>
+                  <option value="locked">锁定</option>
+                </select>
+                <span className="admin-route-actions">
+                  <button className="btn btn-secondary" onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
+                  <button className="btn btn-secondary" onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>
+                </span>
+              </div>
+            );
+          })}
         </div>
       </Section>
 

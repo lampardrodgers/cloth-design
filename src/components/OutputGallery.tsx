@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
+import { isPlaceholderImage } from "../lib/providerMode";
 import { resultFileName } from "../lib/resultFiles";
 import type { GeneratedResult, ReferenceImage, StorageStatus } from "../types";
 
@@ -26,6 +27,8 @@ interface ResultStageProps {
   beforeUrl?: string;
   onDelete: (id: string) => void;
   onDropFiles: (files: FileList) => void;
+  onUseAsReference: (result: GeneratedResult) => void;
+  onReusePrompt: (prompt: string) => void;
 }
 
 /** 创作台中央的深色画布：成片展示、前后对比、放大、标注与拖拽投放。 */
@@ -37,6 +40,8 @@ export function ResultStage({
   beforeUrl,
   onDelete,
   onDropFiles,
+  onUseAsReference,
+  onReusePrompt,
 }: ResultStageProps) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [dropActive, setDropActive] = useState(false);
@@ -44,6 +49,7 @@ export function ResultStage({
   const [compareOn, setCompareOn] = useState(false);
   const [comparePos, setComparePos] = useState(50);
   const [annotateMode, setAnnotateMode] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
   const [annotations, setAnnotations] = useState<Record<string, Annotation[]>>({});
 
   const selected = results.find((result) => result.id === selectedId) ?? results[0];
@@ -60,6 +66,7 @@ export function ResultStage({
 
   useEffect(() => {
     setCompareOn(false);
+    setPromptOpen(false);
   }, [selectedId]);
 
   const patchPins = (next: Annotation[]) => {
@@ -161,6 +168,24 @@ export function ResultStage({
           <div className="stage-toolbar-right">
             <button
               type="button"
+              className="stage-tool stage-tool-primary"
+              disabled={!selected}
+              title="把这张成片放进左栏参考素材，接着往下改"
+              onClick={() => selected && onUseAsReference(selected)}
+            >
+              加入参考
+            </button>
+            <button
+              type="button"
+              className={`stage-tool ${promptOpen ? "active" : ""}`}
+              disabled={!selected?.prompt}
+              title={selected?.prompt ? "看看这张是用什么描述出来的" : "这张成片没有记录描述"}
+              onClick={() => setPromptOpen((value) => !value)}
+            >
+              提示词
+            </button>
+            <button
+              type="button"
               className={`stage-tool ${compareOn ? "active" : ""}`}
               disabled={!selected || !beforeUrl}
               onClick={() => {
@@ -184,6 +209,37 @@ export function ResultStage({
           </div>
         </div>
 
+        {promptOpen && selected?.prompt ? (
+          <div className="stage-prompt" role="dialog" aria-label="这张成片的描述">
+            <header>
+              <span className="rail-kicker">当时的描述</span>
+              <button type="button" onClick={() => setPromptOpen(false)} aria-label="关闭描述">
+                ×
+              </button>
+            </header>
+            <p>{selected.prompt}</p>
+            <div className="stage-prompt-actions">
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  onReusePrompt(selected.prompt ?? "");
+                  setPromptOpen(false);
+                }}
+              >
+                用这段重做
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => navigator.clipboard?.writeText(selected.prompt ?? "")}
+              >
+                复制
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         {selected ? (
           <figure className="stage-plate" title={`${selected.title} · ${selected.ratioLabel}`}>
             <img src={selected.imageUrl} alt={selected.title} />
@@ -197,6 +253,7 @@ export function ResultStage({
                 <i className="stage-compare-handle" style={{ left: `${comparePos}%` }} />
               </div>
             ) : null}
+            {isPlaceholderImage(selected.imageUrl) ? <em className="placeholder-tag stage-placeholder">演示占位图 · 未调用图像接口</em> : null}
             <figcaption>
               <span>{selected.title}</span>
               <span>
@@ -241,11 +298,28 @@ export function ResultStage({
         ))}
 
         {dropActive ? <div className="stage-dropzone">松手加入左栏参考素材</div> : null}
-        {isGenerating ? <div className="stage-progress" aria-hidden="true"><i /></div> : null}
+        {isGenerating ? (
+          <>
+            {/* 已有成片时画布不会走空状态，这里补一个明确的进行中提示。 */}
+            <div className="stage-working" role="status">
+              <i className="stage-working-spinner" aria-hidden="true" />
+              <span>
+                <strong>正在生成…</strong>
+                <small>已提交给图像引擎，完成后会自动显示新成片</small>
+              </span>
+            </div>
+            <div className="stage-progress" aria-hidden="true"><i /></div>
+          </>
+        ) : null}
       </div>
 
-      {results.length > 0 ? (
+      {results.length > 0 || isGenerating ? (
         <div className="stage-filmstrip" aria-label="成片缩略图">
+          {isGenerating ? (
+            <span className="result-thumb result-thumb-pending" aria-label="正在生成">
+              <i aria-hidden="true" />
+            </span>
+          ) : null}
           {results.map((result) => (
             <button
               type="button"
@@ -305,6 +379,7 @@ export function ResultPanelList({
         <article className={`result-card ${selectedId === result.id ? "active" : ""}`} key={result.id}>
           <button type="button" className="result-thumb" title="在画布上查看" onClick={() => onSelect(result.id)}>
             <img src={result.imageUrl} alt="" />
+            {isPlaceholderImage(result.imageUrl) ? <em className="placeholder-tag">演示</em> : null}
           </button>
           <div className="result-meta">
             <strong>{result.title}</strong>
@@ -317,8 +392,8 @@ export function ResultPanelList({
               <span className="sr-only"> {imageQualitySummary({ qualityGate: result.qualityGate, imageInspection: result.imageInspection })}</span>
             </small>
             <div className="result-actions">
-              <button type="button" className="text-button" aria-label="继续" onClick={() => onUseAsReference(result)}>
-                以此继续
+              <button type="button" className="text-button" aria-label="加入参考" onClick={() => onUseAsReference(result)}>
+                加入参考
               </button>
               <button type="button" className="text-button" aria-label="WebDAV" onClick={() => onSync(result.id)}>
                 保存到云盘

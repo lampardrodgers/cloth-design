@@ -22,6 +22,7 @@ export interface ApiConfig {
   imageModelConfigured: boolean;
   providerHealth?: import("../types").ImageProviderHealth;
   authEnabled: boolean;
+  debugUnlimitedAvailable?: boolean;
   port: number;
 }
 
@@ -56,6 +57,7 @@ export interface MeResponse {
   orders: PaymentOrder[];
   ledger: CreditLedgerEntry[];
   generationResults: GeneratedResult[];
+  debugUnlimited?: boolean;
   paymentCapabilities: PaymentCapabilities;
   paymentConfig: PaymentConfigStatus;
 }
@@ -186,6 +188,22 @@ export async function fetchMe(): Promise<MeResponse> {
   return parseJson<MeResponse>(response);
 }
 
+export async function startDebugSession() {
+  const response = await fetch("/api/debug/session", {
+    method: "POST",
+    credentials: "include",
+  });
+  return parseJson<{ debugUnlimited: boolean }>(response);
+}
+
+export async function endDebugSession() {
+  const response = await fetch("/api/debug/session", {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ debugUnlimited: boolean }>(response);
+}
+
 export async function signInEmail(email: string, password: string) {
   const response = await fetch("/api/auth/sign-in/email", {
     method: "POST",
@@ -204,6 +222,21 @@ export async function signUpEmail(name: string, email: string, password: string)
     body: JSON.stringify({ name, email, password }),
   });
   return parseJson(response);
+}
+
+export async function saveMyApiKey(apiKey: string) {
+  const response = await fetch("/api/me/api-key", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ apiKey }),
+  });
+  return parseJson<{ account: UserAccount }>(response);
+}
+
+export async function clearMyApiKey() {
+  const response = await fetch("/api/me/api-key", { method: "DELETE", credentials: "include" });
+  return parseJson<{ account: UserAccount }>(response);
 }
 
 export async function signOut() {
@@ -319,6 +352,7 @@ export async function requestGeneration({
   settings,
   references,
   prompt,
+  userPrompt,
   apiSize,
   ratioLabel,
 }: {
@@ -326,6 +360,8 @@ export async function requestGeneration({
   settings: StudioSettings;
   references: ReferenceImage[];
   prompt: string;
+  /** 用户原话。拼装后的 prompt 带着一堆行业约束，回看时没人想读那个。 */
+  userPrompt?: string;
   apiSize: string;
   ratioLabel: string;
 }): Promise<GenerateApiResponse> {
@@ -342,6 +378,7 @@ export async function requestGeneration({
       mode: mode.id,
       action: mode.action,
       prompt,
+      userPrompt: userPrompt ?? prompt,
       settings,
       references: referencePayload,
       apiSize,

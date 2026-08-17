@@ -9,12 +9,13 @@
     "start": "NODE_ENV=production node server/index.mjs",
     "preview": "NODE_ENV=production node server/index.mjs",
     "typecheck": "tsc -b",
-    "test:server": "node tests/client-api.mjs && node tests/client-prompt.mjs && node tests/client-fabric-preview.mjs && node tests/client-workflow-evidence.mjs && node tests/client-workflow-payload.mjs && node tests/client-workflow-ui-layout.mjs && node tests/client-image-quality.mjs && node tests/client-result-files.mjs && node tests/client-task-alignment.mjs && node tests/server-auth.mjs && node tests/server-payments.mjs && node tests/server-image-provider.mjs && node tests/server-video-provider.mjs && node tests/server-image-cleanup.mjs && node tests/server-generate-references.mjs && node tests/server-generate-validation.mjs && node tests/server-generate-timeout.mjs && node tests/server-workflows.mjs",
+    "test:server": "node tests/client-api.mjs && node tests/client-prompt.mjs && node tests/client-free-studio.mjs && node tests/client-progress-feedback.mjs && node tests/client-rail-collapse.mjs && node tests/client-studio-tools.mjs && node tests/server-user-keys.mjs && node tests/client-fabric-preview.mjs && node tests/client-workflow-evidence.mjs && node tests/client-workflow-payload.mjs && node tests/client-workflow-ui-layout.mjs && node tests/client-image-quality.mjs && node tests/client-result-files.mjs && node tests/client-task-alignment.mjs && node tests/server-auth.mjs && node tests/server-debug.mjs && node tests/server-payments.mjs && node tests/server-image-provider.mjs && node tests/server-video-provider.mjs && node tests/server-image-cleanup.mjs && node tests/server-generate-references.mjs && node tests/server-generate-validation.mjs && node tests/server-generate-timeout.mjs && node tests/server-workflows.mjs",
     "backup:db": "node scripts/backup-db.mjs",
     "cleanup:images": "node scripts/cleanup-images.mjs",
     "smoke": "node tests/smoke.mjs"
   },
   "dependencies": {
+    "@tldraw/assets": "^5.3.1",
     "@vitejs/plugin-react": "^5.1.0",
     "alipay-sdk": "^4.14.0",
     "better-auth": "^1.6.11",
@@ -28,6 +29,7 @@
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "sharp": "^0.35.2",
+    "tldraw": "^5.3.1",
     "vite": "^7.2.7"
   },
   "devDependencies": {

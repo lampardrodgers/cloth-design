@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { generationModes, ratioOptions, roleLabels } from "../data/catalog";
 import { estimateCredits } from "../lib/costing";
+import { useStoredState } from "../lib/storedState";
 import type {
   CreditPolicy,
   GeneratedResult,
@@ -10,7 +11,9 @@ import type {
   StudioSettings,
   UserAccount,
 } from "../types";
+import type { ApiConfig } from "../lib/api";
 import { ModePicker } from "./ModePicker";
+import { ProviderBanner } from "./ProviderBanner";
 import { ResultPanelList, ResultStage, resultToReference } from "./OutputGallery";
 import { ParameterPanel } from "./ParameterPanel";
 import { PromptComposer } from "./PromptComposer";
@@ -72,12 +75,15 @@ interface StudioWorkspaceProps {
   autoSyncOriginals: boolean;
   optimizationNotice?: string;
   isGenerating?: boolean;
+  apiConfig?: ApiConfig | null;
   hoveredReferenceId?: string;
   onHoverReference?: (id: string) => void;
   registerTokenEl?: (id: string, element: HTMLElement | null) => void;
   onSettingsChange: (patch: Partial<StudioSettings>) => void;
   onPromptChange: (prompt: string) => void;
   onReferencesChange: (references: ReferenceImage[]) => void;
+  /** 清空描述和参考图，回到空白状态。 */
+  onClear: () => void;
   onAutoSyncChange: (value: boolean) => void;
   onOptimize: () => void;
   onGenerate: (mode: GenerationMode, cost: number) => void;
@@ -97,12 +103,14 @@ export function StudioWorkspace({
   autoSyncOriginals,
   optimizationNotice,
   isGenerating = false,
+  apiConfig = null,
   hoveredReferenceId,
   onHoverReference,
   registerTokenEl,
   onSettingsChange,
   onPromptChange,
   onReferencesChange,
+  onClear,
   onAutoSyncChange,
   onOptimize,
   onGenerate,
@@ -113,6 +121,7 @@ export function StudioWorkspace({
 }: StudioWorkspaceProps) {
   const [level, setLevel] = useState<"novice" | "expert">("novice");
   const [selectedId, setSelectedId] = useState("");
+  const [settingsLocked, setSettingsLocked] = useStoredState("clothdesign:settingsLocked", false);
 
   const mode = generationModes.find((item) => item.id === settings.mode) ?? generationModes[0];
   const ratio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
@@ -129,15 +138,24 @@ export function StudioWorkspace({
   const hasEnoughCredits = cost <= user.credits;
   const canGenerate = missingRoles.length === 0 && hasEnoughCredits && ratioAllowed && !isGenerating;
 
+  // 新成片一落地就切过去。否则画布还停在上一张，用户根本看不出这次到底生成了没有。
+  const newestId = results[0]?.id ?? "";
+  const seenNewestRef = useRef(newestId);
   useEffect(() => {
     if (!results.length) {
       setSelectedId("");
+      seenNewestRef.current = "";
+      return;
+    }
+    if (newestId !== seenNewestRef.current) {
+      seenNewestRef.current = newestId;
+      setSelectedId(newestId);
       return;
     }
     if (!selectedId || !results.some((result) => result.id === selectedId)) {
       setSelectedId(results[0].id);
     }
-  }, [results, selectedId]);
+  }, [newestId, results, selectedId]);
 
   const statusMessage = isGenerating
     ? "生成中，可继续调整设置"
@@ -190,7 +208,21 @@ export function StudioWorkspace({
     onReferencesChange(next);
   };
 
+  /**
+   * 把成片放进参考素材。优先填当前模式还空着的槽位——直接往后追加的话，
+   * 「换衣」这类必填 model/garment 的模式会一直卡在「还需上传」。
+   */
   const useResult = (result: GeneratedResult) => {
+    const empty = references.find((reference) => !reference.previewUrl);
+    if (empty) {
+      const filled = resultToReference(result, empty.label);
+      onUseAsReference(
+        references.map((reference) =>
+          reference.id === empty.id ? { ...filled, id: empty.id, role: empty.role } : reference,
+        ),
+      );
+      return;
+    }
     onUseAsReference([...references, resultToReference(result, nextReferenceLabel(references))]);
   };
 
@@ -208,6 +240,8 @@ export function StudioWorkspace({
       <section className="studio-main">
         <ModePicker activeMode={settings.mode} onChange={(modeId) => onSettingsChange({ mode: modeId })} />
 
+        <ProviderBanner apiConfig={apiConfig} compact />
+
         <ResultStage
           results={results}
           selectedId={selectedId}
@@ -216,6 +250,8 @@ export function StudioWorkspace({
           beforeUrl={filledReferences[0]?.previewUrl}
           onDelete={onDeleteResult}
           onDropFiles={acceptFiles}
+          onUseAsReference={useResult}
+          onReusePrompt={onPromptChange}
         />
 
         <PromptComposer
@@ -228,6 +264,8 @@ export function StudioWorkspace({
           generateLabel={isGenerating ? "正在生成…" : `生成 ${settings.quantity} 张 · ${cost} 积分`}
           generateDisabled={!canGenerate}
           onPromptChange={onPromptChange}
+          onClear={onClear}
+          canClear={prompt.trim().length > 0 || references.some((reference) => reference.previewUrl || reference.fileName)}
           onOptimize={onOptimize}
           onGenerate={() => onGenerate(mode, cost)}
           hoveredId={hoveredReferenceId}
@@ -239,14 +277,25 @@ export function StudioWorkspace({
       <aside className="settings-aside panel-scroll" aria-label="成片设置">
         <div className="settings-aside-head">
           <span className="rail-kicker">成片设置</span>
-          <div className="level-switch" role="group" aria-label="设置深度">
-            <button type="button" className={level === "novice" ? "active" : ""} onClick={() => setLevel("novice")}>
-              新手
-            </button>
-            <button type="button" className={level === "expert" ? "active" : ""} onClick={() => setLevel("expert")}>
-              专家
-            </button>
-          </div>
+          {settingsLocked ? null : (
+            <div className="level-switch" role="group" aria-label="设置深度">
+              <button type="button" className={level === "novice" ? "active" : ""} onClick={() => setLevel("novice")}>
+                新手
+              </button>
+              <button type="button" className={level === "expert" ? "active" : ""} onClick={() => setLevel("expert")}>
+                专家
+              </button>
+            </div>
+          )}
+          <button
+            type="button"
+            className={`settings-lock ${settingsLocked ? "active" : ""}`}
+            aria-pressed={settingsLocked}
+            title={settingsLocked ? "解锁后可以继续调整参数" : "锁定后参数折叠成摘要，连续出图时不会被误改"}
+            onClick={() => setSettingsLocked((value) => !value)}
+          >
+            {settingsLocked ? "已锁定" : "锁定"}
+          </button>
         </div>
 
         <div className="settings-aside-body">
@@ -257,6 +306,7 @@ export function StudioWorkspace({
             onExpandAdvanced={() => setLevel("expert")}
             autoSyncOriginals={autoSyncOriginals}
             onAutoSyncChange={onAutoSyncChange}
+            locked={settingsLocked}
           />
 
           <div className="settings-block cost-block">
@@ -280,6 +330,9 @@ export function StudioWorkspace({
                   type="button"
                   key={preset.id}
                   className={`preset-option ${presetActive(preset) ? "active" : ""}`}
+                  // 预设本身就是一整套参数，锁定后放它进来等于绕开了锁。
+                  disabled={settingsLocked}
+                  title={settingsLocked ? "参数已锁定，先解锁再套用预设" : preset.detail}
                   onClick={() => applyPreset(preset)}
                 >
                   <strong>{preset.label}</strong>

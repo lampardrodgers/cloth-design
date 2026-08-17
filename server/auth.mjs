@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth";
 import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
 import { admin } from "better-auth/plugins";
 import { sqlite, nowIso } from "./db.mjs";
+import { DEBUG_USER_PREFIX, debugAccount, debugUserIdFromRequest } from "./debug.mjs";
 
 const port = Number(process.env.PORT || 8888);
 const host = process.env.HOST || "127.0.0.1";
@@ -31,6 +32,11 @@ function adminEmails() {
       .map((item) => item.trim().toLowerCase())
       .filter(Boolean),
   );
+}
+
+/** 新注册的账号默认要等管理员开通；SIGNUP_APPROVAL=false 可放开为注册即用。 */
+export function signupApprovalRequired() {
+  return String(process.env.SIGNUP_APPROVAL ?? "true").toLowerCase() !== "false";
 }
 
 export function authTrustedOrigins() {
@@ -82,19 +88,31 @@ export function ensureUserProfile(user) {
     return existing;
   }
 
-  const profileCount = sqlite.prepare("SELECT COUNT(*) AS count FROM user_profile").get();
+  // 调试座位也是 user_profile，但不能算「真实账号」——否则先有人点过「开发调试」，
+  // 第一个注册的人就当不上 owner 了。
+  const profileCount = sqlite
+    .prepare("SELECT COUNT(*) AS count FROM user_profile WHERE user_id NOT LIKE ?")
+    .get(`${DEBUG_USER_PREFIX}%`);
   const role = emails.has(String(user.email || "").toLowerCase()) || profileCount.count === 0 ? "owner" : "user";
+  // owner 不用等人开通；普通账号按 SIGNUP_APPROVAL 决定是否先挂起。
+  const approved = role === "owner" || !signupApprovalRequired() ? 1 : 0;
   sqlite
     .prepare(
       `INSERT INTO user_profile
-        (user_id, display_name, role, plan, credits, monthly_used, status, created_at, updated_at)
-       VALUES (?, ?, ?, '基础版', 0, 0, 'active', ?, ?)`,
+        (user_id, display_name, role, plan, credits, monthly_used, status, approved, created_at, updated_at)
+       VALUES (?, ?, ?, '基础版', 0, 0, 'active', ?, ?, ?)`,
     )
-    .run(user.id, user.name || user.email || "未命名用户", role, timestamp, timestamp);
+    .run(user.id, user.name || user.email || "未命名用户", role, approved, timestamp, timestamp);
   return sqlite.prepare("SELECT * FROM user_profile WHERE user_id = ?").get(user.id);
 }
 
+export const PENDING_APPROVAL_MESSAGE = "账号已创建，等管理员在后台开通后就能使用。";
+
 export async function requireAccount(req, res) {
+  // 每个调试座位是独立账号，成片和用量按座位隔离。
+  const debugUserId = debugUserIdFromRequest(req);
+  if (debugUserId) return debugAccount(debugUserId);
+
   const session = await getAuthSession(req);
   if (!session?.user) {
     res.status(401).json({ error: "请先登录。" });
@@ -103,6 +121,10 @@ export async function requireAccount(req, res) {
   const profile = ensureUserProfile(session.user);
   if (profile.status !== "active") {
     res.status(403).json({ error: "账号已被锁定，请联系管理员。" });
+    return null;
+  }
+  if (Number(profile.approved ?? 1) === 0 && !["owner", "admin"].includes(profile.role)) {
+    res.status(403).json({ error: PENDING_APPROVAL_MESSAGE, pendingApproval: true });
     return null;
   }
   return { session, user: session.user, profile };

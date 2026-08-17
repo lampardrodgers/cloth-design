@@ -112,7 +112,7 @@ try {
   assert.equal(storageAlignment.serverStorageStatus, "webdav");
 
   const generatedImageUrl = await page.evaluate(() => JSON.parse(window.localStorage.getItem("clothdesign:results") || "[]")[0]?.imageUrl);
-  await page.locator(".result-card").first().getByRole("button", { name: "继续" }).click();
+  await page.locator(".result-card").first().getByRole("button", { name: "加入参考" }).click();
   await page.waitForFunction(
     (imageUrl) => [...document.querySelectorAll(".reference-card img")].some((item) => item.getAttribute("src") === imageUrl),
     generatedImageUrl,

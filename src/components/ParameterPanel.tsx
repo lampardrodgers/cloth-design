@@ -1,4 +1,5 @@
 import { ratioOptions, resolutionOptions } from "../data/catalog";
+import { outputSizeForRatio, outputSizeMismatch } from "../lib/outputSize";
 import type { BackgroundMode, ModerationMode, OutputFormat, QualityKey, StudioSettings } from "../types";
 
 interface ParameterPanelProps {
@@ -9,6 +10,8 @@ interface ParameterPanelProps {
   onExpandAdvanced: () => void;
   autoSyncOriginals: boolean;
   onAutoSyncChange: (value: boolean) => void;
+  /** 锁定后整块参数折叠成只读摘要，避免连续出图时被误改。 */
+  locked?: boolean;
 }
 
 const qualityLabels: Record<QualityKey, string> = {
@@ -41,6 +44,53 @@ const resolutionCopy: Record<StudioSettings["resolution"], string> = {
   fourK: "4K · 大图交付",
 };
 
+const fidelityLabels: Record<StudioSettings["inputFidelity"], string> = {
+  standard: "自然参考",
+  high: "严格跟随",
+};
+
+/** 锁定态的只读摘要：一眼看完这次会用什么参数出图。 */
+export function SettingsSummary({ settings }: { settings: StudioSettings }) {
+  const ratio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
+  const size = outputSizeForRatio(ratio);
+  const rows: Array<[string, string]> = [
+    ["比例", ratio.label],
+    ["输出像素", size.label],
+    ["张数", `${settings.quantity} 张`],
+    ["清晰度", resolutionCopy[settings.resolution]],
+    ["质量", qualityLabels[settings.quality]],
+    ["背景", backgroundLabels[settings.background]],
+    ["格式", formatLabels[settings.outputFormat]],
+    ["跟随参考", fidelityLabels[settings.inputFidelity]],
+  ];
+  return (
+    <div className="settings-block settings-summary">
+      <dl>
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+/** 生成前就把真实交付尺寸摆出来，别让人花了 4K 的钱才发现拿到 1024。 */
+function OutputSizeReadout({ settings }: { settings: StudioSettings }) {
+  const ratio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
+  const size = outputSizeForRatio(ratio);
+  const mismatch = outputSizeMismatch(ratio);
+  return (
+    <div className={`output-size ${size.auto ? "auto" : ""}`}>
+      <span>输出像素</span>
+      <strong>{size.label}</strong>
+      {mismatch ? <small>{mismatch}</small> : null}
+    </div>
+  );
+}
+
 export function ParameterPanel({
   settings,
   onChange,
@@ -48,7 +98,10 @@ export function ParameterPanel({
   onExpandAdvanced,
   autoSyncOriginals,
   onAutoSyncChange,
+  locked = false,
 }: ParameterPanelProps) {
+  if (locked) return <SettingsSummary settings={settings} />;
+
   return (
     <div className="parameter-section">
       <div className="settings-block">
@@ -140,11 +193,14 @@ export function ParameterPanel({
             value={settings.inputFidelity}
             onChange={(event) => onChange({ inputFidelity: event.target.value as "standard" | "high" })}
           >
-            <option value="standard">自然参考</option>
-            <option value="high">严格跟随</option>
+            {(Object.keys(fidelityLabels) as Array<StudioSettings["inputFidelity"]>).map((fidelity) => (
+              <option key={fidelity} value={fidelity}>{fidelityLabels[fidelity]}</option>
+            ))}
           </select>
         </label>
       </div>
+
+      <OutputSizeReadout settings={settings} />
 
       {showAdvanced ? (
         <div className="settings-block advanced-settings">

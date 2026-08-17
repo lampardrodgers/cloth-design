@@ -1,3 +1,4 @@
+import { useState, type FormEvent } from "react";
 import { imageQualityLabel } from "../lib/imageQuality";
 import type {
   CreditLedgerEntry,
@@ -17,8 +18,12 @@ interface AccountPanelProps {
   generationResults: GeneratedResult[];
   paymentCapabilities: PaymentCapabilities;
   activeOrder?: PaymentOrder | null;
+  debugUnlimited?: boolean;
   onRecharge: (pkg: RechargePackage, provider: PaymentProvider) => void;
   onDemoComplete: (order: PaymentOrder) => void;
+  /** 保存 / 清除账号自备的图像接口 Key。返回错误文案时留在原地提示。 */
+  onSaveApiKey?: (apiKey: string) => Promise<string | void>;
+  onClearApiKey?: () => Promise<string | void>;
 }
 
 const providerLabels: Record<PaymentProvider, string> = {
@@ -41,9 +46,45 @@ export function AccountPanel({
   generationResults,
   paymentCapabilities,
   activeOrder,
+  debugUnlimited = false,
   onRecharge,
   onDemoComplete,
+  onSaveApiKey,
+  onClearApiKey,
 }: AccountPanelProps) {
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [apiKeyBusy, setApiKeyBusy] = useState(false);
+  const [apiKeyNotice, setApiKeyNotice] = useState("");
+
+  const submitApiKey = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!onSaveApiKey || apiKeyBusy) return;
+    setApiKeyBusy(true);
+    setApiKeyNotice("");
+    try {
+      const error = await onSaveApiKey(apiKeyDraft);
+      if (error) setApiKeyNotice(error);
+      else {
+        setApiKeyDraft("");
+        setApiKeyNotice("已保存。之后的生成都走这把 Key，不再扣积分。");
+      }
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
+  const clearApiKey = async () => {
+    if (!onClearApiKey || apiKeyBusy) return;
+    setApiKeyBusy(true);
+    setApiKeyNotice("");
+    try {
+      const error = await onClearApiKey();
+      setApiKeyNotice(error || "已清除，之后的生成改用站点共享 Key，按积分计费。");
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
   return (
     <div className="account-layout editorial-page">
       <section className="metric-row account-card-row">
@@ -54,10 +95,45 @@ export function AccountPanel({
             <small>{currentUser.plan} · {currentUser.role}</small>
           </span>
         </div>
-        <div className="metric metric-good"><span>余额</span><strong>{currentUser.credits}</strong></div>
+        <div className="metric metric-good"><span>余额</span><strong>{debugUnlimited ? "∞" : currentUser.credits}</strong></div>
         <div className="metric metric-default"><span>本月消耗</span><strong>{currentUser.monthlyUsed}</strong></div>
         <div className="metric metric-default"><span>成片</span><strong>{generationResults.length}</strong></div>
       </section>
+
+      {onSaveApiKey ? (
+        <section className="editorial-section api-key-section">
+          <span className="rail-kicker">图像接口 Key</span>
+          <p className="muted-text">
+            {currentUser.hasOwnApiKey
+              ? `当前使用你自己的 Key（${currentUser.apiKeyHint ?? "已保存"}），接口费用直接记在这把 Key 上${debugUnlimited ? "" : "，生成不扣积分"}。`
+              : currentUser.serverKeyConfigured
+                ? `不填也能用：默认走站点共享 Key${debugUnlimited ? "" : "，按积分计费。填了自己的 Key 之后生成不再扣积分"}。`
+                : "站点还没配置共享 Key。填入你自己的 Key 才能真实出图，否则只会得到演示占位图。"}
+          </p>
+          <form className="api-key-form" onSubmit={submitApiKey}>
+            <input
+              type="password"
+              value={apiKeyDraft}
+              onChange={(event) => setApiKeyDraft(event.target.value)}
+              placeholder={currentUser.hasOwnApiKey ? "粘贴新的 Key 可以直接替换" : "sk-…"}
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="图像接口 Key"
+              disabled={apiKeyBusy}
+            />
+            <button type="submit" className="btn btn-primary" disabled={apiKeyBusy || !apiKeyDraft.trim()}>
+              {apiKeyBusy ? "保存中…" : "保存"}
+            </button>
+            {currentUser.hasOwnApiKey ? (
+              <button type="button" className="btn btn-secondary" disabled={apiKeyBusy} onClick={clearApiKey}>
+                清除
+              </button>
+            ) : null}
+          </form>
+          {apiKeyNotice ? <small className="api-key-notice">{apiKeyNotice}</small> : null}
+          <small className="muted-text">Key 加密保存在本站服务器上，页面上永远只显示前 3 位和后 4 位。</small>
+        </section>
+      ) : null}
 
       <section className="editorial-section">
         <span className="rail-kicker">充值</span>

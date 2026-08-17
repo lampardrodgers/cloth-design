@@ -1,4 +1,4 @@
-export type ViewKey = "studio" | "workflows" | "account" | "storage";
+export type ViewKey = "studio" | "free" | "workflows" | "account" | "storage";
 
 export type ModeKey =
   | "text"
@@ -47,6 +47,32 @@ export interface ReferenceImage {
   fileName?: string;
   previewUrl?: string;
   file?: File;
+}
+
+/**
+ * 自由创作里每张附件的用途：
+ * - reference 只借鉴风格/构图/配色，不要求原样出现在成片里；
+ * - merge 图中主体必须真实出现在最终成片中。
+ */
+export type AttachmentUsage = "reference" | "merge";
+
+export interface FreeAttachment {
+  id: string;
+  name: string;
+  /** data:image/... 或 /generated-images/... ，两者都能直接再次送给图像引擎。 */
+  previewUrl: string;
+  usage: AttachmentUsage;
+  note?: string;
+  width?: number;
+  height?: number;
+  file?: File;
+}
+
+/** 从简易模式送到画布、等画布挂载后再落盘的图片。 */
+export interface PendingCanvasImage {
+  id: string;
+  url: string;
+  name: string;
 }
 
 export interface RatioOption {
@@ -114,6 +140,8 @@ export interface GeneratedResult {
   storageStatus: StorageStatus;
   credits: number;
   imageUrl: string;
+  /** 生成这张图时用户写的那句描述（不是拼装后的完整提示词），用于回看和一键重做。 */
+  prompt?: string;
   imageInspection?: Record<string, unknown>;
   qualityGate?: {
     status?: "passed" | "rework";
@@ -127,6 +155,17 @@ export interface GeneratedResult {
   createdAt: string;
 }
 
+export interface AccountUsage {
+  taskCount: number;
+  successCount: number;
+  ownKeyTaskCount: number;
+  taskCount30d: number;
+  imageCount: number;
+  creditsSpent: number;
+  creditsSpent30d: number;
+  lastActiveAt: string | null;
+}
+
 export interface UserAccount {
   id: string;
   email?: string;
@@ -136,6 +175,16 @@ export interface UserAccount {
   credits: number;
   monthlyUsed: number;
   status: "active" | "locked";
+  /** 新账号默认待管理员开通；owner/admin 始终为 true。 */
+  approved?: boolean;
+  /** 账号自备了图像接口 Key（用它生成不扣积分）。 */
+  hasOwnApiKey?: boolean;
+  apiKeyHint?: string | null;
+  apiKeyUpdatedAt?: string | null;
+  /** 服务端 .env 里有没有共享 Key，账户页据此解释「不填也能用」。 */
+  serverKeyConfigured?: boolean;
+  /** 后台用量汇总（只在管理员总览里出现）。 */
+  usage?: AccountUsage;
 }
 
 export interface RechargePackage {

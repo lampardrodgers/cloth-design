@@ -7,6 +7,7 @@ import { createServer as createViteServer } from "vite";
 import { authHandler, requireAccount, runAuthMigrations } from "./auth.mjs";
 import { registerBusinessRoutes, serializeAccount } from "./api.mjs";
 import { migrateBusinessDatabase, nowIso, sqlite } from "./db.mjs";
+import { debugUnlimitedAvailable } from "./debug.mjs";
 import { generatedImageStaticMount, persistGeneratedImage, readManagedGeneratedImage, validateImageBuffer } from "./image-provider.mjs";
 import { imageQualityGate } from "./image-quality.mjs";
 import { assertPaymentProductionReady, consumeCredits, handleAlipayNotify, handleWechatNotify, refundCredits } from "./payments.mjs";
@@ -14,6 +15,7 @@ import { imageProviderHealth, summarizeProviderErrorText } from "./provider-heal
 import { generatedVideoStaticMount } from "./video-provider.mjs";
 import { migrateWorkflowDatabase, registerWorkflowRoutes } from "./workflows.mjs";
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
+import { resolveProviderApiKey } from "./user-keys.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -68,8 +70,9 @@ function hasOpenAIKey() {
   return Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim().length > 0);
 }
 
-function isDemoMode() {
-  return process.env.OPENAI_DEMO_MODE === "true" || !hasOpenAIKey();
+/** 有没有可用的 Key：账号自备的也算。没传 apiKey 时只看服务端 .env。 */
+function isDemoMode(apiKey = process.env.OPENAI_API_KEY) {
+  return process.env.OPENAI_DEMO_MODE === "true" || !String(apiKey || "").trim();
 }
 
 function configuredImageApiBaseUrl() {
@@ -95,6 +98,7 @@ function publicConfig() {
     providerReady,
     imageModelConfigured: Boolean(process.env.OPENAI_IMAGE_MODEL),
     authEnabled: true,
+    debugUnlimitedAvailable: debugUnlimitedAvailable(),
     port,
     providerHealth: imageProviderHealth({ mode, providerReady }),
   };
@@ -148,6 +152,8 @@ function normalizePayload(rawPayload) {
   const format = safeOutputFormat(settings.outputFormat);
   return {
     prompt: String(payload.prompt || "").trim().slice(0, 32000),
+    // 用户原话另存一份：拼装后的 prompt 带满行业约束，回看时读的不是那个。
+    userPrompt: String(payload.userPrompt || payload.prompt || "").trim().slice(0, 4000),
     mode: payload.mode || "text",
     action: payload.action || "generate",
     ratioLabel: payload.ratioLabel || "1:1",
@@ -289,14 +295,14 @@ function estimateCredits(payload) {
   return Math.ceil(total * payload.quantity);
 }
 
-function insertGenerationTask({ id, userId, payload, cost }) {
+function insertGenerationTask({ id, userId, payload, cost, keySource = "server" }) {
   const timestamp = nowIso();
   sqlite
     .prepare(
-      `INSERT INTO generation_task (id, user_id, mode, prompt, status, credits, message, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'running', ?, '生成中', ?, ?)`,
+      `INSERT INTO generation_task (id, user_id, mode, prompt, status, credits, message, key_source, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'running', ?, '生成中', ?, ?, ?)`,
     )
-    .run(id, userId, payload.mode, payload.prompt, cost, timestamp, timestamp);
+    .run(id, userId, payload.mode, payload.prompt, cost, keySource, timestamp, timestamp);
 }
 
 function updateGenerationTask({ id, status, credits, message }) {
@@ -305,9 +311,10 @@ function updateGenerationTask({ id, status, credits, message }) {
     .run(status, credits, message, nowIso(), id);
 }
 
-function generatedResultMetadata(result, index) {
+function generatedResultMetadata(result, index, payload = {}) {
   return JSON.stringify({
     index: result.index ?? index,
+    prompt: payload.userPrompt || null,
     imageInspection: result.imageInspection || null,
     qualityGate: result.qualityGate || null,
     revisedPrompt: result.revisedPrompt || null,
@@ -331,7 +338,7 @@ function insertGeneratedResults({ userId, taskId, payload, results, cost }) {
       payload.ratioLabel,
       Math.ceil(cost / Math.max(results.length, 1)),
       result.imageUrl,
-      generatedResultMetadata(result, index),
+      generatedResultMetadata(result, index, payload),
       timestamp,
     );
   });
@@ -369,10 +376,10 @@ async function parseOpenAIResponse(response, outputFormat, targetSize, outputCom
   );
 }
 
-async function callOpenAIImages(payload, files) {
+async function callOpenAIImages(payload, files, apiKey = process.env.OPENAI_API_KEY) {
   const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
   const headers = {
-    Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    Authorization: `Bearer ${apiKey}`,
   };
   const results = [];
   const requestCount = Math.max(1, payload.quantity);
@@ -468,16 +475,21 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
     }
     const files = await orderedReferenceFiles(payload, Array.isArray(req.files) ? req.files : []);
     taskId = `task-${Date.now()}`;
-    cost = estimateCredits(payload);
+    // 账号自备 Key 的请求接口费用是他们自己的，不再扣积分；用服务端 Key 才计费。
+    const providerKey = resolveProviderApiKey(account.user.id);
+    const ownKey = providerKey.source === "user";
+    cost = ownKey ? 0 : estimateCredits(payload);
 
-    insertGenerationTask({ id: taskId, userId: account.user.id, payload, cost });
+    insertGenerationTask({ id: taskId, userId: account.user.id, payload, cost, keySource: ownKey ? "user" : "server" });
     try {
-      consumeCredits({
-        userId: account.user.id,
-        taskId,
-        amount: cost,
-        reason: `${payload.mode} 图片生成`,
-      });
+      if (cost > 0) {
+        consumeCredits({
+          userId: account.user.id,
+          taskId,
+          amount: cost,
+          reason: `${payload.mode} 图片生成`,
+        });
+      }
     } catch (error) {
       updateGenerationTask({
         id: taskId,
@@ -492,7 +504,7 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
       return;
     }
 
-    if (isDemoMode()) {
+    if (isDemoMode(providerKey.apiKey)) {
       const results = Array.from({ length: payload.quantity }, (_, index) => ({
         imageUrl: createDemoImage({
           mode: payload.mode,
@@ -521,12 +533,13 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
       return;
     }
 
-    const results = await callOpenAIImages(payload, files);
+    const results = await callOpenAIImages(payload, files, providerKey.apiKey);
+    const doneMessage = ownKey ? "图像引擎已返回结果（自备 Key，未扣积分）。" : "图像引擎已返回结果。";
     updateGenerationTask({
       id: taskId,
       status: "success",
       credits: cost,
-      message: "图像引擎已返回结果。",
+      message: doneMessage,
     });
     insertGeneratedResults({ userId: account.user.id, taskId, payload, results, cost });
     const profile = sqlite.prepare("SELECT * FROM user_profile WHERE user_id = ?").get(account.user.id);
@@ -536,7 +549,7 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
       taskId,
       credits: cost,
       account: serializeAccount(account.user, profile),
-      message: "图像引擎已返回结果。",
+      message: doneMessage,
     });
   } catch (error) {
     if (account && taskId && cost > 0) {

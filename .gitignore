@@ -1,8 +1,13 @@
+# 本地依赖、构建产物和 API 密钥配置
 node_modules/
 dist/
 .env
 .env.*
 !.env.example
+*.key
+*.pem
+
+# 本地运行时数据、生成文件和校验输出
 .DS_Store
 *.log
 *.tsbuildinfo

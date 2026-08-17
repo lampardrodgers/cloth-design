@@ -8,6 +8,10 @@ export const userProfile = sqliteTable("user_profile", {
   credits: integer("credits").notNull(),
   monthlyUsed: integer("monthly_used").notNull(),
   status: text("status").notNull(),
+  approved: integer("approved", { mode: "boolean" }).notNull(),
+  apiKeyEncrypted: text("api_key_encrypted"),
+  apiKeyHint: text("api_key_hint"),
+  apiKeyUpdatedAt: text("api_key_updated_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -75,6 +79,7 @@ export const generationTask = sqliteTable("generation_task", {
   status: text("status").notNull(),
   credits: integer("credits").notNull(),
   message: text("message").notNull(),
+  keySource: text("key_source").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

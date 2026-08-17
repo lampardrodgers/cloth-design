@@ -20,7 +20,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { createWorkflowJob, fetchWorkflowDashboard, generatedResultsToWorkflowAssets, workflowResultsToWorkflowAssets } from "../lib/api";
+import { createWorkflowJob, fetchWorkflowDashboard, generatedResultsToWorkflowAssets, workflowResultsToWorkflowAssets, type ApiConfig } from "../lib/api";
 import { fabricControlsFromPreviewPoint, fabricPreviewLayout, type FabricPreviewHandle } from "../lib/fabricPreview";
 import {
   workflowCutoutQualityText,
@@ -74,6 +74,7 @@ import {
 		type VirtualModelInputs,
 	} from "../lib/workflowPayload";
 import type { GeneratedResult, WorkflowAsset, WorkflowDashboard, WorkflowJob, WorkflowResult, WorkflowType } from "../types";
+import { ProviderBanner } from "./ProviderBanner";
 import { Button, ChipGroup, ChipToggleGroup, ComboBox, FieldCard, NumberStepper } from "./ui";
 
 type CoreWorkflowType = Extract<WorkflowType, "fabric-to-style" | "virtual-model-showcase" | "postprocess-suite">;
@@ -891,6 +892,26 @@ function WorkflowFailureNotice({ job }: { job?: WorkflowJob }) {
   );
 }
 
+/**
+ * 任务提交后服务端是异步跑的，按钮只在 POST 期间禁用，之后就恢复了。
+ * 没有这块提示，用户完全看不出「已经在生成了」。
+ */
+function WorkflowRunningNotice({ job }: { job?: WorkflowJob }) {
+  if (job?.status !== "running") return null;
+  return (
+    <div className="workflow-running-notice" role="status">
+      <i className="stage-working-spinner" aria-hidden="true" />
+      <div>
+        <strong>正在生成…</strong>
+        <small>{job.message || "已提交给服务端，完成后结果会自动出现在下方"}</small>
+      </div>
+      <span className="workflow-running-progress" aria-hidden="true">
+        <i style={{ width: `${Math.min(96, Math.max(8, job.progress || 8))}%` }} />
+      </span>
+    </div>
+  );
+}
+
 function WorkflowSteps({ job }: { job?: WorkflowJob }) {
   if (!job) return null;
   return (
@@ -907,9 +928,10 @@ function WorkflowSteps({ job }: { job?: WorkflowJob }) {
 
 interface WorkflowCenterProps {
   generatedResults?: GeneratedResult[];
+  apiConfig?: ApiConfig | null;
 }
 
-export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
+export function WorkflowCenter({ generatedResults = [], apiConfig = null }: WorkflowCenterProps) {
   const [active, setActive] = useState<CoreWorkflowType>("fabric-to-style");
   const [helpOpen, setHelpOpen] = useState(false);
   const [dashboard, setDashboard] = useState<WorkflowDashboard | null>(null);
@@ -965,6 +987,8 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
     if (activeJob?.type === active) return activeJob;
     return latestByType(dashboard?.jobs ?? [], active) ?? undefined;
   }, [active, activeJob, dashboard?.jobs]);
+  // 服务端还在跑这条流程时，按钮保持禁用，避免用户以为没反应而重复提交。
+  const busy = loading || currentJob?.status === "running";
   const reusablePostprocessAssets = useMemo(() => {
     const generatedAssets = generatedResultsToWorkflowAssets(generatedResults, { max: 2, notePrefix: "真实生成结果" });
     return generatedAssets.length > 0 ? generatedAssets : workflowResultsToWorkflowAssets(dashboard?.jobs ?? [], { max: 2, notePrefix: "功能中心前序结果" });
@@ -1093,6 +1117,7 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
 
   return (
     <main className={`workflow-center workflow-module-shell workflow-module-${active}`}>
+      <ProviderBanner apiConfig={apiConfig} compact />
       <header className="workflow-topbar">
         <div className="workflow-topbar-title">
           <h1>{activeTab.label}</h1>
@@ -1291,7 +1316,7 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
                 <Field label="变体数量" hint="首次 2 张；测款可 4-8 张。">
                   <NumberStepper ariaLabel="款式变体数量" min={1} max={8} value={fabricControls.variants} onChange={(value) => updateFabricControls({ variants: value })} />
                 </Field>
-                <Button variant="primary" icon={loading ? <Loader2 size={15} /> : <Sparkles size={15} />} onClick={() => runWorkflow("fabric-to-style")} disabled={loading}>
+                <Button variant="primary" icon={busy ? <Loader2 size={15} /> : <Sparkles size={15} />} onClick={() => runWorkflow("fabric-to-style")} disabled={busy}>
                   生成款式方案
                 </Button>
               </div>
@@ -1338,7 +1363,7 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
                   <span>生成动效预览</span>
                   <small>开启后额外生成该姿势的短视频动效</small>
                 </label>
-                <Button variant="primary" icon={loading ? <Loader2 size={15} /> : <Clapperboard size={15} />} onClick={() => runWorkflow("virtual-model-showcase")} disabled={loading}>
+                <Button variant="primary" icon={busy ? <Loader2 size={15} /> : <Clapperboard size={15} />} onClick={() => runWorkflow("virtual-model-showcase")} disabled={busy}>
                   生成上身展示
                 </Button>
               </div>
@@ -1376,7 +1401,7 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
 
               <div className="run-bar">
                 <small className="field-hint">{reusablePostprocessAssets.length > 0 ? "使用前序真实生成图" : "默认批量演示素材"}</small>
-                <Button variant="primary" icon={loading ? <Loader2 size={15} /> : <Scissors size={15} />} onClick={() => runWorkflow("postprocess-suite")} disabled={loading}>
+                <Button variant="primary" icon={busy ? <Loader2 size={15} /> : <Scissors size={15} />} onClick={() => runWorkflow("postprocess-suite")} disabled={busy}>
                   开始批量后期
                 </Button>
               </div>
@@ -1386,6 +1411,7 @@ export function WorkflowCenter({ generatedResults = [] }: WorkflowCenterProps) {
 
         <section className="workflow-col workflow-col-right panel-scroll" aria-label={`${activeTab.label}结果`}>
           <PanelHeading eyebrow="输出" title="结果" action={<ActiveIcon size={16} />} />
+          <WorkflowRunningNotice job={currentJob} />
           <WorkflowSteps job={currentJob} />
           <WorkflowResultArea active={active} job={currentJob} />
           <WorkflowOutputActions variant={active === "postprocess-suite" ? "postprocess" : "default"} />

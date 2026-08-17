@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { requireAccount } from "./auth.mjs";
+import { resolveProviderApiKey } from "./user-keys.mjs";
 import { nowIso, runTransaction, sqlite } from "./db.mjs";
 import {
   generatedImageStaticMount,
@@ -486,14 +487,21 @@ function brandTrainingProviderStatus() {
   };
 }
 
-export function workflowImageProviderStatus() {
-  const providerReady = Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim().length > 0);
+/** 传 userId 时把账号自备的 Key 也算进去——服务端没配 Key、账号自己有，也能走真实生成。 */
+export function workflowImageProviderStatus(userId) {
+  const providerReady = Boolean(workflowProviderApiKey(userId));
   return {
     mode: process.env.OPENAI_DEMO_MODE === "true" || !providerReady ? "demo" : "live",
     providerReady,
     baseUrl: configuredImageApiBaseUrl(),
     model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
   };
+}
+
+/** 这次调用该用的 Key。单独一个函数，别把原文塞进会被序列化的状态对象里。 */
+function workflowProviderApiKey(userId) {
+  if (userId) return resolveProviderApiKey(userId).apiKey;
+  return String(process.env.OPENAI_API_KEY || "").trim();
 }
 
 function productionReadinessSummary() {
@@ -760,8 +768,8 @@ function canUseSegmentationService(result) {
   return result.versionType === "postprocess_batch" && actions.includes("cutout") && segmentationProviderStatus().ready;
 }
 
-async function generateLiveWorkflowImage(prompt) {
-  const provider = workflowImageProviderStatus();
+async function generateLiveWorkflowImage(prompt, userId) {
+  const provider = workflowImageProviderStatus(userId);
   if (provider.mode !== "live") return null;
   return withImageRetry(async () => {
     const response = await fetchWithTimeout(
@@ -769,7 +777,7 @@ async function generateLiveWorkflowImage(prompt) {
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          Authorization: `Bearer ${workflowProviderApiKey(userId)}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -847,8 +855,8 @@ async function segmentLiveWorkflowImage(prompt, assets) {
   });
 }
 
-async function editLiveWorkflowImage(prompt, assets) {
-  const provider = workflowImageProviderStatus();
+async function editLiveWorkflowImage(prompt, assets, userId) {
+  const provider = workflowImageProviderStatus(userId);
   if (provider.mode !== "live") return null;
   const form = new FormData();
   form.append("model", provider.model);
@@ -876,7 +884,7 @@ async function editLiveWorkflowImage(prompt, assets) {
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          Authorization: `Bearer ${workflowProviderApiKey(userId)}`,
         },
         body: form,
       },
@@ -1105,15 +1113,15 @@ function workflowCompletionMessage(jobId) {
 }
 
 export async function materializeLiveImages(job) {
-  const provider = workflowImageProviderStatus();
+  const provider = workflowImageProviderStatus(job.userId);
   if (provider.mode !== "live") return job;
   const imageResults = job.results.filter((result) => result.mediaType === "image");
   for (const result of imageResults) {
     const inputAssets = assetsForResult(job, result);
     const prompt = livePromptForResult(job, result);
     const segmented = canUseSegmentationService(result) ? await segmentLiveWorkflowImage(prompt, inputAssets) : null;
-    const edited = !segmented && inputAssets.length > 0 ? await editLiveWorkflowImage(prompt, inputAssets) : null;
-    const generated = segmented || edited || (await generateLiveWorkflowImage(prompt));
+    const edited = !segmented && inputAssets.length > 0 ? await editLiveWorkflowImage(prompt, inputAssets, job.userId) : null;
+    const generated = segmented || edited || (await generateLiveWorkflowImage(prompt, job.userId));
     let imageUrl = generated?.imageUrl;
     if (!imageUrl) continue;
     let imageInspection = generated.imageInspection;
@@ -1188,7 +1196,7 @@ export async function materializeLiveImages(job) {
 const liveMaterializationJobs = new Set();
 
 function startLiveMaterialization(job) {
-  if (workflowImageProviderStatus().mode !== "live" || liveMaterializationJobs.has(job.id)) return;
+  if (workflowImageProviderStatus(job.userId).mode !== "live" || liveMaterializationJobs.has(job.id)) return;
   liveMaterializationJobs.add(job.id);
   void materializeLiveImages(job)
     .catch((error) => {
@@ -1975,7 +1983,7 @@ export function createWorkflowJob({ userId, type, title, prompt, assets = [], op
       built = buildTrendBrandWorkflow({ jobId: id, userId, title, prompt, assets: insertedAssets, options });
     }
 
-    if (workflowImageProviderStatus().mode !== "live") {
+    if (workflowImageProviderStatus(userId).mode !== "live") {
       sqlite
         .prepare("UPDATE workflow_job SET status = 'success', progress = 100, message = ?, updated_at = ? WHERE id = ?")
         .run("工作流已完成，结果可继续编辑、批量处理或加入品牌资产库。", nowIso(), id);

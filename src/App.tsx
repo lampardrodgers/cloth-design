@@ -10,6 +10,7 @@ import {
 } from "./data/catalog";
 import {
   adjustAdminCredits,
+  clearMyApiKey,
   completeDemoPayment,
   createPaymentOrder,
   deleteGenerationResult,
@@ -18,7 +19,10 @@ import {
   fetchMe,
   fetchPaymentOrder,
   requestGeneration,
+  saveMyApiKey,
+  endDebugSession,
   signOut,
+  startDebugSession,
   updateAdminPackage,
   updateGenerationResultStorageStatus,
   updateAdminUser,
@@ -26,6 +30,8 @@ import {
   type ApiConfig,
 } from "./lib/api";
 import { buildEditablePrompt, buildOptimizedPrompt } from "./lib/prompt";
+import { attachmentsToReferences, buildAnnotationEditPrompt, buildFreePrompt, buildSketchPrompt } from "./lib/freeStudio";
+import { useStoredState } from "./lib/storedState";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -49,6 +55,7 @@ import type {
 import { AccountPanel } from "./components/AccountPanel";
 import { AdminPanel } from "./components/AdminPanel";
 import { AuthPanel } from "./components/AuthPanel";
+import { FreeStudio, type FreeGenerationInput, type FreeLayout } from "./components/FreeStudio";
 import { ReferencePanel } from "./components/ReferencePanel";
 import { StoragePanel } from "./components/StoragePanel";
 import { StudioWorkspace } from "./components/StudioWorkspace";
@@ -61,6 +68,7 @@ const navigation: Array<{
   displayLabel: string;
   description: string;
 }> = [
+  { id: "free", label: "自由", displayLabel: "自由创作", description: "简易 / 画布" },
   { id: "studio", label: "生成", displayLabel: "开始创作", description: "图片生成" },
   { id: "workflows", label: "功能", displayLabel: "更多工具", description: "专项流程" },
   { id: "account", label: "账户", displayLabel: "账户与积分", description: "套餐明细" },
@@ -99,29 +107,6 @@ const defaultPaymentConfig: PaymentConfigStatus = {
 
 function nowLabel() {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date());
-}
-
-function readStoredState<T>(key: string, fallback: T): T {
-  try {
-    const rawValue = window.localStorage.getItem(key);
-    return rawValue ? (JSON.parse(rawValue) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function useStoredState<T>(key: string, fallback: T) {
-  const [value, setValue] = useState<T>(() => readStoredState(key, fallback));
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(key, JSON.stringify(value));
-    } catch {
-      // Ignore quota errors; the app can continue with in-memory state.
-    }
-  }, [key, value]);
-
-  return [value, setValue] as const;
 }
 
 const referenceAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
@@ -168,7 +153,8 @@ function mergeResults(existing: GeneratedResult[], incoming: GeneratedResult[] =
 }
 
 function App() {
-  const [view, setView] = useState<ViewKey>("studio");
+  // 自由创作排在导航第一位，登录后也直接落在这里。
+  const [view, setView] = useState<ViewKey>("free");
   const [path, setPath] = useState(() => window.location.pathname);
   const [settings, setSettings] = useStoredState<StudioSettings>("clothdesign:settings", initialSettings);
   const [references, setReferences] = useState<ReferenceImage[]>(initialReferences);
@@ -191,12 +177,16 @@ function App() {
   const [paymentConfig, setPaymentConfig] = useState<PaymentConfigStatus>(defaultPaymentConfig);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState("");
+  const [debugUnlimited, setDebugUnlimited] = useState(false);
   const [adminOverview, setAdminOverview] = useState<AdminOverviewResponse | null>(null);
   const [routes, setRoutes] = useStoredState("clothdesign:routes", modelRoutes);
   const [creditPolicy, setCreditPolicy] = useStoredState<CreditPolicy>("clothdesign:creditPolicy", defaultCreditPolicy);
   const [systemPrompts, setSystemPrompts] = useStoredState<SystemPromptMap>("clothdesign:systemPrompts", initialSystemPrompts);
   const [storagePolicy, setStoragePolicy] = useStoredState<StoragePolicy>("clothdesign:storage", initialStoragePolicy);
   const [apiConfig, setApiConfig] = useState<ApiConfig | null>(null);
+  const [railCollapsed, setRailCollapsed] = useStoredState("clothdesign:railCollapsed", false);
+  // 自由创作的简易/画布切换放在顶栏，省掉工作区里那条只写着同一句话的标题栏。
+  const [freeLayout, setFreeLayout] = useStoredState<FreeLayout>("clothdesign:free:layout", "simple");
   const providerHealth = apiConfig?.providerHealth;
 
   // 左栏素材卡与描述里「参考 X」标记之间的连线，用来说明素材和文字的对应关系。
@@ -280,7 +270,16 @@ function App() {
   useEffect(() => {
     fetchApiConfig()
       .then(setApiConfig)
-      .catch(() => setApiConfig({ mode: "demo", providerReady: false, imageModelConfigured: false, authEnabled: true, port: 8888 }));
+      .catch(() =>
+        setApiConfig({
+          mode: "demo",
+          providerReady: false,
+          imageModelConfigured: false,
+          authEnabled: true,
+          debugUnlimitedAvailable: false,
+          port: 8888,
+        }),
+      );
   }, []);
 
   const loadAccount = async () => {
@@ -288,6 +287,7 @@ function App() {
     try {
       const data = await fetchMe();
       setCurrentUser(data.account);
+      setDebugUnlimited(Boolean(data.debugUnlimited));
       setPackages(data.packages);
       setOrders(data.orders);
       setLedger(data.ledger);
@@ -297,6 +297,7 @@ function App() {
       return data.account;
     } catch (error) {
       setCurrentUser(null);
+      setDebugUnlimited(false);
       setAuthError(error instanceof Error ? error.message : "请先登录");
       return null;
     } finally {
@@ -339,6 +340,19 @@ function App() {
       }
       return next;
     });
+  };
+
+  /** 一键清空创作台当前状态：描述、参考图、优化提示。成片和设置不动。 */
+  const handleClearStudio = () => {
+    const mode = generationModes.find((item) => item.id === settings.mode) ?? generationModes[0];
+    references.forEach((reference) => {
+      if (reference.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(reference.previewUrl);
+    });
+    setPrompt("");
+    setModeDrafts((current) => ({ ...current, [mode.id]: "" }));
+    setReferences(normalizeModeReferences([], mode.requiredRefs));
+    setOptimizationNotice("");
+    setHoveredReferenceId("");
   };
 
   const handleModePrompt = (modeId: StudioSettings["mode"]) => {
@@ -389,16 +403,20 @@ function App() {
         settings,
         references,
         prompt: buildOptimizedPrompt(taskPrompt, mode, references, settings),
+        userPrompt: taskPrompt,
         apiSize: ratio.apiSize,
         ratioLabel: ratio.label,
       });
-      setApiConfig({
+      // 只覆盖服务端这次回报的字段，别把 providerHealth 抹掉，否则顶栏状态会退化成猜测值。
+      setApiConfig((current) => ({
+        ...current,
         mode: response.mode,
         providerReady: response.providerReady,
         imageModelConfigured: response.imageModelConfigured,
         authEnabled: response.authEnabled,
         port: response.port,
-      });
+        providerHealth: response.providerHealth ?? current?.providerHealth,
+      }));
       if (response.account) setCurrentUser(response.account);
 
       const serverTaskId = response.taskId || taskId;
@@ -407,6 +425,7 @@ function App() {
         taskId: serverTaskId,
         title: `${mode.shortTitle}-${nowLabel().replace(":", "")}-${index + 1}`,
         mode: mode.id,
+        prompt: taskPrompt,
         ratioLabel: ratio.label,
         storageStatus: storagePolicy.autoSyncOriginals ? "cloud-temp" : "local-cache",
         credits: Math.ceil(cost / Math.max(response.results.length, 1)),
@@ -456,6 +475,119 @@ function App() {
     }
   };
 
+  /**
+   * 自由创作的生成入口。和创作台共用同一条 /api/generate 通道与任务/积分记账，
+   * 区别只在提示词：这里不套服装行业约束，只声明每张附件是「参考」还是「入画」。
+   */
+  const handleFreeGenerate = async ({
+    prompt: rawPrompt,
+    attachments,
+    ratioId,
+    quantity,
+    intent = "free",
+  }: FreeGenerationInput) => {
+    const trimmedPrompt = rawPrompt.trim();
+    if (intent === "free" && !trimmedPrompt) throw new Error("请先写一句画面描述。");
+    if (intent !== "free" && !attachments.length) throw new Error("没有拿到画布截图。");
+
+    const mode = generationModes.find((item) => item.id === "free") ?? generationModes[0];
+    const ratio = ratioOptions.find((item) => item.id === ratioId) ?? ratioOptions[1];
+    const freeSettings: StudioSettings = {
+      ...settings,
+      mode: "free",
+      ratioId: ratio.id,
+      quantity,
+      resolution: "native",
+    };
+    const references = await attachmentsToReferences(attachments);
+    const finalPrompt =
+      intent === "annotation"
+        ? buildAnnotationEditPrompt(trimmedPrompt, freeSettings)
+        : intent === "sketch"
+          ? buildSketchPrompt(trimmedPrompt, freeSettings)
+          : buildFreePrompt(trimmedPrompt, attachments, freeSettings);
+    const intentLabels = { free: "", annotation: "按标注改图", sketch: "按草图生成" } as const;
+    const taskLabel = trimmedPrompt || intentLabels[intent] || "自由创作";
+    const taskId = `task-${Date.now()}`;
+
+    setTasks((items) => [
+      {
+        id: taskId,
+        mode: mode.id,
+        prompt: taskLabel,
+        status: "running",
+        progress: 12,
+        credits: 0,
+        createdAt: nowLabel(),
+        message: intent === "free" ? "自由创作生成中" : `${intentLabels[intent]}中`,
+      },
+      ...items,
+    ]);
+
+    try {
+      const response = await requestGeneration({
+        mode,
+        settings: freeSettings,
+        references,
+        prompt: finalPrompt,
+        userPrompt: taskLabel,
+        apiSize: ratio.apiSize,
+        ratioLabel: ratio.label,
+      });
+      if (response.account) setCurrentUser(response.account);
+      setApiConfig((current) => ({
+        ...current,
+        mode: response.mode,
+        providerReady: response.providerReady,
+        imageModelConfigured: response.imageModelConfigured,
+        authEnabled: response.authEnabled,
+        port: response.port,
+        providerHealth: response.providerHealth ?? current?.providerHealth,
+      }));
+
+      const serverTaskId = response.taskId || taskId;
+      const newResults = response.results.map((result, index) => ({
+        id: `result-${serverTaskId}-${index}`,
+        taskId: serverTaskId,
+        title: `${intent === "free" ? "自由" : intentLabels[intent]}-${nowLabel().replace(":", "")}-${index + 1}`,
+        mode: mode.id,
+        prompt: taskLabel,
+        ratioLabel: ratio.label,
+        storageStatus: storagePolicy.autoSyncOriginals ? "cloud-temp" : "local-cache",
+        credits: Math.ceil((response.credits ?? 0) / Math.max(response.results.length, 1)),
+        imageUrl: result.imageUrl,
+        imageInspection: result.imageInspection,
+        qualityGate: result.qualityGate,
+        createdAt: nowLabel(),
+      })) satisfies GeneratedResult[];
+
+      setTasks((items) =>
+        items.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                id: serverTaskId,
+                status: "success",
+                progress: 100,
+                credits: response.credits ?? 0,
+                message: response.message,
+              }
+            : task,
+        ),
+      );
+      setResults((items) => [...newResults, ...items]);
+      return newResults;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "生成失败";
+      setTasks((items) =>
+        items.map((task) =>
+          task.id === taskId ? { ...task, status: "failed", progress: 100, credits: 0, message } : task,
+        ),
+      );
+      throw error;
+    }
+  };
+
   const handleRetryTask = (task: GenerationTask) => {
     const mode = generationModes.find((item) => item.id === task.mode) ?? generationModes[0];
     setPrompt(task.prompt);
@@ -489,16 +621,31 @@ function App() {
   };
 
   const handleSignOut = async () => {
-    await signOut().catch(() => undefined);
+    await Promise.all([signOut().catch(() => undefined), endDebugSession().catch(() => undefined)]);
     setCurrentUser(null);
+    setDebugUnlimited(false);
     setAdminOverview(null);
     setActiveOrder(null);
+  };
+
+  const handleDebugToggle = async () => {
+    try {
+      if (debugUnlimited) {
+        await endDebugSession();
+      } else {
+        await startDebugSession();
+      }
+      await loadAccount();
+      setView("free");
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "切换开发调试模式失败");
+    }
   };
 
   const handleSetAdminPath = (nextPath: string) => {
     window.history.pushState({}, "", nextPath);
     setPath(nextPath);
-    if (nextPath !== "/admin") setView("studio");
+    if (nextPath !== "/admin") setView("free");
   };
 
   const handleSyncResult = async (id: string) => {
@@ -549,6 +696,7 @@ function App() {
           autoSyncOriginals={storagePolicy.autoSyncOriginals}
           optimizationNotice={optimizationNotice}
           isGenerating={generationSubmitting}
+          apiConfig={apiConfig}
           hoveredReferenceId={hoveredReferenceId}
           onHoverReference={setHoveredReferenceId}
           registerTokenEl={(id, element) => {
@@ -562,10 +710,28 @@ function App() {
             setOptimizationNotice("");
           }}
           onReferencesChange={setReferences}
+          onClear={handleClearStudio}
           onOptimize={handleOptimize}
           onGenerate={handleGenerate}
           onUseAsReference={setReferences}
           onSyncResult={handleSyncResult}
+          onDeleteResult={handleDeleteResult}
+          onOpenAccount={() => setView("account")}
+        />
+      );
+    }
+
+    if (view === "free") {
+      return (
+        <FreeStudio
+          results={results.filter((result) => result.mode === "free")}
+          credits={debugUnlimited ? Number.MAX_SAFE_INTEGER : currentUser.credits}
+          creditPolicy={creditPolicy}
+          settings={settings}
+          apiConfig={apiConfig}
+          layout={freeLayout}
+          onLayoutChange={setFreeLayout}
+          onGenerate={handleFreeGenerate}
           onDeleteResult={handleDeleteResult}
           onOpenAccount={() => setView("account")}
         />
@@ -581,17 +747,34 @@ function App() {
             orders={orders}
             ledger={ledger}
             paymentCapabilities={paymentCapabilities}
+            debugUnlimited={debugUnlimited}
             generationResults={results}
             activeOrder={activeOrder}
             onRecharge={handleRecharge}
             onDemoComplete={handleDemoComplete}
+            onSaveApiKey={async (apiKey) => {
+              try {
+                const { account } = await saveMyApiKey(apiKey);
+                setCurrentUser(account);
+              } catch (error) {
+                return error instanceof Error ? error.message : "保存失败";
+              }
+            }}
+            onClearApiKey={async () => {
+              try {
+                const { account } = await clearMyApiKey();
+                setCurrentUser(account);
+              } catch (error) {
+                return error instanceof Error ? error.message : "清除失败";
+              }
+            }}
           />
         </main>
       );
     }
 
     if (view === "workflows") {
-      return <WorkflowCenter generatedResults={results} />;
+      return <WorkflowCenter generatedResults={results} apiConfig={apiConfig} />;
     }
 
     return (
@@ -616,9 +799,16 @@ function App() {
   if (!currentUser) {
     return (
       <>
-        <AuthPanel onAuthenticated={async () => {
-          await loadAccount();
-        }} />
+        <AuthPanel
+          onAuthenticated={async () => {
+            await loadAccount();
+          }}
+          debugUnlimitedAvailable={Boolean(apiConfig?.debugUnlimitedAvailable)}
+          onDebugAuthenticated={async () => {
+            await startDebugSession();
+            await loadAccount();
+          }}
+        />
         {authError && !authError.includes("请先登录") ? <div className="auth-error">{authError}</div> : null}
       </>
     );
@@ -740,6 +930,16 @@ function App() {
               <span>{activeNavigationItem.description}</span>
               <strong>{activeNavigationItem.displayLabel}</strong>
             </div>
+            {view === "free" ? (
+              <div className="level-switch" role="group" aria-label="创作方式">
+                <button type="button" className={freeLayout === "simple" ? "active" : ""} onClick={() => setFreeLayout("simple")}>
+                  简易
+                </button>
+                <button type="button" className={freeLayout === "canvas" ? "active" : ""} onClick={() => setFreeLayout("canvas")}>
+                  画布
+                </button>
+              </div>
+            ) : null}
           </div>
 
           <div className="top-status">
@@ -747,16 +947,31 @@ function App() {
               <i aria-hidden="true" />
               {providerHealth?.label ?? (apiConfig?.mode === "live" ? "图像服务已就绪" : "演示模式")}
             </span>
-            <button className="credit-button" onClick={() => setView("account")} aria-label={`账户余额 ${currentUser.credits} 积分`}>
-              <strong>{currentUser.credits}</strong> 积分
-            </button>
             <button
-              className="task-menu-button"
+              className="credit-button"
+              onClick={() => setView("account")}
+              aria-label={debugUnlimited ? "开发调试无限额度" : `账户余额 ${currentUser.credits} 积分`}
+            >
+              <strong>{debugUnlimited ? "∞" : currentUser.credits}</strong> {debugUnlimited ? "无限额度" : "积分"}
+            </button>
+            {apiConfig?.debugUnlimitedAvailable ? (
+              <button
+                type="button"
+                className={`debug-mode-button ${debugUnlimited ? "active" : ""}`}
+                onClick={handleDebugToggle}
+                title={debugUnlimited ? "退出开发调试模式" : "切换到开发调试模式"}
+              >
+                {debugUnlimited ? "∞ 调试中" : "开发调试"}
+              </button>
+            ) : null}
+            <button
+              className={`task-menu-button ${runningTasks > 0 ? "running" : ""}`}
               onClick={() => setTaskMenuOpen((open) => !open)}
               aria-expanded={taskMenuOpen}
-              aria-label="任务"
+              aria-label={runningTasks > 0 ? `${runningTasks} 个任务生成中` : "任务"}
             >
-              任务 <em>{runningTasks > 0 ? runningTasks : tasks.length}</em>
+              {runningTasks > 0 ? <i className="task-running-dot" aria-hidden="true" /> : null}
+              {runningTasks > 0 ? "生成中" : "任务"} <em>{runningTasks > 0 ? runningTasks : tasks.length}</em>
             </button>
             <span className="user-summary" title={currentUser.name}>
               <i aria-hidden="true">{currentUser.name.trim().charAt(0) || "我"}</i>
@@ -769,7 +984,25 @@ function App() {
         </header>
 
         <div className="app-body">
-          <aside className="rail" aria-label="主导航">
+          <aside className={`rail ${railCollapsed ? "collapsed" : ""}`} aria-label="主导航">
+            <div className="rail-head">
+              {railCollapsed ? null : <span className="rail-kicker">导航</span>}
+              <button
+                type="button"
+                className="rail-toggle"
+                onClick={() => {
+                  setRailCollapsed((collapsed) => !collapsed);
+                  // 收起时左栏的素材卡会卸载，连线的起点没了，先把悬停态清掉免得留下一条断线。
+                  setHoveredReferenceId("");
+                }}
+                aria-expanded={!railCollapsed}
+                aria-label={railCollapsed ? "展开侧边栏" : "收起侧边栏"}
+                title={railCollapsed ? "展开侧边栏" : "收起侧边栏"}
+              >
+                <span aria-hidden="true">{railCollapsed ? "»" : "«"}</span>
+              </button>
+            </div>
+
             <nav className="rail-nav">
               {navigation.map((item) => (
                 <button
@@ -781,9 +1014,10 @@ function App() {
                   }}
                   aria-label={item.displayLabel}
                   aria-current={view === item.id ? "page" : undefined}
-                  title={item.label}
+                  title={railCollapsed ? item.displayLabel : item.label}
                 >
                   <span className="rail-icon" aria-hidden="true" />
+                  <span className="rail-short" aria-hidden="true">{item.label}</span>
                   <span className="rail-copy">
                     <strong>{item.displayLabel}</strong>
                     <small>{item.description}</small>
@@ -795,9 +1029,10 @@ function App() {
                   className={path.startsWith("/admin") ? "active" : ""}
                   onClick={() => handleSetAdminPath("/admin")}
                   aria-label="管理后台"
-                  title="后台"
+                  title={railCollapsed ? "管理后台" : "后台"}
                 >
                   <span className="rail-icon" aria-hidden="true" />
+                  <span className="rail-short" aria-hidden="true">后台</span>
                   <span className="rail-copy">
                     <strong>管理后台</strong>
                     <small>owner / admin</small>
@@ -808,7 +1043,7 @@ function App() {
 
             <div className="rail-divider" aria-hidden="true" />
 
-            {view === "studio" ? (
+            {railCollapsed ? null : view === "studio" ? (
               <ReferencePanel
                 references={references}
                 requiredRefs={activeMode.requiredRefs}

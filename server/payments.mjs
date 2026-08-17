@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { nowIso, runTransaction, sqlite } from "./db.mjs";
+import { DEBUG_UNLIMITED_CREDITS, isDebugUserId } from "./debug.mjs";
 import { fetchWithTimeout, promiseWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
 
 const orderTtlMs = 15 * 60 * 1000;
@@ -326,6 +327,7 @@ function insertPaymentEvent({ provider, eventKey, orderId, transactionId, payloa
 function addCreditLedger({ userId, orderId, taskId = null, kind, amount, reason, createdBy = null }) {
   const profile = sqlite.prepare("SELECT credits FROM user_profile WHERE user_id = ?").get(userId);
   if (!profile) throw new Error("用户不存在。");
+  if (isDebugUserId(userId)) return DEBUG_UNLIMITED_CREDITS;
   const balanceAfter = profile.credits + amount;
   if (balanceAfter < 0) throw new Error("积分余额不足。");
   const timestamp = nowIso();

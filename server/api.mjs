@@ -1,7 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { requireAccount, requireAdmin } from "./auth.mjs";
 import { nowIso, sqlite } from "./db.mjs";
+import {
+  DEBUG_UNLIMITED_CREDITS,
+  DEBUG_USER_ID,
+  debugCookieHeader,
+  debugSeatFromRequest,
+  debugUnlimitedAvailable,
+  debugUserIdFromSeat,
+  ensureDebugUserProfile,
+  isDebugUserId,
+  newDebugSeat,
+} from "./debug.mjs";
 import { deleteManagedGeneratedImage } from "./image-provider.mjs";
+import { clearUserApiKey, normalizeApiKey, serverApiKey, setUserApiKey } from "./user-keys.mjs";
 import {
   adjustCredits,
   completeDemoOrder,
@@ -15,16 +27,94 @@ import {
 } from "./payments.mjs";
 
 export function serializeAccount(user, profile) {
+  const safeProfile = profile || {
+    display_name: user.name || user.email || "未命名用户",
+    role: "user",
+    plan: "基础版",
+    credits: 0,
+    monthly_used: 0,
+    status: "active",
+  };
+  const debugUser = isDebugUserId(user.id);
   return {
     id: user.id,
     email: user.email,
-    name: profile.display_name || user.name || user.email,
-    role: profile.role,
-    plan: profile.plan,
-    credits: profile.credits,
-    monthlyUsed: profile.monthly_used,
-    status: profile.status,
+    // 调试座位各有各的名字（开发调试 · a1b2c3），顶栏和后台才分得清是谁。
+    name: safeProfile.display_name || (debugUser ? "开发调试" : user.name || user.email),
+    role: safeProfile.role,
+    plan: debugUser ? "无限调试" : safeProfile.plan,
+    credits: debugUser ? DEBUG_UNLIMITED_CREDITS : safeProfile.credits,
+    monthlyUsed: debugUser ? 0 : safeProfile.monthly_used,
+    status: safeProfile.status,
+    approved: Number(safeProfile.approved ?? 1) === 1,
+    // 自备 Key 只回传脱敏提示，原文永远不出服务端。
+    hasOwnApiKey: Boolean(safeProfile.api_key_encrypted),
+    apiKeyHint: safeProfile.api_key_hint || null,
+    apiKeyUpdatedAt: safeProfile.api_key_updated_at || null,
+    serverKeyConfigured: Boolean(serverApiKey()),
   };
+}
+
+/**
+ * 后台看用量：按账号汇总任务数、成片数、积分消耗（扣除退款）和最近活跃时间。
+ * 自备 Key 的任务单独计数——那部分没扣积分，但接口费用是他们自己的。
+ */
+export function usageByUser() {
+  const rows = sqlite
+    .prepare(
+      `SELECT user_id,
+              COUNT(*) AS task_count,
+              SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+              SUM(CASE WHEN key_source = 'user' THEN 1 ELSE 0 END) AS own_key_task_count,
+              SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS task_count_30d,
+              MAX(created_at) AS last_task_at
+       FROM generation_task
+       GROUP BY user_id`,
+    )
+    .all(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
+  const images = sqlite.prepare("SELECT user_id, COUNT(*) AS image_count FROM generated_result GROUP BY user_id").all();
+  const credits = sqlite
+    .prepare(
+      `SELECT user_id,
+              SUM(CASE WHEN kind IN ('consume', 'refund') THEN -amount ELSE 0 END) AS credits_spent,
+              SUM(CASE WHEN kind IN ('consume', 'refund') AND created_at >= ? THEN -amount ELSE 0 END) AS credits_spent_30d
+       FROM credit_ledger
+       GROUP BY user_id`,
+    )
+    .all(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
+  const usage = new Map();
+  const ensure = (userId) => {
+    if (!usage.has(userId)) {
+      usage.set(userId, {
+        taskCount: 0,
+        successCount: 0,
+        ownKeyTaskCount: 0,
+        taskCount30d: 0,
+        imageCount: 0,
+        creditsSpent: 0,
+        creditsSpent30d: 0,
+        lastActiveAt: null,
+      });
+    }
+    return usage.get(userId);
+  };
+  for (const row of rows) {
+    Object.assign(ensure(row.user_id), {
+      taskCount: row.task_count,
+      successCount: row.success_count,
+      ownKeyTaskCount: row.own_key_task_count,
+      taskCount30d: row.task_count_30d,
+      lastActiveAt: row.last_task_at,
+    });
+  }
+  for (const row of images) ensure(row.user_id).imageCount = row.image_count;
+  for (const row of credits) {
+    Object.assign(ensure(row.user_id), {
+      creditsSpent: Math.max(0, row.credits_spent || 0),
+      creditsSpent30d: Math.max(0, row.credits_spent_30d || 0),
+    });
+  }
+  return usage;
 }
 
 function serializePackage(row) {
@@ -76,6 +166,7 @@ function serializeGeneratedResult(row) {
     storageStatus: row.storage_status,
     credits: row.credits,
     imageUrl: row.image_url,
+    prompt: metadata.prompt || null,
     imageInspection: metadata.imageInspection || null,
     qualityGate: metadata.qualityGate || null,
     revisedPrompt: metadata.revisedPrompt || null,
@@ -143,7 +234,7 @@ function getProfileWithUser(userId) {
     .get(userId);
 }
 
-function serializeAdminUser(row) {
+function serializeAdminUser(row, usage = usageByUser().get(row.user_id)) {
   return {
     id: row.user_id,
     email: row.email,
@@ -153,7 +244,20 @@ function serializeAdminUser(row) {
     credits: row.credits,
     monthlyUsed: row.monthly_used,
     status: row.status,
+    approved: Number(row.approved ?? 1) === 1,
+    hasOwnApiKey: Boolean(row.api_key_encrypted),
+    apiKeyHint: row.api_key_hint || null,
     createdAt: row.created_at,
+    usage: usage || {
+      taskCount: 0,
+      successCount: 0,
+      ownKeyTaskCount: 0,
+      taskCount30d: 0,
+      imageCount: 0,
+      creditsSpent: 0,
+      creditsSpent30d: 0,
+      lastActiveAt: null,
+    },
   };
 }
 
@@ -167,20 +271,73 @@ function insertAudit({ actorUserId, action, targetType, targetId, detail }) {
 }
 
 export function registerBusinessRoutes(app) {
+  app.get("/api/debug/config", (_req, res) => {
+    res.json({ available: debugUnlimitedAvailable() });
+  });
+
+  app.post("/api/debug/session", (req, res) => {
+    if (!debugUnlimitedAvailable()) {
+      res.status(404).json({ error: "开发调试模式未开启。" });
+      return;
+    }
+    // 已经有座位就沿用，刷新或重新点按钮不该换一个新身份、把之前的成片甩掉。
+    const seat = debugSeatFromRequest(req) || newDebugSeat();
+    ensureDebugUserProfile(debugUserIdFromSeat(seat));
+    res.setHeader("Set-Cookie", debugCookieHeader({ seat }));
+    res.json({ debugUnlimited: true });
+  });
+
+  app.delete("/api/debug/session", (_req, res) => {
+    res.setHeader("Set-Cookie", debugCookieHeader({ clear: true }));
+    res.json({ debugUnlimited: false });
+  });
+
   app.get("/api/me", async (req, res) => {
     const account = await requireAccount(req, res);
     if (!account) return;
     markExpiredOrdersClosed();
-    const profile = getProfileWithUser(account.user.id);
+    const profile = getProfileWithUser(account.user.id) || account.profile;
     res.json({
       account: serializeAccount(account.user, profile),
       packages: getEnabledPackages(),
       orders: recentOrdersForUser(account.user.id),
       ledger: recentLedgerForUser(account.user.id),
       generationResults: recentGeneratedResultsForUser(account.user.id),
+      debugUnlimited: isDebugUserId(account.user.id),
       paymentCapabilities: paymentCapabilities(),
       paymentConfig: paymentConfigStatus(),
     });
+  });
+
+  // 自备图像接口 Key：只存加密后的，回传脱敏提示。
+  app.put("/api/me/api-key", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    // 每个调试座位是独立账号，可以自备 Key；只有早期那个共用账号不行。
+    if (account.user.id === DEBUG_USER_ID) {
+      res.status(400).json({ error: "这是早期的共用调试账号，请重新点一次「开发调试」换成独立座位后再保存 Key。" });
+      return;
+    }
+    const normalized = normalizeApiKey(req.body?.apiKey);
+    if (normalized.error) {
+      res.status(400).json({ error: normalized.error });
+      return;
+    }
+    const saved = setUserApiKey(account.user.id, normalized.value);
+    insertAudit({ actorUserId: account.user.id, action: "user.api_key.set", targetType: "user", targetId: account.user.id, detail: { hint: saved.apiKeyHint } });
+    res.json({ account: serializeAccount(account.user, getProfileWithUser(account.user.id)) });
+  });
+
+  app.delete("/api/me/api-key", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    if (account.user.id === DEBUG_USER_ID) {
+      res.status(400).json({ error: "这是早期的共用调试账号，没有单独的 Key。" });
+      return;
+    }
+    clearUserApiKey(account.user.id);
+    insertAudit({ actorUserId: account.user.id, action: "user.api_key.clear", targetType: "user", targetId: account.user.id, detail: {} });
+    res.json({ account: serializeAccount(account.user, getProfileWithUser(account.user.id)) });
   });
 
   app.get("/api/admin/payment-config", async (req, res) => {
@@ -306,6 +463,7 @@ export function registerBusinessRoutes(app) {
     const account = await requireAdmin(req, res);
     if (!account) return;
     markExpiredOrdersClosed();
+    const usage = usageByUser();
     const users = sqlite
       .prepare(
         `SELECT p.*, u.email, u.name
@@ -314,7 +472,7 @@ export function registerBusinessRoutes(app) {
          ORDER BY p.created_at ASC`,
       )
       .all()
-      .map(serializeAdminUser);
+      .map((row) => serializeAdminUser(row, usage.get(row.user_id)));
     const orders = sqlite.prepare("SELECT * FROM payment_order ORDER BY created_at DESC LIMIT 80").all().map(serializeOrder);
     const paymentEvents = sqlite
       .prepare("SELECT * FROM payment_event ORDER BY created_at DESC LIMIT 80")
@@ -356,15 +514,18 @@ export function registerBusinessRoutes(app) {
     const nextPlan = typeof req.body.plan === "string" && req.body.plan.trim() ? req.body.plan.trim().slice(0, 40) : current.plan;
     const nextName =
       typeof req.body.name === "string" && req.body.name.trim() ? req.body.name.trim().slice(0, 80) : current.display_name;
+    const nextApproved = typeof req.body.approved === "boolean" ? (req.body.approved ? 1 : 0) : Number(current.approved ?? 1);
     sqlite
-      .prepare("UPDATE user_profile SET display_name = ?, role = ?, plan = ?, status = ?, updated_at = ? WHERE user_id = ?")
-      .run(nextName, nextRole, nextPlan, nextStatus, nowIso(), req.params.id);
+      .prepare(
+        "UPDATE user_profile SET display_name = ?, role = ?, plan = ?, status = ?, approved = ?, updated_at = ? WHERE user_id = ?",
+      )
+      .run(nextName, nextRole, nextPlan, nextStatus, nextApproved, nowIso(), req.params.id);
     insertAudit({
       actorUserId: account.user.id,
       action: "user.update",
       targetType: "user",
       targetId: req.params.id,
-      detail: { role: nextRole, status: nextStatus, plan: nextPlan, name: nextName },
+      detail: { role: nextRole, status: nextStatus, plan: nextPlan, name: nextName, approved: Boolean(nextApproved) },
     });
     res.json({ user: serializeAdminUser(getProfileWithUser(req.params.id)) });
   });

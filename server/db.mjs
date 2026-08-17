@@ -179,6 +179,34 @@ function createBusinessTables() {
   if (!generatedResultColumns.has("metadata_json")) {
     sqlite.exec("ALTER TABLE generated_result ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'");
   }
+
+  // 多人使用：账号要先由管理员开通；每个账号可以自备图像接口 Key（加密落库）。
+  const profileColumns = new Set(
+    sqlite
+      .prepare("PRAGMA table_info(user_profile)")
+      .all()
+      .map((row) => row.name),
+  );
+  if (!profileColumns.has("approved")) {
+    // 老账号默认视为已开通，不然升级一发所有人都被拦在门外。
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN approved INTEGER NOT NULL DEFAULT 1 CHECK (approved IN (0, 1))");
+  }
+  if (!profileColumns.has("api_key_encrypted")) {
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_encrypted TEXT");
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_hint TEXT");
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_updated_at TEXT");
+  }
+
+  const taskColumns = new Set(
+    sqlite
+      .prepare("PRAGMA table_info(generation_task)")
+      .all()
+      .map((row) => row.name),
+  );
+  if (!taskColumns.has("key_source")) {
+    // 记下这次生成走的是服务端 Key 还是账号自备 Key，后台看用量要分开算。
+    sqlite.exec("ALTER TABLE generation_task ADD COLUMN key_source TEXT NOT NULL DEFAULT 'server'");
+  }
 }
 
 function seedRechargePackages() {
