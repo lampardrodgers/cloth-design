@@ -1,7 +1,9 @@
-import { lazy, Suspense, useCallback, useMemo, useState } from "react";
+import { Suspense, useCallback, useMemo, useState } from "react";
 import { generationModes } from "../data/catalog";
 import { estimateCredits } from "../lib/costing";
+import { resetCanvasStore } from "../lib/canvasStore";
 import { filesToAttachments, MAX_ATTACHMENTS } from "../lib/freeStudio";
+import { lazyWithReload } from "../lib/lazyChunk";
 import { useStoredState } from "../lib/storedState";
 import type {
   AttachmentUsage,
@@ -13,11 +15,13 @@ import type {
 } from "../types";
 import type { ApiConfig } from "../lib/api";
 import type { CanvasGenerateInput } from "./CanvasBoard";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { ProviderBanner } from "./ProviderBanner";
 import { SimpleComposer } from "./SimpleComposer";
 
 // tldraw 有 1.7MB，只在真正切到画布时才拉，别拖慢创作台和简易模式。
-const CanvasBoard = lazy(() => import("./CanvasBoard").then((module) => ({ default: module.CanvasBoard })));
+// 版本更新后老页面手里的文件名会失效，lazyWithReload 负责自动刷一次而不是整页白屏。
+const CanvasBoard = lazyWithReload("canvas", () => import("./CanvasBoard").then((module) => ({ default: module.CanvasBoard })));
 
 export interface FreeGenerationInput {
   prompt: string;
@@ -183,24 +187,47 @@ export function FreeStudio({
       ) : (
         <div className="free-body free-body-canvas">
           <ProviderBanner apiConfig={apiConfig} compact />
-          <Suspense
-            fallback={
-              <div className="canvas-loading" aria-live="polite">
-                <span aria-hidden="true">◇</span>
-                <strong>正在打开画布…</strong>
-              </div>
-            }
+          <ErrorBoundary
+            scope="canvas"
+            title="画布没能打开"
+            hint="画布的内容存在这台电脑的浏览器里，刷新不会丢。实在起不来可以清掉本机画布内容重来。"
+            actions={() => (
+              <>
+                <button type="button" className="btn btn-secondary" onClick={() => onLayoutChange("simple")}>
+                  改用简易模式
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  onClick={async () => {
+                    await resetCanvasStore();
+                    window.location.reload();
+                  }}
+                >
+                  清空本机画布内容
+                </button>
+              </>
+            )}
           >
-            <CanvasBoard
-              costFor={canvasCostFor}
-              credits={credits}
-              results={results}
-              pendingImages={pendingImages}
-              onGenerate={handleCanvasGenerate}
-              onPendingConsumed={handlePendingConsumed}
-              onNotice={setNotice}
-            />
-          </Suspense>
+            <Suspense
+              fallback={
+                <div className="canvas-loading" aria-live="polite">
+                  <span aria-hidden="true">◇</span>
+                  <strong>正在打开画布…</strong>
+                </div>
+              }
+            >
+              <CanvasBoard
+                costFor={canvasCostFor}
+                credits={credits}
+                results={results}
+                pendingImages={pendingImages}
+                onGenerate={handleCanvasGenerate}
+                onPendingConsumed={handlePendingConsumed}
+                onNotice={setNotice}
+              />
+            </Suspense>
+          </ErrorBoundary>
           {notice ? (
             <div className="free-canvas-notice" role="alert">
               <span>{notice}</span>

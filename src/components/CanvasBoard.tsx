@@ -49,6 +49,8 @@ import {
 import { getAssetUrlsByImport } from "@tldraw/assets/imports.vite";
 import "tldraw/tldraw.css";
 import { ratioOptions } from "../data/catalog";
+import { CANVAS_PERSISTENCE_KEY } from "../lib/canvasStore";
+import { reportClientError } from "../lib/clientErrors";
 import {
   attachmentUsageHints,
   attachmentUsageLabels,
@@ -60,7 +62,7 @@ import { isPlaceholderImage } from "../lib/providerMode";
 import type { AttachmentUsage, FreeAttachment, GeneratedResult, PendingCanvasImage } from "../types";
 
 const assetUrls = getAssetUrlsByImport();
-const PERSISTENCE_KEY = "clothdesign-free-canvas";
+const PERSISTENCE_KEY = CANVAS_PERSISTENCE_KEY;
 const AI_FRAME_TYPE = "ai-frame";
 const AI_FRAME_TOOL_ID = "ai-frame-tool";
 const ANNOTATION_TOOL_ID = "annotation";
@@ -1625,6 +1627,87 @@ function FramePanel({
 const shapeUtils = [AiFrameShapeUtil];
 const tools = [AnnotationTool];
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * 空白自检
+ *
+ * 有过「画布开着开着整片变白」的反馈：外壳还在、DOM 结构看不出问题，就是画不出来。
+ * 复现不了的东西也得能自己爬起来，所以这里每 5 秒量一次 tldraw 容器：
+ * 连着两次量不到（没有容器 / 尺寸为 0 / 工具栏没了）就重挂一次编辑器，
+ * 画布内容存在 IndexedDB 里，重挂不会丢。重挂两次还是白的就不再折腾，
+ * 显示一条提示让用户刷新，同时把现场尺寸发回服务端，好定位真正的原因。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const WATCHDOG_INTERVAL_MS = 5000;
+const WATCHDOG_STRIKES = 2;
+const WATCHDOG_MAX_REMOUNTS = 2;
+// 重挂之后编辑器要重新从 IndexedDB 读一遍，这段时间不算它空白。
+const WATCHDOG_GRACE_MS = 8000;
+
+function useCanvasWatchdog(shellRef: React.RefObject<HTMLDivElement | null>, onRemount: () => void) {
+  const [gaveUp, setGaveUp] = useState(false);
+  const stateRef = useRef({ strikes: 0, remounts: 0, healthySeen: false, graceUntil: 0, gaveUp: false });
+
+  // 编辑器 onMount 一响就说明画布真的起来过了；之后再量不到就是变白，不是还在加载。
+  const markReady = useCallback(() => {
+    stateRef.current.healthySeen = true;
+    stateRef.current.strikes = 0;
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const state = stateRef.current;
+      if (state.gaveUp || Date.now() < state.graceUntil) return;
+      const shell = shellRef.current;
+      if (!shell) return;
+
+      const container = shell.querySelector(".tl-container");
+      const rect = container?.getBoundingClientRect();
+      const toolbar = Boolean(shell.querySelector(".tlui-toolbar"));
+      const healthy = Boolean(container && rect && rect.width > 2 && rect.height > 2 && toolbar);
+
+      if (healthy) {
+        state.healthySeen = true;
+        state.strikes = 0;
+        return;
+      }
+      // 还没成功起来过就先别管，那是加载中，不是变白。
+      if (!state.healthySeen) return;
+
+      state.strikes += 1;
+      if (state.strikes < WATCHDOG_STRIKES) return;
+      state.strikes = 0;
+
+      const shellRect = shell.getBoundingClientRect();
+      const detail = {
+        hasContainer: Boolean(container),
+        containerW: Math.round(rect?.width ?? -1),
+        containerH: Math.round(rect?.height ?? -1),
+        shellW: Math.round(shellRect.width),
+        shellH: Math.round(shellRect.height),
+        toolbar,
+        hidden: document.hidden,
+        remounts: state.remounts,
+        viewport: `${window.innerWidth}x${window.innerHeight}`,
+      };
+
+      if (state.remounts >= WATCHDOG_MAX_REMOUNTS) {
+        state.gaveUp = true;
+        setGaveUp(true);
+        reportClientError({ scope: "canvas-blank-giveup", message: "画布重挂两次仍然是空白", detail });
+        return;
+      }
+
+      state.remounts += 1;
+      state.graceUntil = Date.now() + WATCHDOG_GRACE_MS;
+      reportClientError({ scope: "canvas-blank", message: "画布空白，自动重挂编辑器", detail });
+      onRemount();
+    }, WATCHDOG_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [onRemount, shellRef]);
+
+  return { gaveUp, markReady };
+}
+
 interface CanvasBoardProps {
   costFor: (referenceCount: number) => number;
   credits: number;
@@ -1672,17 +1755,49 @@ export function CanvasBoard({ costFor, credits, results, pendingImages, onGenera
     [onPendingConsumed, pendingImages],
   );
 
-  const handleMount = useCallback((editor: Editor) => {
-    // 之前的版本把画布锁成深色，用户偏好会一直留着；这里明确回到浅色，和整个工作台一致。
-    editor.user.updateUserPreferences({ colorScheme: "light" });
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const [mountKey, setMountKey] = useState(0);
+  const remount = useCallback(() => setMountKey((key) => key + 1), []);
+  const { gaveUp: blanked, markReady } = useCanvasWatchdog(shellRef, remount);
+
+  // 画布是独立的合成层。标签页在后台待久了再切回来，Chromium 偶尔会漏掉这一层的重绘 ——
+  // 看着就是画布一片空白，DOM 其实一点没坏。回到前台时轻推一下，逼它重画。
+  useEffect(() => {
+    const repaint = () => {
+      if (document.hidden) return;
+      const container = shellRef.current?.querySelector<HTMLElement>(".tl-container");
+      if (!container) return;
+      container.style.opacity = "0.999";
+      window.requestAnimationFrame(() => {
+        container.style.opacity = "";
+      });
+    };
+    document.addEventListener("visibilitychange", repaint);
+    window.addEventListener("pageshow", repaint);
+    window.addEventListener("focus", repaint);
+    return () => {
+      document.removeEventListener("visibilitychange", repaint);
+      window.removeEventListener("pageshow", repaint);
+      window.removeEventListener("focus", repaint);
+    };
   }, []);
+
+  const handleMount = useCallback(
+    (editor: Editor) => {
+      // 之前的版本把画布锁成深色，用户偏好会一直留着；这里明确回到浅色，和整个工作台一致。
+      editor.user.updateUserPreferences({ colorScheme: "light" });
+      markReady();
+    },
+    [markReady],
+  );
 
   return (
     <CanvasApiContext.Provider value={api}>
       <CanvasUiContext.Provider value={ui}>
         <CanvasActionsContext.Provider value={actions}>
-          <div className="canvas-shell">
+          <div className="canvas-shell" ref={shellRef}>
             <Tldraw
+              key={mountKey}
               persistenceKey={PERSISTENCE_KEY}
               assetUrls={assetUrls}
               shapeUtils={shapeUtils}
@@ -1691,6 +1806,15 @@ export function CanvasBoard({ costFor, credits, results, pendingImages, onGenera
               components={components}
               onMount={handleMount}
             />
+            {blanked ? (
+              <div className="canvas-blank-notice" role="alert">
+                <strong>画布显示不出来了</strong>
+                <span>已经试着重新加载过，还是空白。刷新页面通常能恢复，画布上的内容不会丢。</span>
+                <button type="button" className="btn btn-primary" onClick={() => window.location.reload()}>
+                  刷新页面
+                </button>
+              </div>
+            ) : null}
           </div>
         </CanvasActionsContext.Provider>
       </CanvasUiContext.Provider>

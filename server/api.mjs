@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { auth, ensureUserProfile, isAdminRole, requireAccount, requireAdmin, selfSignupAllowed } from "./auth.mjs";
+import { auth, ensureUserProfile, getAuthSession, isAdminRole, requireAccount, requireAdmin, selfSignupAllowed } from "./auth.mjs";
 import { emailToUsername, normalizeUsername, usernameToEmail } from "./accounts.mjs";
 import { imageProviderSettings, resetImageProviderSettings, saveImageProviderSettings } from "./provider-config.mjs";
 import { fetchWithTimeout } from "./timeouts.mjs";
@@ -360,6 +360,41 @@ function insertAudit({ actorUserId, action, targetType, targetId, detail }) {
     .run(randomUUID(), actorUserId, action, targetType, targetId, JSON.stringify(detail || {}), nowIso());
 }
 
+// 最近的前端异常，只留在内存里（重启就清空）。真正的存档是服务日志。
+const CLIENT_ERROR_LIMIT = 50;
+const clientErrors = [];
+
+function recordClientError(entry) {
+  clientErrors.unshift(entry);
+  if (clientErrors.length > CLIENT_ERROR_LIMIT) clientErrors.length = CLIENT_ERROR_LIMIT;
+}
+
+function recentClientErrors() {
+  return clientErrors.slice(0, CLIENT_ERROR_LIMIT);
+}
+
+// 这个接口不需要登录（崩在登录页也得能报），所以按 IP 限一下速，别被人当日志水管用。
+const CLIENT_ERROR_WINDOW_MS = 60000;
+const CLIENT_ERROR_PER_WINDOW = 30;
+const clientErrorHits = new Map();
+
+function clientErrorRateLimited(ip) {
+  const now = Date.now();
+  const hit = clientErrorHits.get(ip);
+  if (!hit || now - hit.since > CLIENT_ERROR_WINDOW_MS) {
+    clientErrorHits.set(ip, { since: now, count: 1 });
+    // 顺手清掉过期的，别让 Map 一直长
+    if (clientErrorHits.size > 500) {
+      for (const [key, value] of clientErrorHits) {
+        if (now - value.since > CLIENT_ERROR_WINDOW_MS) clientErrorHits.delete(key);
+      }
+    }
+    return false;
+  }
+  hit.count += 1;
+  return hit.count > CLIENT_ERROR_PER_WINDOW;
+}
+
 export function registerBusinessRoutes(app) {
   app.get("/api/debug/config", (_req, res) => {
     res.json({ available: debugUnlimitedAvailable() });
@@ -614,6 +649,53 @@ export function registerBusinessRoutes(app) {
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : "模拟支付失败。" });
     }
+  });
+
+  // ---------- 前端异常上报 ----------
+  //
+  // 白屏、崩溃这类问题的现场在用户浏览器里，服务端日志一点痕迹都没有。
+  // 这里收一份最简信息：一句话 + 调用栈 + 页面地址，写进服务日志（journalctl -u clothdesign），
+  // 顺带在内存里留最近 50 条给后台看。不入库、不落盘，重启就没了，够定位就行。
+
+  app.post("/api/client-errors", async (req, res) => {
+    const body = req.body || {};
+    const message = String(body.message ?? "").slice(0, 500).trim();
+    if (!message) {
+      res.status(400).json({ error: "缺少错误信息。" });
+      return;
+    }
+    if (clientErrorRateLimited(req.ip || req.socket?.remoteAddress || "unknown")) {
+      res.status(429).end();
+      return;
+    }
+    // 谁报的能拿到就记，拿不到（比如没登录）也照收。
+    let userId = null;
+    try {
+      const session = await getAuthSession(req);
+      userId = session?.user?.id ?? null;
+    } catch {
+      userId = null;
+    }
+    const entry = {
+      at: nowIso(),
+      scope: String(body.scope ?? "unknown").slice(0, 40),
+      message,
+      stack: body.stack ? String(body.stack).slice(0, 2000) : null,
+      url: String(body.url ?? "").slice(0, 300),
+      detail: body.detail && typeof body.detail === "object" ? body.detail : null,
+      userId,
+      userAgent: String(req.headers["user-agent"] ?? "").slice(0, 300),
+    };
+    recordClientError(entry);
+    console.warn(`[client-error] ${entry.scope} | ${entry.message} | ${entry.url} | user=${entry.userId ?? "-"}`);
+    if (entry.detail) console.warn(`[client-error] detail ${JSON.stringify(entry.detail)}`);
+    res.status(204).end();
+  });
+
+  app.get("/api/admin/client-errors", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    res.json({ errors: recentClientErrors() });
   });
 
   app.get("/api/admin/overview", async (req, res) => {

@@ -143,7 +143,15 @@ for (const token of ["canvas-library", "ResultLibrary", "canvas-guide"]) {
 }
 assert(freeStudioSource.includes("results={results}"), "canvas must receive the generated results library");
 
-assert(freeStudioSource.includes("lazy("), "tldraw must be loaded on demand so it does not weigh down the studio");
+// 仍然按需加载，但走 lazyWithReload：版本更新后老页面拿不到旧文件名时自动刷一次，而不是整页白屏。
+assert(
+  freeStudioSource.includes('lazyWithReload("canvas"') && freeStudioSource.includes('import("./CanvasBoard")'),
+  "tldraw must be loaded on demand so it does not weigh down the studio",
+);
+assert(freeStudioSource.includes('<ErrorBoundary'), "canvas must sit behind an error boundary so a crash never shows a blank page");
+// 白屏兜底：自检 + 切回前台时强制重绘（合成层漏画时 DOM 是好的，自检看不出来）。
+assert(canvasSource.includes("useCanvasWatchdog"), "canvas must self-check for blank rendering");
+assert(canvasSource.includes("visibilitychange"), "canvas must force a repaint when the tab comes back to the front");
 assert(canvasSource.includes("multiple"), "Attachment inputs must accept multiple images");
 assert(simpleSource.includes("multiple") || attachmentSource.includes("multiple"), "Simple mode must accept multiple images");
 
