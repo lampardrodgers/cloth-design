@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { auth, ensureUserProfile, requireAccount, requireAdmin, selfSignupAllowed } from "./auth.mjs";
 import { emailToUsername, normalizeUsername, usernameToEmail } from "./accounts.mjs";
+import { imageProviderSettings, resetImageProviderSettings, saveImageProviderSettings } from "./provider-config.mjs";
+import { fetchWithTimeout } from "./timeouts.mjs";
 import { nowIso, sqlite } from "./db.mjs";
 import {
   DEBUG_UNLIMITED_CREDITS,
@@ -554,6 +556,7 @@ export function registerBusinessRoutes(app) {
     const ledger = sqlite.prepare("SELECT * FROM credit_ledger ORDER BY created_at DESC LIMIT 80").all().map(serializeLedger);
     res.json({
       summary: adminSummary(),
+      imageProvider: imageProviderSettings(),
       users,
       packages: getAllPackages(),
       orders,
@@ -577,6 +580,29 @@ export function registerBusinessRoutes(app) {
     }
     const nextRole = req.body.role && allowedRoles.has(req.body.role) ? req.body.role : current.role;
     const nextStatus = req.body.status && allowedStatus.has(req.body.status) ? req.body.status : current.status;
+
+    // 防自锁：管理员只有一个，误点一下下拉框就会把自己降成普通用户，
+    // 之后谁也进不了后台，只能上服务器改数据库。这里直接挡住。
+    const wasAdmin = ["owner", "admin"].includes(current.role);
+    const staysAdmin = ["owner", "admin"].includes(nextRole);
+    const isSelf = req.params.id === account.user.id;
+    if (wasAdmin && !staysAdmin) {
+      if (isSelf) {
+        res.status(400).json({ error: "不能取消自己的管理员权限，否则就没人能进后台了。请先把另一个账号设为管理员。" });
+        return;
+      }
+      const otherAdmins = sqlite
+        .prepare("SELECT COUNT(*) AS count FROM user_profile WHERE user_id != ? AND role IN ('owner','admin') AND status = 'active'")
+        .get(req.params.id).count;
+      if (otherAdmins === 0) {
+        res.status(400).json({ error: "这是最后一个管理员账号，取消后没人能进后台。请先设置另一个管理员。" });
+        return;
+      }
+    }
+    if (isSelf && nextStatus === "locked") {
+      res.status(400).json({ error: "不能锁定自己的账号。" });
+      return;
+    }
     const nextPlan = typeof req.body.plan === "string" && req.body.plan.trim() ? req.body.plan.trim().slice(0, 40) : current.plan;
     const nextName =
       typeof req.body.name === "string" && req.body.name.trim() ? req.body.name.trim().slice(0, 80) : current.display_name;
@@ -725,6 +751,85 @@ export function registerBusinessRoutes(app) {
       res.json({ ok: true });
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : "重置密码失败。" });
+    }
+  });
+
+  /** 图像接口地址 / 模型名。留空某一项 = 恢复 .env 里的默认值。改完立刻生效，不用重启。 */
+  app.get("/api/admin/image-provider", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    res.json({ imageProvider: imageProviderSettings() });
+  });
+
+  app.put("/api/admin/image-provider", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const result = saveImageProviderSettings({ baseUrl: req.body?.baseUrl, model: req.body?.model });
+    if (result.error) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    insertAudit({
+      actorUserId: account.user.id,
+      action: "image_provider.update",
+      targetType: "app_config",
+      targetId: "imageProvider",
+      detail: { baseUrl: result.settings.baseUrl, model: result.settings.model },
+    });
+    res.json({ imageProvider: result.settings });
+  });
+
+  app.delete("/api/admin/image-provider", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const settings = resetImageProviderSettings();
+    insertAudit({
+      actorUserId: account.user.id,
+      action: "image_provider.reset",
+      targetType: "app_config",
+      targetId: "imageProvider",
+      detail: {},
+    });
+    res.json({ imageProvider: settings });
+  });
+
+  /**
+   * 连通性自检：拿当前地址 + Key 打一下 /models。
+   * 用 GET /models 是因为它不产图、不花钱，只验证地址和 Key 对不对。
+   */
+  app.post("/api/admin/image-provider/test", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const settings = imageProviderSettings();
+    const apiKey = serverApiKey();
+    if (!apiKey) {
+      res.json({ ok: false, message: "服务端没有配 OPENAI_API_KEY，无法测试。可以先让某个账号用自备 Key 出图验证。" });
+      return;
+    }
+    try {
+      const response = await fetchWithTimeout(
+        `${settings.baseUrl}/models`,
+        { headers: { Authorization: `Bearer ${apiKey}` } },
+        { timeoutMs: 15000, timeoutMessage: "接口 15 秒没有响应。" },
+      );
+      const text = await response.text();
+      if (!response.ok) {
+        res.json({ ok: false, message: `${settings.baseUrl} 返回 ${response.status}：${text.slice(0, 200)}` });
+        return;
+      }
+      let count = null;
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed?.data)) count = parsed.data.length;
+      } catch {
+        // 有的中转不返回标准结构，能连通就算过
+      }
+      res.json({
+        ok: true,
+        message: `连通正常${count === null ? "" : `，可见 ${count} 个模型`}。当前模型名 ${settings.model}。`,
+      });
+    } catch (error) {
+      res.json({ ok: false, message: error instanceof Error ? error.message : "连接失败。" });
     }
   });
 

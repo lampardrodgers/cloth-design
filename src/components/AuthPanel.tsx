@@ -157,16 +157,17 @@ export function AuthPanel({ selfSignupAllowed = true, onAuthenticated }: AuthPan
               </div>
 
               <label className="field auth-field" htmlFor="auth-email">
-                <span>{selfSignupAllowed ? "邮箱" : "账号"}</span>
+                <span>{selfSignupAllowed ? "账号 / 邮箱" : "账号"}</span>
                 <input
                   id="auth-email"
-                  type={selfSignupAllowed ? "email" : "text"}
+                  /* 不能用 type="email"：后台发的号是裸账号名，浏览器校验会直接拦下来。 */
+                  type="text"
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
                   autoComplete="username"
                   autoCapitalize="none"
                   spellCheck={false}
-                  placeholder={selfSignupAllowed ? undefined : "管理员给你的账号名"}
+                  placeholder={selfSignupAllowed ? "账号名或邮箱" : "管理员给你的账号名"}
                   required
                 />
               </label>

@@ -1,5 +1,5 @@
-import { useState, type FormEvent } from "react";
-import { DatabaseZap, KeyRound, Settings2, ShieldCheck, UserPlus, WalletCards } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
+import { DatabaseZap, KeyRound, Plug, Settings2, ShieldCheck, UserPlus, WalletCards } from "lucide-react";
 import { generationModes } from "../data/catalog";
 import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
 import type {
@@ -16,7 +16,7 @@ import type {
   SystemPromptMap,
   UserAccount,
 } from "../types";
-import type { AdminSummary } from "../lib/api";
+import type { AdminSummary, ImageProviderSettings } from "../lib/api";
 import { Metric, Section } from "./ui";
 
 interface AdminPanelProps {
@@ -24,9 +24,15 @@ interface AdminPanelProps {
   onRoutesChange: (routes: ModelRoute[]) => void;
   users: UserAccount[];
   onUsersChange: (users: UserAccount[]) => void;
-  onUserPatch?: (id: string, patch: Partial<UserAccount>) => void;
+  onUserPatch?: (id: string, patch: Partial<UserAccount>) => void | Promise<string | void>;
   onCreditAdjust?: (id: string, amount: number) => void;
   summary?: AdminSummary;
+  /** 当前登录的管理员，用来把自己那行的角色和状态设成只读，避免误点把自己关在门外。 */
+  currentUserId?: string;
+  imageProvider?: ImageProviderSettings;
+  onSaveImageProvider?: (input: { baseUrl: string; model: string }) => Promise<string | void>;
+  onResetImageProvider?: () => Promise<string | void>;
+  onTestImageProvider?: () => Promise<{ ok: boolean; message: string }>;
   /** 后台建号 / 重置密码；返回字符串表示失败原因。 */
   onCreateUser?: (input: { username: string; password: string; name: string; apiKey: string; unlimited: boolean; credits: number }) => Promise<string | void>;
   onResetPassword?: (id: string, password: string) => Promise<string | void>;
@@ -63,6 +69,11 @@ export function AdminPanel({
   onUserPatch,
   onCreditAdjust,
   summary,
+  currentUserId,
+  imageProvider,
+  onSaveImageProvider,
+  onResetImageProvider,
+  onTestImageProvider,
   onCreateUser,
   onResetPassword,
   onSetApiKey,
@@ -88,6 +99,52 @@ export function AdminPanel({
   const updatePackage = (id: string, patch: Partial<RechargePackage>) => {
     onPackagesChange(packagesList.map((item) => (item.id === id ? { ...item, ...patch } : item)));
     onPackagePatch?.(id, patch);
+  };
+
+  const [providerDraft, setProviderDraft] = useState({ baseUrl: "", model: "" });
+  const [providerBusy, setProviderBusy] = useState("");
+  const [providerNotice, setProviderNotice] = useState("");
+
+  // 后台数据回来（或被别处改过）之后，把输入框同步成当前生效的值
+  useEffect(() => {
+    if (imageProvider) setProviderDraft({ baseUrl: imageProvider.baseUrl, model: imageProvider.model });
+  }, [imageProvider?.baseUrl, imageProvider?.model]);
+
+  const saveProvider = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!onSaveImageProvider || providerBusy) return;
+    setProviderBusy("save");
+    setProviderNotice("");
+    try {
+      const error = await onSaveImageProvider(providerDraft);
+      setProviderNotice(error || "已保存，立刻生效，不用重启服务。");
+    } finally {
+      setProviderBusy("");
+    }
+  };
+
+  const resetProvider = async () => {
+    if (!onResetImageProvider || providerBusy) return;
+    setProviderBusy("reset");
+    setProviderNotice("");
+    try {
+      const error = await onResetImageProvider();
+      setProviderNotice(error || "已恢复成 .env 里的默认值。");
+    } finally {
+      setProviderBusy("");
+    }
+  };
+
+  const testProvider = async () => {
+    if (!onTestImageProvider || providerBusy) return;
+    setProviderBusy("test");
+    setProviderNotice("正在连接…");
+    try {
+      const result = await onTestImageProvider();
+      setProviderNotice(`${result.ok ? "✓ " : "✗ "}${result.message}`);
+    } finally {
+      setProviderBusy("");
+    }
   };
 
   const [draft, setDraft] = useState({ username: "", password: "", name: "", apiKey: "", unlimited: false, credits: 0 });
@@ -132,7 +189,10 @@ export function AdminPanel({
 
   const updateUser = (id: string, patch: Partial<UserAccount>) => {
     onUsersChange(users.map((user) => (user.id === id ? { ...user, ...patch } : user)));
-    onUserPatch?.(id, patch);
+    // 服务端可能拒绝（例如取消最后一个管理员），失败要说出来并把界面改回去
+    void Promise.resolve(onUserPatch?.(id, patch)).then((error) => {
+      if (typeof error === "string" && error) setCreateNotice(error);
+    });
   };
 
   return (
@@ -149,7 +209,73 @@ export function AdminPanel({
         </Section>
       ) : null}
 
-      <Section title="模型路由" action={<Settings2 size={17} />}>
+      {imageProvider && onSaveImageProvider ? (
+        <Section title="图像接口" action={<Plug size={17} />}>
+          <p className="admin-note">
+            这里改的是全站出图走的接口地址和模型名，保存后立刻生效、不用重启。
+            留空某一项再保存就回到 <code>.env</code> 里的默认值。
+            账号自备的 Key 也走这个地址，所以换地址前先确认大家的 Key 是同一家的。
+          </p>
+          <form className="admin-provider" onSubmit={saveProvider}>
+            <label className="field admin-provider-url">
+              <span>
+                接口地址
+                <em className={`admin-tag ${imageProvider.baseUrlSource === "custom" ? "admin-tag-ok" : ""}`}>
+                  {imageProvider.baseUrlSource === "custom" ? "后台已改" : "来自 .env"}
+                </em>
+              </span>
+              <input
+                value={providerDraft.baseUrl}
+                onChange={(e) => setProviderDraft({ ...providerDraft, baseUrl: e.target.value })}
+                placeholder={imageProvider.defaults.baseUrl}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              <span>
+                模型名
+                <em className={`admin-tag ${imageProvider.modelSource === "custom" ? "admin-tag-ok" : ""}`}>
+                  {imageProvider.modelSource === "custom" ? "后台已改" : "来自 .env"}
+                </em>
+              </span>
+              <input
+                value={providerDraft.model}
+                onChange={(e) => setProviderDraft({ ...providerDraft, model: e.target.value })}
+                placeholder={imageProvider.defaults.model}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </label>
+            <div className="admin-provider-actions">
+              <button type="submit" className="btn btn-primary" disabled={Boolean(providerBusy)}>
+                {providerBusy === "save" ? "保存中…" : "保存"}
+              </button>
+              {onTestImageProvider ? (
+                <button type="button" className="btn btn-secondary" disabled={Boolean(providerBusy)} onClick={() => void testProvider()}>
+                  {providerBusy === "test" ? "测试中…" : "测试连接"}
+                </button>
+              ) : null}
+              {onResetImageProvider ? (
+                <button type="button" className="btn btn-secondary" disabled={Boolean(providerBusy)} onClick={() => void resetProvider()}>
+                  恢复默认
+                </button>
+              ) : null}
+            </div>
+          </form>
+          <p className="admin-provider-current">
+            当前生效：<code>{imageProvider.baseUrl}/images/generations</code> · 模型 <code>{imageProvider.model}</code>
+            {imageProvider.updatedAt ? ` · 最后修改 ${new Date(imageProvider.updatedAt).toLocaleString("zh-CN")}` : ""}
+          </p>
+          {providerNotice ? <p className="admin-create-notice">{providerNotice}</p> : null}
+        </Section>
+      ) : null}
+
+      <Section title="模型路由（仅本机备忘）" action={<Settings2 size={17} />}>
+        <p className="admin-note">
+          这张表只存在你自己浏览器里，用来记录前台能力和内部模型的对应关系，
+          <strong>不会下发给服务端，也不影响实际出图</strong>。真正生效的地址和模型见上面的「图像接口」。
+        </p>
         <div className="route-table admin-table">
           <div className="table-row table-head">
             <span>前台能力</span>
@@ -368,11 +494,17 @@ export function AdminPanel({
                   <input className="admin-input" value={user.name} onChange={(event) => updateUser(user.id, { name: event.target.value })} aria-label={`${user.username ?? user.id} 显示名`} />
                   <small>{user.username ?? user.email ?? user.id}</small>
                 </span>
-                <select className="admin-input" value={user.role} onChange={(event) => updateUser(user.id, { role: event.target.value as UserAccount["role"] })}>
-                  <option value="owner">owner</option>
-                  <option value="admin">admin</option>
-                  <option value="user">user</option>
-                </select>
+                {user.id === currentUserId ? (
+                  <span className="admin-self-role" title="这是你自己的账号，角色不能在这里改，防止误点后进不了后台">
+                    {user.role} · 你
+                  </span>
+                ) : (
+                  <select className="admin-input" value={user.role} onChange={(event) => updateUser(user.id, { role: event.target.value as UserAccount["role"] })}>
+                    <option value="owner">owner</option>
+                    <option value="admin">admin</option>
+                    <option value="user">user</option>
+                  </select>
+                )}
                 <span>
                   {["owner", "admin"].includes(user.role) ? (
                     <small className="admin-tag admin-tag-ok">管理员</small>
@@ -417,10 +549,14 @@ export function AdminPanel({
                     {user.hasOwnApiKey ? user.apiKeyHint ?? "已配" : "共享"}
                   </button>
                 </span>
-                <select className="admin-input" value={user.status} onChange={(event) => updateUser(user.id, { status: event.target.value as UserAccount["status"] })}>
-                  <option value="active">正常</option>
-                  <option value="locked">锁定</option>
-                </select>
+                {user.id === currentUserId ? (
+                  <span className="admin-self-role" title="不能锁定自己">正常</span>
+                ) : (
+                  <select className="admin-input" value={user.status} onChange={(event) => updateUser(user.id, { status: event.target.value as UserAccount["status"] })}>
+                    <option value="active">正常</option>
+                    <option value="locked">锁定</option>
+                  </select>
+                )}
                 <span className="admin-route-actions">
                   <button className="btn btn-secondary" title="加 100 积分" onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
                   <button className="btn btn-secondary" title="扣 100 积分" onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>

@@ -145,6 +145,13 @@ assert(api.includes('app.put("/api/me/api-key"') && api.includes('app.delete("/a
 assert(api.includes("export function usageByUser"), "后台按账号汇总用量");
 assert(api.includes("nextApproved"), "后台能开通 / 收回账号");
 assert(api.includes("nextUnlimited"), "后台能开 / 关无限额度");
+// 防自锁：唯一的管理员误点一下角色下拉框就会把自己关在后台外面（线上真踩过）
+assert(api.includes("不能取消自己的管理员权限"), "不能把自己降成普通用户");
+assert(api.includes("这是最后一个管理员账号"), "不能取消最后一个管理员");
+assert(api.includes('if (isSelf && nextStatus === "locked")'), "不能锁定自己");
+const adminPanel = await fs.readFile("src/components/AdminPanel.tsx", "utf8");
+assert(adminPanel.includes("user.id === currentUserId"), "自己那一行的角色和状态要只读");
+assert(adminPanel.includes("setCreateNotice(error)"), "改动被服务端拒绝时要提示，不能界面改了库里没改");
 assert(api.includes('app.post("/api/admin/users"'), "后台能直接建账号");
 assert(api.includes('app.put("/api/admin/users/:id/api-key"'), "后台能给账号配 Key");
 assert(api.includes('const role = "user";'), "后台发的号一律普通用户，保证只有管理员能进 /admin");
@@ -159,6 +166,8 @@ const authPanel = await fs.readFile("src/components/AuthPanel.tsx", "utf8");
 assert(authPanel.includes("selfSignupAllowed ? ("), "关掉自助注册后登录页不显示注册 tab");
 // 调试入口不能出现在登录页；无限额度改由管理员按账号授予
 assert(!authPanel.includes("开发调试"), "登录页不该再有开发调试入口");
+// 后台发的号是裸账号名，登录框用 type="email" 会被浏览器拦下
+assert(!authPanel.includes('type={selfSignupAllowed ? "email" : "text"}'), "登录框不能按模式切成 email 类型");
 const appSrc = await fs.readFile("src/App.tsx", "utf8");
 assert(!appSrc.includes("debug-mode-button"), "顶栏不该再有开发调试切换按钮");
 assert(appSrc.includes('currentUser?.unlimited === true'), "顶栏的 ∞ 要跟着账号上的无限额度走");

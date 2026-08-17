@@ -71,8 +71,18 @@ export interface AdminSummary {
   selfSignupAllowed: boolean;
 }
 
+export interface ImageProviderSettings {
+  baseUrl: string;
+  model: string;
+  baseUrlSource: "env" | "custom";
+  modelSource: "env" | "custom";
+  defaults: { baseUrl: string; model: string };
+  updatedAt: string | null;
+}
+
 export interface AdminOverviewResponse {
   summary?: AdminSummary;
+  imageProvider?: ImageProviderSettings;
   users: UserAccount[];
   packages: RechargePackage[];
   orders: PaymentOrder[];
@@ -328,6 +338,26 @@ export async function createAdminUser(input: {
     body: JSON.stringify(input),
   });
   return parseJson<{ user: UserAccount }>(response);
+}
+
+export async function saveImageProvider(input: { baseUrl?: string; model?: string }) {
+  const response = await fetch("/api/admin/image-provider", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ imageProvider: ImageProviderSettings }>(response);
+}
+
+export async function resetImageProvider() {
+  const response = await fetch("/api/admin/image-provider", { method: "DELETE", credentials: "include" });
+  return parseJson<{ imageProvider: ImageProviderSettings }>(response);
+}
+
+export async function testImageProvider() {
+  const response = await fetch("/api/admin/image-provider/test", { method: "POST", credentials: "include" });
+  return parseJson<{ ok: boolean; message: string }>(response);
 }
 
 export async function setAdminUserApiKey(id: string, apiKey: string) {

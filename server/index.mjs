@@ -16,6 +16,7 @@ import { generatedVideoStaticMount } from "./video-provider.mjs";
 import { migrateWorkflowDatabase, registerWorkflowRoutes } from "./workflows.mjs";
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
 import { resolveProviderApiKey } from "./user-keys.mjs";
+import { imageApiModel, imageApiUrl, imageProviderSettings } from "./provider-config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -80,17 +81,6 @@ function isDemoMode(apiKey = process.env.OPENAI_API_KEY) {
   return process.env.OPENAI_DEMO_MODE === "true" || !String(apiKey || "").trim();
 }
 
-function configuredImageApiBaseUrl() {
-  const configuredUrl =
-    process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE_URL || process.env.PACKY_API_BASE_URL || "https://api.openai.com";
-  const trimmed = configuredUrl.trim().replace(/\/+$/, "");
-  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
-}
-
-function imageApiUrl(pathname) {
-  return `${configuredImageApiBaseUrl()}/${pathname.replace(/^\/+/, "")}`;
-}
-
 function imageRequestTimeoutMs() {
   return timeoutMsFromEnv("OPENAI_IMAGE_TIMEOUT_MS", 180000);
 }
@@ -101,7 +91,7 @@ function publicConfig() {
   return {
     mode,
     providerReady,
-    imageModelConfigured: Boolean(process.env.OPENAI_IMAGE_MODEL),
+    imageModelConfigured: Boolean(imageProviderSettings().model),
     authEnabled: true,
     selfSignupAllowed: selfSignupAllowed(),
     debugUnlimitedAvailable: debugUnlimitedAvailable(),
@@ -383,7 +373,7 @@ async function parseOpenAIResponse(response, outputFormat, targetSize, outputCom
 }
 
 async function callOpenAIImages(payload, files, apiKey = process.env.OPENAI_API_KEY) {
-  const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
+  const model = imageApiModel();
   const headers = {
     Authorization: `Bearer ${apiKey}`,
   };

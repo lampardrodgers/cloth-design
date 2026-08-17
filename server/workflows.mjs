@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { requireAccount } from "./auth.mjs";
 import { resolveProviderApiKey } from "./user-keys.mjs";
+import { imageApiBaseUrl, imageApiModel, imageApiUrl } from "./provider-config.mjs";
 import { nowIso, runTransaction, sqlite } from "./db.mjs";
 import {
   generatedImageStaticMount,
@@ -426,17 +427,6 @@ function createWorkflowSvg({ title, subtitle, tone = "#2f6f61", accent = "#d7704
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
 
-function configuredImageApiBaseUrl() {
-  const configuredUrl =
-    process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE_URL || process.env.PACKY_API_BASE_URL || "https://api.openai.com";
-  const trimmed = configuredUrl.trim().replace(/\/+$/, "");
-  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
-}
-
-function imageApiUrl(pathname) {
-  return `${configuredImageApiBaseUrl()}/${pathname.replace(/^\/+/, "")}`;
-}
-
 function workflowImageTimeoutMs() {
   return timeoutMsFromEnv(["WORKFLOW_IMAGE_TIMEOUT_MS", "OPENAI_IMAGE_TIMEOUT_MS"], 180000);
 }
@@ -493,8 +483,8 @@ export function workflowImageProviderStatus(userId) {
   return {
     mode: process.env.OPENAI_DEMO_MODE === "true" || !providerReady ? "demo" : "live",
     providerReady,
-    baseUrl: configuredImageApiBaseUrl(),
-    model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+    baseUrl: imageApiBaseUrl(),
+    model: imageApiModel(),
   };
 }
 

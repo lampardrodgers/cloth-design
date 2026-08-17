@@ -13,7 +13,10 @@ import {
   clearMyApiKey,
   createAdminUser,
   resetAdminUserPassword,
+  resetImageProvider,
+  saveImageProvider,
   setAdminUserApiKey,
+  testImageProvider,
   completeDemoPayment,
   createPaymentOrder,
   deleteGenerationResult,
@@ -852,6 +855,31 @@ function App() {
             routes={routes}
             onRoutesChange={setRoutes}
             summary={adminOverview?.summary}
+            currentUserId={currentUser.id}
+            imageProvider={adminOverview?.imageProvider}
+            onSaveImageProvider={async (input) => {
+              try {
+                await saveImageProvider(input);
+                await loadAdminOverview();
+              } catch (error) {
+                return error instanceof Error ? error.message : "保存接口配置失败";
+              }
+            }}
+            onResetImageProvider={async () => {
+              try {
+                await resetImageProvider();
+                await loadAdminOverview();
+              } catch (error) {
+                return error instanceof Error ? error.message : "恢复默认失败";
+              }
+            }}
+            onTestImageProvider={async () => {
+              try {
+                return await testImageProvider();
+              } catch (error) {
+                return { ok: false, message: error instanceof Error ? error.message : "测试失败" };
+              }
+            }}
             onCreateUser={async (input) => {
               try {
                 await createAdminUser(input);
@@ -877,14 +905,17 @@ function App() {
             }}
             users={adminOverview?.users ?? [currentUser]}
             onUsersChange={(items) => setAdminOverview((current) => (current ? { ...current, users: items } : current))}
-            onUserPatch={(id, patch) => {
-              updateAdminUser(id, patch)
-                .then(({ user }) =>
-                  setAdminOverview((current) =>
-                    current ? { ...current, users: current.users.map((item) => (item.id === id ? user : item)) } : current,
-                  ),
-                )
-                .catch((error) => setAuthError(error instanceof Error ? error.message : "用户更新失败"));
+            onUserPatch={async (id, patch) => {
+              try {
+                const { user } = await updateAdminUser(id, patch);
+                setAdminOverview((current) =>
+                  current ? { ...current, users: current.users.map((item) => (item.id === id ? user : item)) } : current,
+                );
+              } catch (error) {
+                // 失败时把服务端的真实状态拉回来，不要让界面停在没生效的改动上
+                await loadAdminOverview();
+                return error instanceof Error ? error.message : "用户更新失败";
+              }
             }}
             onCreditAdjust={(id, amount) => {
               adjustAdminCredits(id, amount, `后台人工调分 ${amount > 0 ? "+" : ""}${amount}`)
