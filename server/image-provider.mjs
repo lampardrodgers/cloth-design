@@ -735,6 +735,16 @@ function checkerboardAlphaRepair(decoded) {
   };
 }
 
+/** 这个 URL 是不是我们自己目录里托管的成片文件（相对演示占位图 / 外链而言）。 */
+export function isManagedGeneratedImageUrl(publicUrl) {
+  try {
+    managedImageFileNameFromUrl(publicUrl);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function generatedImageStaticMount() {
   return {
     publicPath: imageAssetPublicPath(),

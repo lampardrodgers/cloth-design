@@ -8,6 +8,7 @@ import type {
   PaymentProvider,
   RechargePackage,
   ReferenceImage,
+  StorageOverview,
   StudioSettings,
   UserAccount,
   WorkflowAsset,
@@ -24,7 +25,34 @@ export interface ApiConfig {
   authEnabled: boolean;
   selfSignupAllowed?: boolean;
   debugUnlimitedAvailable?: boolean;
+  /** 服务器暂存成片的天数（服务端写死）。 */
+  storageRetentionDays?: number;
   port: number;
+}
+
+export interface StorageAdminOverview {
+  retentionDays: number;
+  directory: string;
+  fileCount: number;
+  diskBytes: number;
+  active: number;
+  archived: number;
+  expired: number;
+  backedUp: number;
+  webdavUsers: number;
+  lastMaintenance: {
+    ranAt: string;
+    expired: number;
+    filesDeleted: number;
+    bytesFreed: number;
+    keptReferenced: number;
+    orphansDeleted: number;
+  } | null;
+}
+
+export interface StorageResponse {
+  overview: StorageOverview;
+  results: GeneratedResult[];
 }
 
 export interface GenerateApiResult {
@@ -99,6 +127,7 @@ export interface AdminOverviewResponse {
   generationResults: GeneratedResult[];
   paymentCapabilities: PaymentCapabilities;
   paymentConfig: PaymentConfigStatus;
+  storage?: StorageAdminOverview;
 }
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -303,14 +332,58 @@ export async function deleteGenerationResult(id: string) {
   return parseJson<{ deleted: boolean; id: string; file?: { deleted?: boolean; fileName?: string; reason?: string } | null }>(response);
 }
 
-export async function updateGenerationResultStorageStatus(id: string, storageStatus: GeneratedResult["storageStatus"]) {
-  const response = await fetch(`/api/generation-results/${encodeURIComponent(id)}/storage-status`, {
-    method: "PATCH",
+export async function fetchStorage() {
+  const response = await fetch("/api/me/storage", { credentials: "include" });
+  return parseJson<StorageResponse>(response);
+}
+
+export interface WebdavSettingsInput {
+  webdavUrl?: string;
+  webdavUsername?: string;
+  /** 不传 = 不改密码；空串 = 清掉。 */
+  webdavPassword?: string;
+  webdavDirectory?: string;
+  webdavEnabled?: boolean;
+  autoArchive?: boolean;
+}
+
+export async function saveWebdavSettings(input: WebdavSettingsInput) {
+  const response = await fetch("/api/me/storage/webdav", {
+    method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ storageStatus }),
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ overview: StorageOverview }>(response);
+}
+
+export async function testWebdavSettings(input: WebdavSettingsInput) {
+  const response = await fetch("/api/me/storage/webdav/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ ok: boolean; message: string }>(response);
+}
+
+/** 把一张成片推到账号自己的 WebDAV 云盘。 */
+export async function archiveGenerationResult(id: string) {
+  const response = await fetch(`/api/generation-results/${encodeURIComponent(id)}/archive`, {
+    method: "POST",
+    credentials: "include",
   });
   return parseJson<{ result: GeneratedResult }>(response);
+}
+
+export async function archiveAllGenerationResults() {
+  const response = await fetch("/api/me/storage/archive-all", { method: "POST", credentials: "include" });
+  return parseJson<StorageResponse & { summary: { attempted: number; archived: number; failed: number; errors: string[] } }>(response);
+}
+
+export async function runAdminStorageMaintenance() {
+  const response = await fetch("/api/admin/storage/maintenance", { method: "POST", credentials: "include" });
+  return parseJson<{ summary: NonNullable<StorageAdminOverview["lastMaintenance"]>; storage: StorageAdminOverview }>(response);
 }
 
 export async function updateAdminUser(id: string, patch: Partial<UserAccount>) {

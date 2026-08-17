@@ -17,6 +17,7 @@ import { migrateWorkflowDatabase, registerWorkflowRoutes } from "./workflows.mjs
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
 import { resolveProviderApiKey } from "./user-keys.mjs";
 import { imageApiModel, imageApiUrl, imageProviderSettings } from "./provider-config.mjs";
+import { SERVER_RETENTION_DAYS, autoArchiveTaskResults, scheduleStorageMaintenance } from "./storage.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -95,6 +96,7 @@ function publicConfig() {
     authEnabled: true,
     selfSignupAllowed: selfSignupAllowed(),
     debugUnlimitedAvailable: debugUnlimitedAvailable(),
+    storageRetentionDays: SERVER_RETENTION_DAYS,
     port,
     providerHealth: imageProviderHealth({ mode, providerReady }),
   };
@@ -322,7 +324,7 @@ function insertGeneratedResults({ userId, taskId, payload, results, cost }) {
   const insert = sqlite.prepare(
     `INSERT INTO generated_result
       (id, task_id, user_id, title, mode, ratio_label, storage_status, credits, image_url, metadata_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'local-cache', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 'cloud-temp', ?, ?, ?, ?)`,
   );
   results.forEach((result, index) => {
     insert.run(
@@ -538,6 +540,8 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
       message: doneMessage,
     });
     insertGeneratedResults({ userId: account.user.id, taskId, payload, results, cost });
+    // 账号开了 WebDAV 自动归档就在后台推上去，不拖慢这次响应
+    void autoArchiveTaskResults(account.user.id, taskId).catch((error) => console.warn("[storage] auto archive", error));
     const profile = sqlite.prepare("SELECT * FROM user_profile WHERE user_id = ?").get(account.user.id);
     res.json({
       ...publicConfig(),
@@ -597,3 +601,9 @@ if (isProduction) {
 app.listen(port, host, () => {
   console.log(`ClothDesign AI running at http://${host}:${port}/ (${isDemoMode() ? "demo" : "live"} mode)`);
 });
+
+// 服务器暂存固定 3 天：每小时巡检一次，到期删文件、标过期，顺手清孤儿文件。
+// 测试进程里不跑，免得干扰按时间断言的用例。
+if (process.env.NODE_ENV !== "test" && process.env.STORAGE_MAINTENANCE !== "false") {
+  scheduleStorageMaintenance();
+}

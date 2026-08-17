@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { isAdminRole } from "../lib/accounts";
 import { DatabaseZap, KeyRound, Plug, Settings2, ShieldCheck, UserPlus, WalletCards } from "lucide-react";
 import { generationModes } from "../data/catalog";
 import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
@@ -12,12 +13,19 @@ import type {
   PaymentConfigStatus,
   QualityKey,
   RechargePackage,
-  StoragePolicy,
   SystemPromptMap,
   UserAccount,
 } from "../types";
-import type { AdminSummary, ImageProviderSettings } from "../lib/api";
+import type { AdminSummary, ImageProviderSettings, StorageAdminOverview } from "../lib/api";
 import { Metric, Section } from "./ui";
+
+function formatBytes(bytes: number) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** index;
+  return `${value >= 10 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
+}
 
 interface AdminPanelProps {
   routes: ModelRoute[];
@@ -55,8 +63,8 @@ interface AdminPanelProps {
   paymentConfig?: PaymentConfigStatus;
   creditPolicy: CreditPolicy;
   onCreditPolicyChange: (policy: CreditPolicy) => void;
-  storagePolicy: StoragePolicy;
-  onStoragePolicyChange: (policy: StoragePolicy) => void;
+  storage?: StorageAdminOverview;
+  onRunStorageMaintenance?: () => Promise<string | void>;
   systemPrompts: SystemPromptMap;
   onSystemPromptsChange: (modeId: ModeKey, value: string) => void;
 }
@@ -87,8 +95,8 @@ export function AdminPanel({
   paymentConfig,
   creditPolicy,
   onCreditPolicyChange,
-  storagePolicy,
-  onStoragePolicyChange,
+  storage,
+  onRunStorageMaintenance,
   systemPrompts,
   onSystemPromptsChange,
 }: AdminPanelProps) {
@@ -99,6 +107,20 @@ export function AdminPanel({
   const updatePackage = (id: string, patch: Partial<RechargePackage>) => {
     onPackagesChange(packagesList.map((item) => (item.id === id ? { ...item, ...patch } : item)));
     onPackagePatch?.(id, patch);
+  };
+
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [storageNotice, setStorageNotice] = useState("");
+  const runMaintenance = async () => {
+    if (!onRunStorageMaintenance || storageBusy) return;
+    setStorageBusy(true);
+    setStorageNotice("正在巡检…");
+    try {
+      const error = await onRunStorageMaintenance();
+      setStorageNotice(error || "巡检完成。");
+    } finally {
+      setStorageBusy(false);
+    }
   };
 
   const [providerDraft, setProviderDraft] = useState({ baseUrl: "", model: "" });
@@ -503,19 +525,13 @@ export function AdminPanel({
                     <small>{user.username ?? user.email ?? user.id}</small>
                   </span>
                 </span>
-                {user.id === currentUserId ? (
-                  <span className="admin-self-role" title="这是你自己的账号，角色不能在这里改，防止误点后进不了后台">
-                    {user.role} · 你
-                  </span>
-                ) : (
-                  <select className="admin-input" value={user.role} onChange={(event) => updateUser(user.id, { role: event.target.value as UserAccount["role"] })}>
-                    <option value="owner">owner</option>
-                    <option value="admin">admin</option>
-                    <option value="user">user</option>
-                  </select>
-                )}
+                {/* 角色不可改：后台只有 admin 这一个账号能进，其余一律普通用户 */}
+                <span className="admin-self-role" title={isAdminRole(user.role) ? "后台管理员账号" : "普通用户，进不了后台"}>
+                  {isAdminRole(user.role) ? "管理员" : "用户"}
+                  {user.id === currentUserId ? " · 你" : ""}
+                </span>
                 <span>
-                  {["owner", "admin"].includes(user.role) ? (
+                  {isAdminRole(user.role) ? (
                     <small className="admin-tag admin-tag-ok">管理员</small>
                   ) : (
                     <button
@@ -657,62 +673,27 @@ export function AdminPanel({
 
       <section className="admin-two">
         <Section title="存储策略" action={<DatabaseZap size={17} />}>
-          <div className="settings-grid admin-settings-grid">
-            <label className="field">
-              <span>本地缓存上限 GB</span>
-              <input
-                type="number"
-                min={1}
-                value={storagePolicy.localCacheLimitGb}
-                onChange={(event) => onStoragePolicyChange({ ...storagePolicy, localCacheLimitGb: Number(event.target.value) })}
-              />
-            </label>
-            <label className="field">
-              <span>本地保留小时</span>
-              <input
-                type="number"
-                min={1}
-                value={storagePolicy.localCacheTtlHours}
-                onChange={(event) => onStoragePolicyChange({ ...storagePolicy, localCacheTtlHours: Number(event.target.value) })}
-              />
-            </label>
-            <label className="field">
-              <span>云端保留天数</span>
-              <input
-                type="number"
-                min={1}
-                value={storagePolicy.cloudTempTtlDays}
-                onChange={(event) => onStoragePolicyChange({ ...storagePolicy, cloudTempTtlDays: Number(event.target.value) })}
-              />
-            </label>
-            <label className="field">
-              <span>失败清理小时</span>
-              <input
-                type="number"
-                min={1}
-                value={storagePolicy.purgeFailedAfterHours}
-                onChange={(event) => onStoragePolicyChange({ ...storagePolicy, purgeFailedAfterHours: Number(event.target.value) })}
-              />
-            </label>
-            <label className="field span-2">
-              <span>WebDAV 地址</span>
-              <input value={storagePolicy.webdavEndpoint} onChange={(event) => onStoragePolicyChange({ ...storagePolicy, webdavEndpoint: event.target.value })} />
-            </label>
+          <p className="admin-note">
+            成片在服务器上固定保留 <strong>{storage?.retentionDays ?? 3} 天</strong>（写死，不开放修改），每小时巡检一次，到期删文件、记录标「已清理」。
+            长期保存靠每个账号自己在「文件管理」里配的本地文件夹或 WebDAV 云盘。
+          </p>
+          <div className="metric-row admin-metrics">
+            <Metric label="服务器文件" value={`${storage?.fileCount ?? 0} 个`} hint={formatBytes(storage?.diskBytes ?? 0)} />
+            <Metric label="暂存中" value={`${storage?.active ?? 0} 张`} hint={`${storage?.retentionDays ?? 3} 天内`} />
+            <Metric label="已推云盘" value={`${storage?.backedUp ?? 0} 张`} hint={`${storage?.webdavUsers ?? 0} 个账号启用了 WebDAV`} />
+            <Metric label="已清理" value={`${storage?.expired ?? 0} 张`} tone="default" />
           </div>
-          <div className="switch-row admin-switches">
-            <label>
-              <input type="checkbox" checked={storagePolicy.webdavEnabled} onChange={(event) => onStoragePolicyChange({ ...storagePolicy, webdavEnabled: event.target.checked })} />
-              <span>启用 WebDAV</span>
-            </label>
-            <label>
-              <input type="checkbox" checked={storagePolicy.autoSyncOriginals} onChange={(event) => onStoragePolicyChange({ ...storagePolicy, autoSyncOriginals: event.target.checked })} />
-              <span>自动同步原图</span>
-            </label>
-            <label>
-              <input type="checkbox" checked={storagePolicy.keepThumbnailsLocally} onChange={(event) => onStoragePolicyChange({ ...storagePolicy, keepThumbnailsLocally: event.target.checked })} />
-              <span>缩略图留本地</span>
-            </label>
+          <div className="admin-provider-actions">
+            <button type="button" className="btn btn-secondary" onClick={runMaintenance} disabled={storageBusy || !onRunStorageMaintenance}>
+              {storageBusy ? "巡检中…" : "立即巡检一次"}
+            </button>
+            <small className="muted-text">
+              {storage?.lastMaintenance
+                ? `上次 ${new Date(storage.lastMaintenance.ranAt).toLocaleString("zh-CN")}：清理 ${storage.lastMaintenance.expired} 条、删文件 ${storage.lastMaintenance.filesDeleted + storage.lastMaintenance.orphansDeleted} 个、释放 ${formatBytes(storage.lastMaintenance.bytesFreed)}`
+                : "服务启动后还没跑过巡检（首次在启动 30 秒后）"}
+            </small>
           </div>
+          {storageNotice ? <p className="admin-create-notice">{storageNotice}</p> : null}
         </Section>
 
         <Section title="商业化底座" action={<ShieldCheck size={17} />}>
@@ -720,7 +701,7 @@ export function AdminPanel({
             <article>
               <KeyRound size={18} />
               <strong>用户系统</strong>
-              <span>Better Auth 管理登录态；/admin 和后台 API 由 owner/admin 权限保护。</span>
+              <span>Better Auth 管理登录态；/admin 和后台 API 只对 admin 这一个管理员账号开放。</span>
             </article>
             <article>
               <ShieldCheck size={18} />

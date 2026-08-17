@@ -179,6 +179,32 @@ function createBusinessTables() {
   if (!generatedResultColumns.has("metadata_json")) {
     sqlite.exec("ALTER TABLE generated_result ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'");
   }
+  // 文件生命周期：服务器只暂存 3 天（见 storage.mjs），到期删文件记 expired_at；
+  // 推到 WebDAV 云盘后记 archived_at / archive_path，服务器副本清掉之后还能知道备份在哪。
+  if (!generatedResultColumns.has("expired_at")) {
+    sqlite.exec("ALTER TABLE generated_result ADD COLUMN expired_at TEXT");
+    sqlite.exec("ALTER TABLE generated_result ADD COLUMN archived_at TEXT");
+    sqlite.exec("ALTER TABLE generated_result ADD COLUMN archive_path TEXT");
+    // 早期把成片记成「本地缓存」——其实文件一直都在服务器上，统一叫服务器暂存。
+    sqlite.exec("UPDATE generated_result SET storage_status = 'cloud-temp' WHERE storage_status = 'local-cache'");
+  }
+
+  // 每个账号自己的 WebDAV 云盘（坚果云等）：密码加密落库；自动归档开着的话生成完立刻推上去。
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS user_storage (
+      user_id TEXT PRIMARY KEY,
+      webdav_url TEXT NOT NULL DEFAULT '',
+      webdav_username TEXT NOT NULL DEFAULT '',
+      webdav_password_encrypted TEXT,
+      webdav_directory TEXT NOT NULL DEFAULT 'ClothDesign',
+      webdav_enabled INTEGER NOT NULL DEFAULT 0 CHECK (webdav_enabled IN (0, 1)),
+      auto_archive INTEGER NOT NULL DEFAULT 0 CHECK (auto_archive IN (0, 1)),
+      last_error TEXT,
+      last_error_at TEXT,
+      last_archived_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
 
   // 多人使用：账号要先由管理员开通；每个账号可以自备图像接口 Key（加密落库）。
   const profileColumns = new Set(
@@ -200,6 +226,9 @@ function createBusinessTables() {
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_hint TEXT");
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_updated_at TEXT");
   }
+
+  // 后台只认 owner（部署时建的 admin 账号）。早期用下拉框提成 admin 的账号一律降回普通用户。
+  sqlite.prepare("UPDATE user_profile SET role = 'user', updated_at = ? WHERE role = 'admin'").run(nowIso());
 
   const taskColumns = new Set(
     sqlite

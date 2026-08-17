@@ -8,8 +8,6 @@ interface ParameterPanelProps {
   /** 专家模式下展开压缩、审核与身份保持等专业项。 */
   showAdvanced: boolean;
   onExpandAdvanced: () => void;
-  autoSyncOriginals: boolean;
-  onAutoSyncChange: (value: boolean) => void;
   /** 锁定后整块参数折叠成只读摘要，避免连续出图时被误改。 */
   locked?: boolean;
 }
@@ -96,8 +94,6 @@ export function ParameterPanel({
   onChange,
   showAdvanced,
   onExpandAdvanced,
-  autoSyncOriginals,
-  onAutoSyncChange,
   locked = false,
 }: ParameterPanelProps) {
   if (locked) return <SettingsSummary settings={settings} />;
@@ -244,14 +240,6 @@ export function ParameterPanel({
                   onChange={(event) => onChange({ preserveIdentity: event.target.checked })}
                 />
                 <span>保持长相与身形</span>
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={autoSyncOriginals}
-                  onChange={(event) => onAutoSyncChange(event.target.checked)}
-                />
-                <span>成片自动归档云盘</span>
               </label>
             </div>
           </div>

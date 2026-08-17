@@ -5,10 +5,10 @@ import { resultFileName } from "../lib/resultFiles";
 import type { GeneratedResult, ReferenceImage, StorageStatus } from "../types";
 
 const storageStatusLabels: Record<StorageStatus, string> = {
-  "local-cache": "本地暂存",
-  "cloud-temp": "云端暂存",
-  webdav: "已保存到云盘",
-  expired: "文件已过期",
+  "local-cache": "服务器暂存",
+  "cloud-temp": "服务器暂存",
+  webdav: "已推云盘",
+  expired: "服务器已清理",
 };
 
 interface Annotation {
@@ -241,8 +241,15 @@ export function ResultStage({
         ) : null}
 
         {selected ? (
-          <figure className="stage-plate" title={`${selected.title} · ${selected.ratioLabel}`}>
-            <img src={selected.imageUrl} alt={selected.title} />
+          <figure className={`stage-plate ${selected.storageStatus === "expired" ? "stage-plate-expired" : ""}`} title={`${selected.title} · ${selected.ratioLabel}`}>
+            {selected.storageStatus === "expired" ? (
+              <div className="expired-plate" role="img" aria-label={`${selected.title} 已过期`}>
+                <strong>服务器副本已清理</strong>
+                <span>{selected.archivePath ? `云盘备份：${selected.archivePath}` : "成片只在服务器保留 3 天，请及时存到本地或云盘"}</span>
+              </div>
+            ) : (
+              <img src={selected.imageUrl} alt={selected.title} />
+            )}
             {compareOn && beforeUrl ? (
               <div className="stage-compare" onPointerDown={startCompare}>
                 <div className="stage-compare-before" style={{ clipPath: `inset(0 ${100 - comparePos}% 0 0)` }}>
@@ -378,7 +385,7 @@ export function ResultPanelList({
       {results.slice(0, 6).map((result) => (
         <article className={`result-card ${selectedId === result.id ? "active" : ""}`} key={result.id}>
           <button type="button" className="result-thumb" title="在画布上查看" onClick={() => onSelect(result.id)}>
-            <img src={result.imageUrl} alt="" />
+            {result.storageStatus === "expired" ? <span className="result-thumb-expired">已清理</span> : <img src={result.imageUrl} alt="" />}
             {isPlaceholderImage(result.imageUrl) ? <em className="placeholder-tag">演示</em> : null}
           </button>
           <div className="result-meta">
@@ -395,9 +402,11 @@ export function ResultPanelList({
               <button type="button" className="text-button" aria-label="加入参考" onClick={() => onUseAsReference(result)}>
                 加入参考
               </button>
-              <button type="button" className="text-button" aria-label="WebDAV" onClick={() => onSync(result.id)}>
-                保存到云盘
-              </button>
+              {result.storageStatus === "cloud-temp" || result.storageStatus === "local-cache" ? (
+                <button type="button" className="text-button" aria-label="WebDAV" onClick={() => onSync(result.id)}>
+                  推到云盘
+                </button>
+              ) : null}
               <a className="text-button" href={result.imageUrl} download={resultFileName(result)} aria-label="下载">
                 下载
               </a>

@@ -3,13 +3,14 @@ import {
   creditPolicy as defaultCreditPolicy,
   generationModes,
   initialReferences,
-  initialStoragePolicy,
   initialTasks,
   modelRoutes,
   ratioOptions,
 } from "./data/catalog";
 import {
   adjustAdminCredits,
+  archiveAllGenerationResults,
+  archiveGenerationResult,
   clearMyApiKey,
   createAdminUser,
   resetAdminUserPassword,
@@ -24,16 +25,23 @@ import {
   fetchApiConfig,
   fetchMe,
   fetchPaymentOrder,
+  fetchStorage,
   requestGeneration,
+  runAdminStorageMaintenance,
   saveMyApiKey,
+  saveWebdavSettings,
+  testWebdavSettings,
   endDebugSession,
   signOut,
   updateAdminPackage,
-  updateGenerationResultStorageStatus,
   updateAdminUser,
   type AdminOverviewResponse,
   type ApiConfig,
+  type StorageResponse,
+  type WebdavSettingsInput,
 } from "./lib/api";
+import { folderPermission, forgetLocalFolder, loadSavedFolder, localFolderSupported, pickLocalFolder, saveImageToFolder } from "./lib/localFolder";
+import { resultFileName } from "./lib/resultFiles";
 import { buildEditablePrompt, buildOptimizedPrompt } from "./lib/prompt";
 import { attachmentsToReferences, buildAnnotationEditPrompt, buildFreePrompt, buildSketchPrompt } from "./lib/freeStudio";
 import { useStoredState } from "./lib/storedState";
@@ -51,7 +59,7 @@ import type {
   RechargePackage,
   ReferenceImage,
   ReferenceRole,
-  StoragePolicy,
+  LocalFolderPolicy,
   StudioSettings,
   SystemPromptMap,
   UserAccount,
@@ -62,7 +70,8 @@ import { AdminPanel } from "./components/AdminPanel";
 import { AuthPanel } from "./components/AuthPanel";
 import { FreeStudio, type FreeGenerationInput, type FreeLayout } from "./components/FreeStudio";
 import { ReferencePanel } from "./components/ReferencePanel";
-import { StoragePanel } from "./components/StoragePanel";
+import { StoragePanel, type LocalFolderState } from "./components/StoragePanel";
+import { isAdminRole } from "./lib/accounts";
 import { StudioWorkspace } from "./components/StudioWorkspace";
 import { TaskRail } from "./components/TaskRail";
 import { WorkflowCenter } from "./components/WorkflowCenter";
@@ -187,7 +196,19 @@ function App() {
   const [routes, setRoutes] = useStoredState("clothdesign:routes", modelRoutes);
   const [creditPolicy, setCreditPolicy] = useStoredState<CreditPolicy>("clothdesign:creditPolicy", defaultCreditPolicy);
   const [systemPrompts, setSystemPrompts] = useStoredState<SystemPromptMap>("clothdesign:systemPrompts", initialSystemPrompts);
-  const [storagePolicy, setStoragePolicy] = useStoredState<StoragePolicy>("clothdesign:storage", initialStoragePolicy);
+  // 文件管理：服务器那边的概况/文件列表从接口取；本地文件夹只存在这台浏览器里。
+  const [storageData, setStorageData] = useState<StorageResponse | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [localFolderPolicy, setLocalFolderPolicy] = useStoredState<LocalFolderPolicy>("clothdesign:localFolder", { autoSave: true });
+  const [localFolderHandle, setLocalFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [localFolderPermission, setLocalFolderPermission] = useState<LocalFolderState["permission"]>(null);
+  const [localFolderStats, setLocalFolderStats] = useState<{ savedCount: number; lastSavedPath: string | null; lastError: string | null }>({
+    savedCount: 0,
+    lastSavedPath: null,
+    lastError: null,
+  });
+  const localFolderRef = useRef<FileSystemDirectoryHandle | null>(null);
+  const localFolderAutoSaveRef = useRef(true);
   const [apiConfig, setApiConfig] = useState<ApiConfig | null>(null);
   const [railCollapsed, setRailCollapsed] = useStoredState("clothdesign:railCollapsed", false);
   // 自由创作的简易/画布切换放在顶栏，省掉工作区里那条只写着同一句话的标题栏。
@@ -342,8 +363,21 @@ function App() {
   };
 
   useEffect(() => {
-    if (!path.startsWith("/admin") || !currentUser || !["owner", "admin"].includes(currentUser.role)) return;
+    if (!path.startsWith("/admin") || !currentUser || !isAdminRole(currentUser.role)) return;
     void loadAdminOverview();
+  }, [path, currentUser?.id, currentUser?.role]);
+
+  // 进文件管理页时拉一次服务器那边的文件状态（过期、已推云盘等以服务端为准）
+  useEffect(() => {
+    if (view !== "storage" || !currentUser) return;
+    void loadStorage();
+  }, [view, currentUser?.id]);
+
+  // 普通账号直接敲 /admin：不给看后台壳子，地址栏也改回首页。
+  useEffect(() => {
+    if (!path.startsWith("/admin") || !currentUser || isAdminRole(currentUser.role)) return;
+    window.history.replaceState({}, "", "/");
+    setPath("/");
   }, [path, currentUser?.id, currentUser?.role]);
 
   const handleSettingsChange = (patch: Partial<StudioSettings>) => {
@@ -441,7 +475,8 @@ function App() {
         mode: mode.id,
         prompt: taskPrompt,
         ratioLabel: ratio.label,
-        storageStatus: storagePolicy.autoSyncOriginals ? "cloud-temp" : "local-cache",
+        storageStatus: "cloud-temp",
+        expiresAt: new Date(Date.now() + (apiConfig?.storageRetentionDays ?? 3) * 24 * 60 * 60 * 1000).toISOString(),
         credits: Math.ceil(cost / Math.max(response.results.length, 1)),
         imageUrl: result.imageUrl,
         imageInspection: result.imageInspection,
@@ -460,14 +495,13 @@ function App() {
                 message:
                   response.mode === "demo"
                     ? `${response.message} 结果已进入演示存储。`
-                    : storagePolicy.autoSyncOriginals
-                      ? "已进入云端临时区，等待 WebDAV 归档"
-                      : "已保存在本地缓存",
+                    : `已出图，服务器保留 ${apiConfig?.storageRetentionDays ?? 3} 天`,
               }
             : task,
         ),
       );
       setResults((items) => [...newResults, ...items]);
+      void autoSaveResultsLocally(newResults);
     } catch (error) {
       setTasks((items) =>
         items.map((task) =>
@@ -567,7 +601,8 @@ function App() {
         mode: mode.id,
         prompt: taskLabel,
         ratioLabel: ratio.label,
-        storageStatus: storagePolicy.autoSyncOriginals ? "cloud-temp" : "local-cache",
+        storageStatus: "cloud-temp",
+        expiresAt: new Date(Date.now() + (apiConfig?.storageRetentionDays ?? 3) * 24 * 60 * 60 * 1000).toISOString(),
         credits: Math.ceil((response.credits ?? 0) / Math.max(response.results.length, 1)),
         imageUrl: result.imageUrl,
         imageInspection: result.imageInspection,
@@ -590,6 +625,7 @@ function App() {
         ),
       );
       setResults((items) => [...newResults, ...items]);
+      void autoSaveResultsLocally(newResults);
       return newResults;
     } catch (error) {
       const message = error instanceof Error ? error.message : "生成失败";
@@ -648,18 +684,177 @@ function App() {
     if (nextPath !== "/admin") setView("free");
   };
 
-  const handleSyncResult = async (id: string) => {
+  /** 把成片同步进各处状态：创作台的 results、后台的最近生成、文件管理的列表。 */
+  const applyResultPatch = (id: string, patch: Partial<GeneratedResult>) => {
+    setResults((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    setStorageData((current) => (current ? { ...current, results: current.results.map((item) => (item.id === id ? { ...item, ...patch } : item)) } : current));
+    setAdminOverview((current) =>
+      current ? { ...current, generationResults: current.generationResults.map((item) => (item.id === id ? { ...item, ...patch } : item)) } : current,
+    );
+  };
+
+  /** 推到账号自己的 WebDAV 云盘。返回错误文案（成功返回 undefined）。 */
+  const handleArchiveResult = async (id: string): Promise<string | void> => {
     try {
-      const { result } = await updateGenerationResultStorageStatus(id, "webdav");
-      setResults((items) => items.map((item) => (item.id === id ? { ...item, storageStatus: result.storageStatus } : item)));
-      setAdminOverview((current) =>
-        current
-          ? { ...current, generationResults: current.generationResults.map((item) => (item.id === id ? { ...item, storageStatus: result.storageStatus } : item)) }
-          : current,
+      const { result } = await archiveGenerationResult(id);
+      applyResultPatch(id, { storageStatus: result.storageStatus, archivedAt: result.archivedAt, archivePath: result.archivePath });
+      setStorageData((current) => (current ? { ...current, overview: { ...current.overview, archived: current.overview.archived + 1, active: Math.max(0, current.overview.active - 1) } } : current));
+    } catch (error) {
+      return error instanceof Error ? error.message : "推到云盘失败";
+    }
+  };
+
+  /** 创作台右栏的「推到云盘」：失败用顶部提示条说明。 */
+  const handleSyncResult = async (id: string) => {
+    const error = await handleArchiveResult(id);
+    if (error) setAuthError(error);
+  };
+
+  const loadStorage = async () => {
+    setStorageLoading(true);
+    try {
+      const data = await fetchStorage();
+      setStorageData(data);
+      // 服务端是文件状态的权威：过期 / 已推云盘要同步回创作台的列表
+      const byId = new Map(data.results.map((item) => [item.id, item]));
+      setResults((items) =>
+        items.map((item) => {
+          const remote = byId.get(item.id);
+          return remote
+            ? { ...item, storageStatus: remote.storageStatus, expiresAt: remote.expiresAt, expiredAt: remote.expiredAt, archivedAt: remote.archivedAt, archivePath: remote.archivePath }
+            : item;
+        }),
       );
     } catch (error) {
-      setAuthError(error instanceof Error ? error.message : "同步 WebDAV 状态失败");
+      setAuthError(error instanceof Error ? error.message : "读取文件管理失败");
+    } finally {
+      setStorageLoading(false);
     }
+  };
+
+  const handleSaveWebdav = async (input: WebdavSettingsInput): Promise<string | void> => {
+    try {
+      const { overview } = await saveWebdavSettings(input);
+      setStorageData((current) => (current ? { ...current, overview } : { overview, results: [] }));
+    } catch (error) {
+      return error instanceof Error ? error.message : "保存 WebDAV 配置失败";
+    }
+  };
+
+  const handleTestWebdav = async (input: WebdavSettingsInput) => {
+    try {
+      return await testWebdavSettings(input);
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : "测试失败" };
+    }
+  };
+
+  const handleArchiveAll = async (): Promise<string | void> => {
+    try {
+      const data = await archiveAllGenerationResults();
+      setStorageData({ overview: data.overview, results: data.results });
+      const byId = new Map(data.results.map((item) => [item.id, item]));
+      setResults((items) => items.map((item) => (byId.has(item.id) ? { ...item, ...byId.get(item.id)! } : item)));
+      if (data.summary.failed > 0) return `推了 ${data.summary.archived} 张，${data.summary.failed} 张失败：${data.summary.errors[0] || "未知原因"}`;
+    } catch (error) {
+      return error instanceof Error ? error.message : "批量推送失败";
+    }
+  };
+
+  // ---- 本地文件夹（File System Access API，只在这台浏览器上）----
+  useEffect(() => {
+    localFolderAutoSaveRef.current = localFolderPolicy.autoSave;
+  }, [localFolderPolicy.autoSave]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadSavedFolder().then(async (handle) => {
+      if (cancelled || !handle) return;
+      localFolderRef.current = handle;
+      setLocalFolderHandle(handle);
+      setLocalFolderPermission(await folderPermission(handle, false));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handlePickFolder = async (): Promise<string | void> => {
+    try {
+      // 已经选过、只是权限退回 prompt：先试着重新授权，不用再弹选择框
+      if (localFolderRef.current && localFolderPermission !== "granted") {
+        const permission = await folderPermission(localFolderRef.current, true);
+        setLocalFolderPermission(permission);
+        if (permission === "granted") return;
+      }
+      const handle = await pickLocalFolder();
+      if (!handle) return;
+      localFolderRef.current = handle;
+      setLocalFolderHandle(handle);
+      setLocalFolderPermission(await folderPermission(handle, true));
+      setLocalFolderStats({ savedCount: 0, lastSavedPath: null, lastError: null });
+    } catch (error) {
+      return error instanceof Error ? error.message : "选择文件夹失败";
+    }
+  };
+
+  const handleForgetFolder = async () => {
+    await forgetLocalFolder();
+    localFolderRef.current = null;
+    setLocalFolderHandle(null);
+    setLocalFolderPermission(null);
+  };
+
+  const saveResultLocally = async (result: GeneratedResult): Promise<string | void> => {
+    const handle = localFolderRef.current;
+    if (!handle) return "还没有选择本地文件夹。";
+    if (result.storageStatus === "expired") return "这张成片的服务器副本已经清理，存不了。";
+    try {
+      const savedPath = await saveImageToFolder(handle, {
+        url: result.imageUrl,
+        fileName: resultFileName({ title: `${result.title}-${result.id.slice(-6)}`, imageUrl: result.imageUrl }),
+        createdAt: result.createdAt,
+      });
+      setLocalFolderPermission("granted");
+      setLocalFolderStats((current) => ({ savedCount: current.savedCount + 1, lastSavedPath: savedPath, lastError: null }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "写入本地文件夹失败";
+      if (/权限/.test(message)) setLocalFolderPermission("prompt");
+      setLocalFolderStats((current) => ({ ...current, lastError: message }));
+      return message;
+    }
+  };
+
+  /** 出图后自动存本地：没选文件夹或没开自动就什么也不做；失败不打断流程，只在文件管理里显示。 */
+  const autoSaveResultsLocally = async (items: GeneratedResult[]) => {
+    if (!localFolderRef.current || !localFolderAutoSaveRef.current) return;
+    for (const item of items) await saveResultLocally(item);
+  };
+
+  const handleSaveAllLocally = async (): Promise<string | void> => {
+    const source = storageData?.results ?? results;
+    const targets = source.filter((item) => item.storageStatus !== "expired");
+    let failed = 0;
+    let firstError = "";
+    for (const item of targets) {
+      const error = await saveResultLocally(item);
+      if (error) {
+        failed += 1;
+        firstError = firstError || error;
+        if (/权限/.test(error)) break;
+      }
+    }
+    if (failed) return `${targets.length - failed} 张已存，${failed} 张失败：${firstError}`;
+  };
+
+  const localFolderState: LocalFolderState = {
+    supported: localFolderSupported(),
+    name: localFolderHandle?.name ?? null,
+    permission: localFolderPermission,
+    autoSave: localFolderPolicy.autoSave,
+    savedCount: localFolderStats.savedCount,
+    lastSavedPath: localFolderStats.lastSavedPath,
+    lastError: localFolderStats.lastError,
   };
 
   const handleDeleteResult = async (id: string) => {
@@ -677,6 +872,7 @@ function App() {
       setAdminOverview((current) =>
         current ? { ...current, generationResults: current.generationResults.filter((item) => item.id !== id) } : current,
       );
+      setStorageData((current) => (current ? { ...current, results: current.results.filter((item) => item.id !== id) } : current));
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "删除生成结果失败");
     }
@@ -696,7 +892,6 @@ function App() {
           results={results}
           user={currentUser}
           creditPolicy={creditPolicy}
-          autoSyncOriginals={storagePolicy.autoSyncOriginals}
           optimizationNotice={optimizationNotice}
           isGenerating={generationSubmitting}
           apiConfig={apiConfig}
@@ -705,7 +900,6 @@ function App() {
           registerTokenEl={(id, element) => {
             referenceTokenEls.current[id] = element;
           }}
-          onAutoSyncChange={(value) => setStoragePolicy((current) => ({ ...current, autoSyncOriginals: value }))}
           onSettingsChange={(patch) => (patch.mode ? handleModePrompt(patch.mode) : handleSettingsChange(patch))}
           onPromptChange={(value) => {
             setPrompt(value);
@@ -782,7 +976,23 @@ function App() {
 
     return (
       <main className="single-view panel-scroll">
-        <StoragePanel policy={storagePolicy} onChange={setStoragePolicy} results={results} />
+        <StoragePanel
+          overview={storageData?.overview ?? null}
+          results={storageData?.results ?? results}
+          loading={storageLoading}
+          onRefresh={() => void loadStorage()}
+          onSaveWebdav={handleSaveWebdav}
+          onTestWebdav={handleTestWebdav}
+          onArchive={handleArchiveResult}
+          onArchiveAll={handleArchiveAll}
+          onDelete={handleDeleteResult}
+          localFolder={localFolderState}
+          onPickFolder={handlePickFolder}
+          onForgetFolder={handleForgetFolder}
+          onToggleAutoSave={(value) => setLocalFolderPolicy({ autoSave: value })}
+          onSaveToFolder={saveResultLocally}
+          onSaveAllToFolder={handleSaveAllLocally}
+        />
       </main>
     );
   };
@@ -813,26 +1023,8 @@ function App() {
     );
   }
 
-  if (path.startsWith("/admin")) {
-    if (!["owner", "admin"].includes(currentUser.role)) {
-      return (
-        <div className="admin-shell">
-          <header className="admin-topbar">
-            <div className="brand">
-              <span className="brand-mark" aria-hidden="true" />
-              <strong>ClothDesign Admin</strong>
-            </div>
-            <button className="btn btn-secondary" onClick={() => handleSetAdminPath("/")}>
-              返回客户页
-            </button>
-          </header>
-          <main className="admin-page panel-scroll">
-            <div className="inline-warning">当前账号没有管理员权限。</div>
-          </main>
-        </div>
-      );
-    }
-
+  // 只有 admin 账号能看到后台；别人直接敲 /admin 也会被送回客户页（下面的 effect 负责改地址栏）。
+  if (path.startsWith("/admin") && isAdminRole(currentUser.role)) {
     return (
       <div className="admin-shell">
         <header className="admin-topbar">
@@ -950,8 +1142,15 @@ function App() {
             paymentConfig={adminOverview?.paymentConfig ?? paymentConfig}
             creditPolicy={creditPolicy}
             onCreditPolicyChange={setCreditPolicy}
-            storagePolicy={storagePolicy}
-            onStoragePolicyChange={setStoragePolicy}
+            storage={adminOverview?.storage}
+            onRunStorageMaintenance={async () => {
+              try {
+                const { storage } = await runAdminStorageMaintenance();
+                setAdminOverview((current) => (current ? { ...current, storage } : current));
+              } catch (error) {
+                return error instanceof Error ? error.message : "清理失败";
+              }
+            }}
             systemPrompts={systemPrompts}
             onSystemPromptsChange={(modeId: ModeKey, value: string) =>
               setSystemPrompts((items) => ({ ...items, [modeId]: value }))
@@ -962,7 +1161,7 @@ function App() {
     );
   }
 
-  const isAdminUser = ["owner", "admin"].includes(currentUser.role);
+  const isAdminUser = isAdminRole(currentUser.role);
 
   return (
     <>
@@ -1076,7 +1275,7 @@ function App() {
                   <span className="rail-short" aria-hidden="true">后台</span>
                   <span className="rail-copy">
                     <strong>管理后台</strong>
-                    <small>owner / admin</small>
+                    <small>仅 admin 账号</small>
                   </span>
                 </button>
               ) : null}

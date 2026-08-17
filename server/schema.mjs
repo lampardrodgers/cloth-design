@@ -97,6 +97,23 @@ export const generatedResult = sqliteTable("generated_result", {
   imageUrl: text("image_url").notNull(),
   metadataJson: text("metadata_json").notNull(),
   createdAt: text("created_at").notNull(),
+  expiredAt: text("expired_at"),
+  archivedAt: text("archived_at"),
+  archivePath: text("archive_path"),
+});
+
+export const userStorage = sqliteTable("user_storage", {
+  userId: text("user_id").primaryKey(),
+  webdavUrl: text("webdav_url").notNull(),
+  webdavUsername: text("webdav_username").notNull(),
+  webdavPasswordEncrypted: text("webdav_password_encrypted"),
+  webdavDirectory: text("webdav_directory").notNull(),
+  webdavEnabled: integer("webdav_enabled").notNull(),
+  autoArchive: integer("auto_archive").notNull(),
+  lastError: text("last_error"),
+  lastErrorAt: text("last_error_at"),
+  lastArchivedAt: text("last_archived_at"),
+  updatedAt: text("updated_at").notNull(),
 });
 
 export const appConfig = sqliteTable("app_config", {

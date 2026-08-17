@@ -72,7 +72,6 @@ interface StudioWorkspaceProps {
   results: GeneratedResult[];
   user: UserAccount;
   creditPolicy: CreditPolicy;
-  autoSyncOriginals: boolean;
   optimizationNotice?: string;
   isGenerating?: boolean;
   apiConfig?: ApiConfig | null;
@@ -84,7 +83,6 @@ interface StudioWorkspaceProps {
   onReferencesChange: (references: ReferenceImage[]) => void;
   /** 清空描述和参考图，回到空白状态。 */
   onClear: () => void;
-  onAutoSyncChange: (value: boolean) => void;
   onOptimize: () => void;
   onGenerate: (mode: GenerationMode, cost: number) => void;
   onUseAsReference: (references: ReferenceImage[]) => void;
@@ -100,7 +98,6 @@ export function StudioWorkspace({
   results,
   user,
   creditPolicy,
-  autoSyncOriginals,
   optimizationNotice,
   isGenerating = false,
   apiConfig = null,
@@ -111,7 +108,6 @@ export function StudioWorkspace({
   onPromptChange,
   onReferencesChange,
   onClear,
-  onAutoSyncChange,
   onOptimize,
   onGenerate,
   onUseAsReference,
@@ -304,8 +300,6 @@ export function StudioWorkspace({
             onChange={onSettingsChange}
             showAdvanced={level === "expert"}
             onExpandAdvanced={() => setLevel("expert")}
-            autoSyncOriginals={autoSyncOriginals}
-            onAutoSyncChange={onAutoSyncChange}
             locked={settingsLocked}
           />
 

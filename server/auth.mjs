@@ -116,6 +116,14 @@ export function ensureUserProfile(user) {
 
 export const PENDING_APPROVAL_MESSAGE = "账号已创建，等管理员在后台开通后就能使用。";
 
+/**
+ * 后台只认 owner 一种角色——也就是部署时建的那一个 admin 账号。
+ * 早期还有个 admin 角色能进后台，现在一律按普通用户处理（升级时会顺手降级）。
+ */
+export function isAdminRole(role) {
+  return role === "owner";
+}
+
 export async function requireAccount(req, res) {
   // 每个调试座位是独立账号，成片和用量按座位隔离。
   const debugUserId = debugUserIdFromRequest(req);
@@ -131,7 +139,7 @@ export async function requireAccount(req, res) {
     res.status(403).json({ error: "账号已被锁定，请联系管理员。" });
     return null;
   }
-  if (Number(profile.approved ?? 1) === 0 && !["owner", "admin"].includes(profile.role)) {
+  if (Number(profile.approved ?? 1) === 0 && !isAdminRole(profile.role)) {
     res.status(403).json({ error: PENDING_APPROVAL_MESSAGE, pendingApproval: true });
     return null;
   }
@@ -141,7 +149,7 @@ export async function requireAccount(req, res) {
 export async function requireAdmin(req, res) {
   const account = await requireAccount(req, res);
   if (!account) return null;
-  if (!["owner", "admin"].includes(account.profile.role)) {
+  if (!isAdminRole(account.profile.role)) {
     res.status(403).json({ error: "需要管理员权限。" });
     return null;
   }

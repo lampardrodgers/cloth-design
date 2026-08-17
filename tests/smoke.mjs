@@ -113,28 +113,34 @@ const apiConfig = await apiConfigResponse.json();
 const providerLabel = apiConfig.providerHealth?.label ?? (apiConfig.mode === "live" ? "图像引擎就绪" : "演示模式");
 
 async function ensureAuthenticated() {
-  if ((await page.getByText("账号登录").count()) === 0) return;
+  // 登录页的标志是那张 .auth-form；已经登录时不会渲染它
+  if ((await page.locator(".auth-form").count()) === 0) return;
+  if ((await page.locator("#auth-tab-signup").count()) > 0) await page.locator("#auth-tab-signup").click();
   await page.locator("input[autocomplete='name']").fill("Smoke Owner");
   await page.locator("#auth-email").fill("owner@example.test");
   await page.locator("input[autocomplete='new-password']").fill("clothdesign123");
   await page.getByRole("button", { name: "创建账号" }).click();
-  await page.waitForTimeout(800);
-  if ((await page.getByText("账号登录").count()) > 0) {
-    await page.getByRole("button", { name: "登录" }).click();
+  await page.waitForTimeout(1200);
+  if ((await page.locator(".auth-form").count()) > 0) {
+    // 账号已存在：切到登录
+    await page.locator("#auth-tab-signin").click();
     await page.locator("#auth-email").fill("owner@example.test");
     await page.locator("input[autocomplete='current-password']").fill("clothdesign123");
     await page.getByRole("button", { name: "登录" }).last().click();
   }
-  await page.getByText("ClothDesign AI").waitFor({ state: "visible", timeout: 10000 });
+  await page.locator(".auth-form").waitFor({ state: "detached", timeout: 10000 });
+  await page.locator(".engine-status").waitFor({ state: "visible", timeout: 10000 });
 }
 
 await ensureAuthenticated();
 
 assert((await page.title()) === "ClothDesign AI", "page title mismatch");
 assert(await page.getByText("ClothDesign AI").isVisible(), "app shell did not render");
-await page.getByText(providerLabel).waitFor({ state: "visible", timeout: 10000 });
-assert(await page.getByRole("heading", { name: "参考图" }).isVisible(), "reference panel missing");
-assert(await page.getByRole("heading", { name: "提示词" }).isVisible(), "prompt panel missing");
+assert((await textOf(page.locator(".engine-status"))).includes(providerLabel), "provider status label mismatch");
+// 登录后默认落在「自由创作」，创作台在「生成」里
+await page.locator(".rail button[title='生成']").click();
+assert(await page.locator("#reference-heading").isVisible(), "reference panel missing");
+assert(await page.locator("#prompt-heading").isVisible(), "prompt panel missing");
 assert((await page.getByText("系统提示词").count()) === 0, "system prompt should not be visible in customer UI");
 
 await page.screenshot({ path: desktopShot, fullPage: false });
@@ -270,10 +276,23 @@ await page.getByRole("button", { name: /任务/ }).click();
 await page.locator(".result-card").first().getByRole("button", { name: "继续" }).click();
 assert((await page.locator(".reference-card").count()) >= 4, "continue action did not add output as reference");
 
-await page.locator(".result-card").first().getByRole("button", { name: "WebDAV" }).click();
-await page.waitForFunction(() => document.querySelector(".result-card")?.textContent?.includes("webdav"));
-assert((await textOf(page.locator(".result-card").first())).includes("webdav"), "WebDAV sync state not shown");
+assert((await textOf(page.locator(".result-card").first())).includes("cloud-temp"), "server-retention state not shown on result card");
 await page.screenshot({ path: generatedShot, fullPage: false });
+
+// 文件管理：服务器 3 天暂存说明 + 文件列表 + WebDAV 表单（错地址要给出明确提示）
+await page.locator(".rail button[title='存储']").click();
+await page.locator(".storage-webdav").waitFor({ state: "visible", timeout: 10000 });
+assert((await page.getByText(/固定保留 3 天/).count()) > 0, "storage panel should state the fixed 3-day server retention");
+await page.locator(".storage-table tbody tr").first().waitFor({ state: "visible", timeout: 10000 });
+assert((await page.locator(".storage-table tbody tr").count()) >= 1, "storage file list should list generated results");
+assert((await page.getByText("本地文件夹").count()) > 0, "local folder section missing");
+await page.locator(".storage-webdav-url input").fill("not a url");
+await page.locator(".storage-webdav input[autocomplete='off']").nth(1).fill("someone");
+await page.locator(".storage-webdav input[type='password']").fill("secret");
+await page.getByRole("button", { name: "测试连接" }).click();
+await page.locator(".storage-notice-error").waitFor({ state: "visible", timeout: 10000 });
+assert((await textOf(page.locator(".storage-notice-error"))).includes("合法"), "invalid WebDAV url should be rejected with a clear message");
+await page.locator(".rail button[title='生成']").click();
 
 await page.locator(".field select").first().selectOption("fourK");
 const disabledRatios = await page.locator(".ratio-option:disabled").count();
@@ -292,8 +311,8 @@ await page.reload({ waitUntil: "networkidle" });
 assert((await page.locator("input[value='gpt-image-2-commercial-test']").count()) > 0, "admin model config did not persist");
 assert(await page.getByRole("heading", { name: "系统提示词模板" }).isVisible(), "admin prompt templates missing");
 
-assert((await page.getByText("WebDAV").count()) > 0, "storage WebDAV panel missing");
 assert((await page.getByText("存储策略").count()) > 0, "storage lifecycle settings missing");
+assert((await page.getByText("立即巡检一次").count()) > 0, "admin storage maintenance button missing");
 
 await page.goto(targetUrl, { waitUntil: "networkidle" });
 await page.locator(".rail button[title='功能']").click();

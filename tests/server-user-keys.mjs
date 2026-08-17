@@ -141,16 +141,22 @@ assert(index.includes('cost = ownKey ? 0 : estimateCredits(payload)'), "自备 K
 assert(index.includes('keySource: ownKey ? "user" : "server"'), "任务要记下 Key 来源");
 assert(index.includes("callOpenAIImages(payload, files, providerKey.apiKey)"), "调接口时用解析出来的 Key");
 const api = await fs.readFile("server/api.mjs", "utf8");
+const auth = await fs.readFile("server/auth.mjs", "utf8");
 assert(api.includes('app.put("/api/me/api-key"') && api.includes('app.delete("/api/me/api-key"'), "账户要能保存 / 清除自备 Key");
 assert(api.includes("export function usageByUser"), "后台按账号汇总用量");
 assert(api.includes("nextApproved"), "后台能开通 / 收回账号");
 assert(api.includes("nextUnlimited"), "后台能开 / 关无限额度");
-// 防自锁：唯一的管理员误点一下角色下拉框就会把自己关在后台外面（线上真踩过）
-assert(api.includes("不能取消自己的管理员权限"), "不能把自己降成普通用户");
-assert(api.includes("这是最后一个管理员账号"), "不能取消最后一个管理员");
+// 后台只有 admin 这一个账号能进：角色不开放修改（下拉框误点把人提成管理员 / 把自己降级，线上两头都踩过）
+assert(api.includes("账号角色不能改"), "PATCH 用户不允许改角色");
+assert(api.includes("const nextRole = current.role;"), "角色永远保持原值");
 assert(api.includes('if (isSelf && nextStatus === "locked")'), "不能锁定自己");
+assert(auth.includes("export function isAdminRole(role) {\n  return role === \"owner\";"), "服务端只认 owner 为管理员");
+assert(!api.includes('["owner", "admin"].includes'), "服务端不再把 admin 角色当管理员");
+const dbSrc = await fs.readFile("server/db.mjs", "utf8");
+assert(dbSrc.includes("WHERE role = 'admin'"), "升级时把早期提成 admin 的账号降回普通用户");
 const adminPanel = await fs.readFile("src/components/AdminPanel.tsx", "utf8");
-assert(adminPanel.includes("user.id === currentUserId"), "自己那一行的角色和状态要只读");
+assert(!adminPanel.includes('<option value="admin">admin</option>'), "后台用户表不能再有角色下拉框");
+assert(adminPanel.includes("user.id === currentUserId"), "自己那一行的状态要只读");
 assert(adminPanel.includes("setCreateNotice(error)"), "改动被服务端拒绝时要提示，不能界面改了库里没改");
 assert(api.includes('app.post("/api/admin/users"'), "后台能直接建账号");
 assert(api.includes('app.put("/api/admin/users/:id/api-key"'), "后台能给账号配 Key");
@@ -171,8 +177,9 @@ assert(!authPanel.includes('type={selfSignupAllowed ? "email" : "text"}'), "登�
 const appSrc = await fs.readFile("src/App.tsx", "utf8");
 assert(!appSrc.includes("debug-mode-button"), "顶栏不该再有开发调试切换按钮");
 assert(appSrc.includes('currentUser?.unlimited === true'), "顶栏的 ∞ 要跟着账号上的无限额度走");
+assert(!appSrc.includes('["owner", "admin"].includes'), "客户端也只认 owner 为管理员");
+assert(appSrc.includes('window.history.replaceState({}, "", "/")'), "普通账号敲 /admin 要被送回首页");
 assert(!api.includes("api_key_encrypted:") , "接口不回传密文");
-const auth = await fs.readFile("server/auth.mjs", "utf8");
 assert(auth.includes("pendingApproval: true"), "未开通的账号要被明确拦下并说明原因");
 const workflows = await fs.readFile("server/workflows.mjs", "utf8");
 assert(!workflows.includes("Bearer ${process.env.OPENAI_API_KEY}"), "功能中心也要走账号自备 Key");

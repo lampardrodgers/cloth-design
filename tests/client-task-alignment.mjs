@@ -98,18 +98,39 @@ try {
   assert.equal(alignment.localTaskId, alignment.serverTaskId);
   assert.equal(alignment.localResultId, alignment.serverResultId);
 
-  await page.locator(".result-card").first().getByRole("button", { name: "WebDAV" }).click();
-  await page.waitForFunction(() => document.querySelector(".result-card")?.textContent?.includes("webdav"));
+  // 成片一出来两边都是「服务器暂存」；没配云盘时点「推到云盘」要明确报错，状态不动
   const storageAlignment = await page.evaluate(async () => {
     const localResults = JSON.parse(window.localStorage.getItem("clothdesign:results") || "[]");
     const me = await fetch("/api/me", { credentials: "include" }).then((response) => response.json());
     return {
       localStorageStatus: localResults[0]?.storageStatus,
       serverStorageStatus: me.generationResults?.[0]?.storageStatus,
+      serverExpiresAt: me.generationResults?.[0]?.expiresAt,
     };
   });
-  assert.equal(storageAlignment.localStorageStatus, "webdav");
-  assert.equal(storageAlignment.serverStorageStatus, "webdav");
+  assert.equal(storageAlignment.localStorageStatus, "cloud-temp");
+  assert.equal(storageAlignment.serverStorageStatus, "cloud-temp");
+  assert(typeof storageAlignment.serverExpiresAt === "string", "服务端成片要带 3 天到期时间");
+  await page.locator(".result-card").first().getByRole("button", { name: "WebDAV" }).click();
+  await page.locator(".global-notice").waitFor({ state: "visible", timeout: 10000 });
+  assert((await page.locator(".global-notice").textContent()).includes("还没有启用 WebDAV"), "没配云盘时要提示先去文件管理配置");
+  await page.locator(".global-notice button").click();
+
+  // 文件管理页：3 天说明、文件列表、WebDAV 表单（错地址要明确报错）、本地文件夹段
+  await clickAndWait(page, page.locator(".rail button[title='存储']"));
+  await page.locator(".storage-webdav").waitFor({ state: "visible", timeout: 10000 });
+  assert((await page.getByText(/固定保留 3 天/).count()) > 0, "文件管理要写明服务器固定保留 3 天");
+  await page.locator(".storage-table tbody tr").first().waitFor({ state: "visible", timeout: 10000 });
+  assert((await page.locator(".storage-table tbody tr").count()) >= 1, "文件列表要列出刚生成的成片");
+  assert((await page.locator(".storage-table tbody tr").first().textContent()).includes("剩 2 天"), "文件列表要显示服务器剩余时间");
+  assert((await page.getByText("本地文件夹").count()) > 0, "要有本地文件夹一段");
+  await page.locator(".storage-webdav-url input").fill("not a url");
+  await page.locator(".storage-webdav input[autocomplete='off']").nth(1).fill("someone");
+  await page.locator(".storage-webdav input[type='password']").fill("secret");
+  await page.getByRole("button", { name: "测试连接" }).click();
+  await page.locator(".storage-notice-error").waitFor({ state: "visible", timeout: 10000 });
+  assert((await page.locator(".storage-notice-error").textContent()).includes("合法"), "WebDAV 地址不合法要有明确提示");
+  await clickAndWait(page, page.locator(".rail button[title='生成']"));
 
   const generatedImageUrl = await page.evaluate(() => JSON.parse(window.localStorage.getItem("clothdesign:results") || "[]")[0]?.imageUrl);
   await page.locator(".result-card").first().getByRole("button", { name: "加入参考" }).click();

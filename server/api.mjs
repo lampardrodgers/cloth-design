@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { auth, ensureUserProfile, requireAccount, requireAdmin, selfSignupAllowed } from "./auth.mjs";
+import { auth, ensureUserProfile, isAdminRole, requireAccount, requireAdmin, selfSignupAllowed } from "./auth.mjs";
 import { emailToUsername, normalizeUsername, usernameToEmail } from "./accounts.mjs";
 import { imageProviderSettings, resetImageProviderSettings, saveImageProviderSettings } from "./provider-config.mjs";
 import { fetchWithTimeout } from "./timeouts.mjs";
@@ -17,6 +17,16 @@ import {
 } from "./debug.mjs";
 import { deleteManagedGeneratedImage } from "./image-provider.mjs";
 import { clearUserApiKey, normalizeApiKey, serverApiKey, setUserApiKey } from "./user-keys.mjs";
+import {
+  archivePendingResults,
+  archiveResultToWebdav,
+  resultExpiresAt,
+  runStorageMaintenance,
+  saveUserStorageSettings,
+  storageAdminOverview,
+  storageOverviewForUser,
+  testWebdavConnection,
+} from "./storage.mjs";
 import {
   adjustCredits,
   completeDemoOrder,
@@ -179,7 +189,20 @@ function serializeGeneratedResult(row) {
     revisedPrompt: metadata.revisedPrompt || null,
     metadata,
     createdAt: row.created_at,
+    // 服务器暂存到期时间；已经过期的就不再给时间了
+    expiresAt: row.expired_at ? null : resultExpiresAt(row.created_at),
+    expiredAt: row.expired_at || null,
+    archivedAt: row.archived_at || null,
+    archivePath: row.archive_path || null,
   };
+}
+
+/** 文件管理页用：该账号全部成片（最多 300 条），含过期的。 */
+function storageResultsForUser(userId) {
+  return sqlite
+    .prepare("SELECT * FROM generated_result WHERE user_id = ? ORDER BY created_at DESC LIMIT 300")
+    .all(userId)
+    .map(serializeGeneratedResult);
 }
 
 function recentGeneratedResultsForUser(userId) {
@@ -417,35 +440,102 @@ export function registerBusinessRoutes(app) {
     res.json({ packages: getEnabledPackages(), paymentCapabilities: paymentCapabilities() });
   });
 
-  app.patch("/api/generation-results/:id/storage-status", async (req, res) => {
+  // ---------- 文件管理：服务器 3 天暂存 + 账号自己的 WebDAV 云盘 ----------
+
+  app.get("/api/me/storage", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    res.json({ overview: storageOverviewForUser(account.user.id), results: storageResultsForUser(account.user.id) });
+  });
+
+  app.put("/api/me/storage/webdav", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    const body = req.body || {};
+    const saved = saveUserStorageSettings(account.user.id, {
+      webdavUrl: typeof body.webdavUrl === "string" ? body.webdavUrl : undefined,
+      webdavUsername: typeof body.webdavUsername === "string" ? body.webdavUsername : undefined,
+      webdavPassword: typeof body.webdavPassword === "string" ? body.webdavPassword : undefined,
+      webdavDirectory: typeof body.webdavDirectory === "string" ? body.webdavDirectory : undefined,
+      webdavEnabled: typeof body.webdavEnabled === "boolean" ? body.webdavEnabled : undefined,
+      autoArchive: typeof body.autoArchive === "boolean" ? body.autoArchive : undefined,
+    });
+    if (saved.error) {
+      res.status(400).json({ error: saved.error });
+      return;
+    }
+    insertAudit({
+      actorUserId: account.user.id,
+      action: "user.storage.webdav",
+      targetType: "user",
+      targetId: account.user.id,
+      detail: { enabled: saved.settings.webdavEnabled, autoArchive: saved.settings.autoArchive, host: saved.settings.webdavUrl },
+    });
+    res.json({ overview: storageOverviewForUser(account.user.id) });
+  });
+
+  app.post("/api/me/storage/webdav/test", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    const body = req.body || {};
+    res.json(
+      await testWebdavConnection(account.user.id, {
+        webdavUrl: typeof body.webdavUrl === "string" ? body.webdavUrl : undefined,
+        webdavUsername: typeof body.webdavUsername === "string" ? body.webdavUsername : undefined,
+        webdavPassword: typeof body.webdavPassword === "string" ? body.webdavPassword : undefined,
+        webdavDirectory: typeof body.webdavDirectory === "string" ? body.webdavDirectory : undefined,
+      }),
+    );
+  });
+
+  app.post("/api/generation-results/:id/archive", async (req, res) => {
     try {
       const account = await requireAccount(req, res);
       if (!account) return;
-      const allowedStatuses = new Set(["local-cache", "cloud-temp", "webdav", "expired"]);
-      const storageStatus = String(req.body.storageStatus || "");
-      if (!allowedStatuses.has(storageStatus)) {
-        res.status(400).json({ error: "不支持的存储状态。" });
+      const outcome = await archiveResultToWebdav(account.user.id, req.params.id);
+      if (outcome.error) {
+        res.status(outcome.status || 400).json({ error: outcome.error });
         return;
       }
-      const result = sqlite.prepare("SELECT * FROM generated_result WHERE id = ?").get(req.params.id);
-      const canUpdate = result && (result.user_id === account.user.id || ["owner", "admin"].includes(account.profile.role));
-      if (!canUpdate) {
-        res.status(404).json({ error: "生成结果不存在。" });
-        return;
-      }
-      sqlite.prepare("UPDATE generated_result SET storage_status = ? WHERE id = ?").run(storageStatus, result.id);
       insertAudit({
         actorUserId: account.user.id,
-        action: "generation_result.storage_status",
+        action: "generation_result.archive",
         targetType: "generated_result",
-        targetId: result.id,
-        detail: { from: result.storage_status, to: storageStatus },
+        targetId: req.params.id,
+        detail: { archivePath: outcome.archivePath },
       });
-      res.json({
-        result: serializeGeneratedResult(sqlite.prepare("SELECT * FROM generated_result WHERE id = ?").get(result.id)),
-      });
+      res.json({ result: serializeGeneratedResult(sqlite.prepare("SELECT * FROM generated_result WHERE id = ?").get(req.params.id)) });
     } catch (error) {
-      res.status(500).json({ error: error instanceof Error ? error.message : "更新生成结果存储状态失败。" });
+      res.status(500).json({ error: error instanceof Error ? error.message : "归档失败。" });
+    }
+  });
+
+  app.post("/api/me/storage/archive-all", async (req, res) => {
+    try {
+      const account = await requireAccount(req, res);
+      if (!account) return;
+      const summary = await archivePendingResults(account.user.id);
+      res.json({ summary, overview: storageOverviewForUser(account.user.id), results: storageResultsForUser(account.user.id) });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : "批量归档失败。" });
+    }
+  });
+
+  app.get("/api/admin/storage", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    res.json({ storage: await storageAdminOverview() });
+  });
+
+  app.post("/api/admin/storage/maintenance", async (req, res) => {
+    try {
+      const account = await requireAdmin(req, res);
+      if (!account) return;
+      const summary = await runStorageMaintenance();
+      insertAudit({ actorUserId: account.user.id, action: "storage.maintenance", targetType: "system", targetId: null, detail: summary });
+      res.json({ summary, storage: await storageAdminOverview() });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : "清理失败。" });
     }
   });
 
@@ -454,7 +544,7 @@ export function registerBusinessRoutes(app) {
       const account = await requireAccount(req, res);
       if (!account) return;
       const result = sqlite.prepare("SELECT * FROM generated_result WHERE id = ?").get(req.params.id);
-      const canDelete = result && (result.user_id === account.user.id || ["owner", "admin"].includes(account.profile.role));
+      const canDelete = result && (result.user_id === account.user.id || isAdminRole(account.profile.role));
       if (!canDelete) {
         res.status(404).json({ error: "生成结果不存在。" });
         return;
@@ -498,7 +588,7 @@ export function registerBusinessRoutes(app) {
       res.status(404).json({ error: "订单不存在。" });
       return;
     }
-    if (order.user_id !== account.user.id && !["owner", "admin"].includes(account.profile.role)) {
+    if (order.user_id !== account.user.id && !isAdminRole(account.profile.role)) {
       res.status(403).json({ error: "不能查看该订单。" });
       return;
     }
@@ -565,40 +655,28 @@ export function registerBusinessRoutes(app) {
       generationResults: recentGeneratedResultsForAdmin(),
       paymentCapabilities: paymentCapabilities(),
       paymentConfig: paymentConfigStatus(),
+      storage: await storageAdminOverview(),
     });
   });
 
   app.patch("/api/admin/users/:id", async (req, res) => {
     const account = await requireAdmin(req, res);
     if (!account) return;
-    const allowedRoles = new Set(["owner", "admin", "user"]);
     const allowedStatus = new Set(["active", "locked"]);
     const current = getProfileWithUser(req.params.id);
     if (!current) {
       res.status(404).json({ error: "用户不存在。" });
       return;
     }
-    const nextRole = req.body.role && allowedRoles.has(req.body.role) ? req.body.role : current.role;
-    const nextStatus = req.body.status && allowedStatus.has(req.body.status) ? req.body.status : current.status;
-
-    // 防自锁：管理员只有一个，误点一下下拉框就会把自己降成普通用户，
-    // 之后谁也进不了后台，只能上服务器改数据库。这里直接挡住。
-    const wasAdmin = ["owner", "admin"].includes(current.role);
-    const staysAdmin = ["owner", "admin"].includes(nextRole);
-    const isSelf = req.params.id === account.user.id;
-    if (wasAdmin && !staysAdmin) {
-      if (isSelf) {
-        res.status(400).json({ error: "不能取消自己的管理员权限，否则就没人能进后台了。请先把另一个账号设为管理员。" });
-        return;
-      }
-      const otherAdmins = sqlite
-        .prepare("SELECT COUNT(*) AS count FROM user_profile WHERE user_id != ? AND role IN ('owner','admin') AND status = 'active'")
-        .get(req.params.id).count;
-      if (otherAdmins === 0) {
-        res.status(400).json({ error: "这是最后一个管理员账号，取消后没人能进后台。请先设置另一个管理员。" });
-        return;
-      }
+    // 角色不开放修改：后台只有 admin 这一个账号能进，别的账号一律普通用户。
+    // 之前下拉框误点一下就把人提成管理员/把自己降成普通用户，两头都出过事。
+    if (typeof req.body.role === "string" && req.body.role !== current.role) {
+      res.status(400).json({ error: "账号角色不能改：后台只允许 admin 这一个账号进入。" });
+      return;
     }
+    const nextRole = current.role;
+    const nextStatus = req.body.status && allowedStatus.has(req.body.status) ? req.body.status : current.status;
+    const isSelf = req.params.id === account.user.id;
     if (isSelf && nextStatus === "locked") {
       res.status(400).json({ error: "不能锁定自己的账号。" });
       return;

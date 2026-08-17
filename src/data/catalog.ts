@@ -7,7 +7,6 @@ import type {
   RechargePackage,
   ReferenceImage,
   ResolutionOption,
-  StoragePolicy,
   UserAccount,
 } from "../types";
 
@@ -326,13 +325,3 @@ export const modelRoutes: ModelRoute[] = [
   },
 ];
 
-export const initialStoragePolicy: StoragePolicy = {
-  localCacheLimitGb: 20,
-  localCacheTtlHours: 12,
-  cloudTempTtlDays: 7,
-  webdavEnabled: true,
-  webdavEndpoint: "https://dav.example.com/cloth-ai",
-  autoSyncOriginals: true,
-  keepThumbnailsLocally: true,
-  purgeFailedAfterHours: 24,
-};

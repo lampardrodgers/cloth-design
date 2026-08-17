@@ -140,6 +140,12 @@ export interface GeneratedResult {
   storageStatus: StorageStatus;
   credits: number;
   imageUrl: string;
+  /** 服务器暂存到期时间；已过期为 null。 */
+  expiresAt?: string | null;
+  expiredAt?: string | null;
+  /** 推到 WebDAV 云盘的时间和远程路径。 */
+  archivedAt?: string | null;
+  archivePath?: string | null;
   /** 生成这张图时用户写的那句描述（不是拼装后的完整提示词），用于回看和一键重做。 */
   prompt?: string;
   imageInspection?: Record<string, unknown>;
@@ -263,15 +269,33 @@ export interface ImageProviderHealth {
   checkedAt?: string | null;
 }
 
-export interface StoragePolicy {
-  localCacheLimitGb: number;
-  localCacheTtlHours: number;
-  cloudTempTtlDays: number;
+/** 账号自己的 WebDAV 云盘配置（服务端存，密码不回传）。 */
+export interface StorageSettings {
+  webdavUrl: string;
+  webdavUsername: string;
+  webdavDirectory: string;
   webdavEnabled: boolean;
-  webdavEndpoint: string;
-  autoSyncOriginals: boolean;
-  keepThumbnailsLocally: boolean;
-  purgeFailedAfterHours: number;
+  autoArchive: boolean;
+  hasPassword: boolean;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  lastArchivedAt: string | null;
+  updatedAt: string | null;
+}
+
+/** 文件管理页的概况：服务器暂存固定天数 + 各状态数量。 */
+export interface StorageOverview {
+  retentionDays: number;
+  active: number;
+  archived: number;
+  expired: number;
+  expiredBackedUp: number;
+  settings: StorageSettings;
+}
+
+/** 这台电脑上的本地文件夹设置（只存在浏览器里）。 */
+export interface LocalFolderPolicy {
+  autoSave: boolean;
 }
 
 export type WorkflowType = "fabric-to-style" | "virtual-model-showcase" | "postprocess-suite" | "trend-brand-lab";

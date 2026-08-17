@@ -24,3 +24,8 @@ export function emailToDisplayName(email?: string | null) {
   if (!value) return "";
   return value.endsWith(`@${INTERNAL_EMAIL_DOMAIN}`) ? value.slice(0, -`@${INTERNAL_EMAIL_DOMAIN}`.length) : value;
 }
+
+/** 后台只认 owner——部署时建的那一个 admin 账号；其他角色一律按普通用户处理。 */
+export function isAdminRole(role?: string | null) {
+  return role === "owner";
+}

@@ -276,15 +276,17 @@ try {
   assert.equal((await response.json()).account.credits, creditsAfterValidGeneration);
 
   const generatedResultId = `result-${generated.taskId}-0`;
-  response = await request(baseUrl, jar, `/api/generation-results/${generatedResultId}/storage-status`, {
-    method: "PATCH",
-    ...jsonBody({ storageStatus: "webdav" }),
-  });
+  // 成片一落库就是「服务器暂存」，带 3 天到期时间；没配云盘时不能归档
+  response = await request(baseUrl, jar, "/api/me/storage");
   await assertResponse(response, (item) => item.ok, true);
-  assert.equal((await response.json()).result.storageStatus, "webdav");
-  response = await request(baseUrl, jar, "/api/me");
-  await assertResponse(response, (item) => item.ok, true);
-  assert.equal((await response.json()).generationResults[0].storageStatus, "webdav");
+  const storage = await response.json();
+  assert.equal(storage.overview.retentionDays, 3);
+  assert.equal(storage.results[0].id, generatedResultId);
+  assert.equal(storage.results[0].storageStatus, "cloud-temp");
+  assert(typeof storage.results[0].expiresAt === "string", "成片要带服务器到期时间");
+  response = await request(baseUrl, jar, `/api/generation-results/${generatedResultId}/archive`, { method: "POST" });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /还没有启用 WebDAV/);
 
   const generatedFileName = generated.results[0].imageInspection.fileName;
   const generatedFilePath = path.join(imageDir, generatedFileName);
@@ -305,10 +307,7 @@ try {
     ...jsonBody({ name: "Other User", email: "other-reference@example.test", password: "clothdesign123" }),
   });
   await assertResponse(response, (item) => item.ok, true);
-  response = await request(baseUrl, otherJar, `/api/generation-results/${generatedResultId}/storage-status`, {
-    method: "PATCH",
-    ...jsonBody({ storageStatus: "expired" }),
-  });
+  response = await request(baseUrl, otherJar, `/api/generation-results/${generatedResultId}/archive`, { method: "POST" });
   assert.equal(response.status, 404);
   response = await request(baseUrl, otherJar, `/api/generation-results/${generatedResultId}`, { method: "DELETE" });
   assert.equal(response.status, 404);
