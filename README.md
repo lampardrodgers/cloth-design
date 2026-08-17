@@ -114,7 +114,7 @@ PORT=8888
 
 前端出问题时用户看到的往往只是一片空白，报错留在他们自己的浏览器里。所以页面会把崩溃现场发回服务端：
 
-- 渲染崩溃、未捕获异常、画布空白自检都会 `POST /api/client-errors`，服务端按 `[client-error] <位置> | <一句话> | <页面地址> | user=<账号>` 写进日志：`journalctl -u clothdesign | grep client-error`。
+- 渲染崩溃、未捕获异常、画布空白自检都会 `POST /api/client-errors`，服务端按 `[client-error] <位置> | <一句话> | <页面地址> | user=<账号>` 写进日志：`grep client-error /var/log/clothdesign.log`（按本文档的 systemd 配置，服务的 stdout 落在这个文件里，不在 journal 里）。
 - 最近 50 条也能直接读：`GET /api/admin/client-errors`（仅 admin）。只在内存里，重启就清空。
 - 上报内容只有一句话、调用栈、页面路径和浏览器串，不带图片和提示词；接口按 IP 限速（每分钟 30 条）。
 
