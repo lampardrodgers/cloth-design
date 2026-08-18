@@ -38,6 +38,9 @@ http://127.0.0.1:8888/admin
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://www.packyapi.com
 OPENAI_IMAGE_MODEL=gpt-image-2
+APIMART_API_KEY=sk-...
+APIMART_BASE_URL=https://api.apimart.ai/v1
+APIMART_IMAGE_MODEL=gpt-image-2
 OPENAI_IMAGE_TIMEOUT_MS=120000
 IMAGE_DOWNLOAD_TIMEOUT_MS=120000
 WORKFLOW_ASSET_DOWNLOAD_TIMEOUT_MS=120000
@@ -61,7 +64,9 @@ PAYMENT_REQUEST_TIMEOUT_MS=30000
 PORT=8888
 ```
 
-`OPENAI_BASE_URL` 和 `OPENAI_IMAGE_MODEL` 是**默认值**：登录 `/admin` 后在「图像接口」一节可以随时改成别的地址和模型，保存即刻生效、不用重启，改完还能点「测试连接」验一下（走 `GET /v1/models`，不产图不花钱）。想回到 `.env` 的值就点「恢复默认」。覆盖值存在数据库的 `app_config` 表里。地址填根地址或 `/v1` 地址都行，服务端会自动拼接 Images API 端点。Packy 的 `gpt-image-2` 每次只支持 `n=1`，后端会在用户选择多张时拆成多次请求。`OPENAI_IMAGE_TIMEOUT_MS` 控制图像引擎请求超时，`IMAGE_DOWNLOAD_TIMEOUT_MS` 控制返回 URL 的图片下载超时；生成失败会自动退回本次扣除的积分。功能中心外部素材下载、视频服务、分割服务、品牌训练和真实支付预下单也有独立超时变量，避免第三方服务卡住时形成悬挂任务或悬挂订单。
+`OPENAI_*` 与 `APIMART_*` 是两套同时生效、互不覆盖的图像供应商配置。登录 `/admin` 后在「图像接口」一节可分别修改地址和模型，保存即刻生效、不用重启，也可用「测试连接」走 `GET /v1/models` 验证 Key（不产图不花钱）。账户页可选择后续生成使用哪一套 URL Base；账号自备 Key 也会和所选供应商配对。后台覆盖值存在 `app_config` 表里，留空保存或点「恢复默认」会回到对应 `.env` 值。地址填根地址或 `/v1` 地址都可以，服务端会自动归一化。
+
+APIMart 的 `gpt-image-2` 使用异步任务协议：服务端提交 `/images/generations` 后自动轮询 `/tasks/{task_id}`，参考图按 `image_urls` 传入。自由生成支持 `auto` 与 15 种比例，以及 1K / 2K / 4K 三档分辨率——档位按线路能力开放：OpenAI 兼容协议没有 `resolution` 参数、出图恒定 1024/1536，因此只开 1K；APIMart 才有 2K / 4K。后台还能按账号把上限再往下压（只能压低，压不过线路本身的能力），服务端出图前会按这个上限裁剪，避免按用不上的档位计费。多张生成仍拆成多次 `n=1` 请求，避免不同供应商对批量参数支持不一致。`OPENAI_IMAGE_TIMEOUT_MS` 控制提交与轮询总等待时间，`IMAGE_DOWNLOAD_TIMEOUT_MS` 控制返回 URL 的图片下载超时；失败会自动退回本次扣除的积分。
 
 如果没有 `OPENAI_API_KEY`，系统会进入演示模式，生成本地 SVG 示例图，不会调用图像引擎。真实商用前必须配置服务端 Key，并按实际可用模型更新 `OPENAI_IMAGE_MODEL`。真实图像会下载校验后保存到 `IMAGE_ASSET_DIR`，并记录尺寸、alpha 和基础内容信号；过小图片、纯色占位图、大面积空白且主体过小的结果会进入返工质量门，并同步到任务消息。“继续”把生成结果作为参考图时会复用受管 `/generated-images/...` 文件并进入 image edit 输入。虚拟模特工作流可用 `ffmpeg` 生成本地 MP4 动效预览并保存到 `VIDEO_ASSET_DIR`；配置 `AI_VIDEO_API_URL` 和 `AI_VIDEO_API_KEY` 后，短视频结果优先调用外部视频服务，支持 JSON `url`/`b64_video` 或直接 `video/mp4` 返回，`AI_VIDEO_TIMEOUT_MS` 和 `VIDEO_DOWNLOAD_TIMEOUT_MS` 分别控制视频服务请求和返回 URL 下载。后期抠图结果会检查真实 alpha 通道；配置 `SEGMENTATION_API_URL` 和 `SEGMENTATION_API_KEY` 后，抠图优先调用专用分割服务，支持 JSON `url`/`b64_json` 或直接 `image/png` 返回，`SEGMENTATION_TIMEOUT_MS` 控制分割请求超时。未配置分割服务时会回退到 image edit，棋盘格/白底 RGB 图会尝试转成真实透明 PNG；仍无 alpha 的结果不会被标记为像素级抠图通过。品牌 DNA 工作流配置 `BRAND_TRAINING_API_URL` 和 `BRAND_TRAINING_API_KEY` 后，会把品牌素材、任务 prompt 和 DNA JSON 提交到外部训练服务，并保存返回的训练任务 ID、模型 ID 和状态，`BRAND_TRAINING_TIMEOUT_MS` 控制训练提交超时。
 
@@ -71,7 +76,7 @@ PORT=8888
 
 ### 部署
 
-1. 服务器上配好 `.env`（至少 `AUTH_SECRET`、`PUBLIC_APP_URL`、`ADMIN_EMAILS`，共享出图的话再加 `OPENAI_API_KEY`），`npm run build && npm start`，用反向代理挂上 HTTPS。
+1. 服务器上配好 `.env`（至少 `AUTH_SECRET`、`PUBLIC_APP_URL`、`ADMIN_EMAILS`，共享出图的话再加 `OPENAI_API_KEY`），`npm run build && npm start`，用反向代理挂上 HTTPS。`npm run build` 会先在独立 release 目录完成全部资源，再原子切换 `dist`，不要改回直接清空线上 `dist` 的构建方式。
 2. 你自己先注册（第一个**真实**账号自动成为 owner，调试座位不参与这个判定，也可用 `ADMIN_EMAILS` 指定）。
 3. 拿到 owner 之后把 `ALLOW_SELF_SIGNUP=false` 写进 `.env` 重启，从此登录页只剩登录框（填账号名，不是邮箱），别人注册不进来。
 
@@ -90,7 +95,7 @@ PORT=8888
 | 让某人不扣积分 | 那一行的「无限」点成「∞ 已开」。登录后顶栏显示 ∞，出图不计费 |
 | 指定积分 | 建号时填「初始积分」，之后用「+100 / -100」调 |
 | 配专属 Key | 那一行「KEY」那格点一下，粘贴 Key。配好后对方**登录就自带**，不用自己填；出图走他自己那把 Key，不扣积分也不占站点额度。留空确定 = 清除，改回站点共享 Key |
-| 换出图接口 | 「图像接口」一节改 Base URL 和模型名，保存即生效。注意这是**全站**设置，所有人（包括用自备 Key 的）都走这个地址 |
+| 选择出图接口 | 账户页直接选择 URL Base；后台「图像接口」可分别维护 Packy / OpenAI 兼容接口和 APIMart，两套同时在线。用户自备 Key 会和自己选择的 URL Base 配对 |
 | 忘记密码 | 那一行点「改密」（没配邮件服务，这是唯一的找回途径） |
 | 停用某人 | 「状态」改成「锁定」。想留着数据又不想他用，用这个 |
 

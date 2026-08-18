@@ -3,6 +3,7 @@ import { isAdminRole } from "../lib/accounts";
 import { DatabaseZap, KeyRound, Plug, Settings2, ShieldCheck, UserPlus, WalletCards } from "lucide-react";
 import { generationModes } from "../data/catalog";
 import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
+import { isResolutionAllowed, resolutionOrder, resolutionShortLabels } from "../lib/resolution";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -10,6 +11,7 @@ import type {
   ModeKey,
   ModelRoute,
   PaymentOrder,
+  ResolutionKey,
   PaymentConfigStatus,
   QualityKey,
   RechargePackage,
@@ -37,14 +39,14 @@ interface AdminPanelProps {
   summary?: AdminSummary;
   /** 当前登录的管理员，用来把自己那行的角色和状态设成只读，避免误点把自己关在门外。 */
   currentUserId?: string;
-  imageProvider?: ImageProviderSettings;
-  onSaveImageProvider?: (input: { baseUrl: string; model: string }) => Promise<string | void>;
-  onResetImageProvider?: () => Promise<string | void>;
-  onTestImageProvider?: () => Promise<{ ok: boolean; message: string }>;
+  imageProviders?: ImageProviderSettings[];
+  onSaveImageProvider?: (input: { providerId: string; baseUrl: string; model: string }) => Promise<string | void>;
+  onResetImageProvider?: (providerId: string) => Promise<string | void>;
+  onTestImageProvider?: (providerId: string) => Promise<{ ok: boolean; message: string }>;
   /** 后台建号 / 重置密码；返回字符串表示失败原因。 */
-  onCreateUser?: (input: { username: string; password: string; name: string; apiKey: string; unlimited: boolean; credits: number }) => Promise<string | void>;
+  onCreateUser?: (input: { username: string; password: string; name: string; apiKey: string; apiProviderId: string; unlimited: boolean; credits: number }) => Promise<string | void>;
   onResetPassword?: (id: string, password: string) => Promise<string | void>;
-  onSetApiKey?: (id: string, apiKey: string) => Promise<string | void>;
+  onSetApiKey?: (id: string, apiKey: string, providerId: string) => Promise<string | void>;
   packages: RechargePackage[];
   onPackagesChange: (packages: RechargePackage[]) => void;
   onPackagePatch?: (id: string, patch: Partial<RechargePackage>) => void;
@@ -78,7 +80,7 @@ export function AdminPanel({
   onCreditAdjust,
   summary,
   currentUserId,
-  imageProvider,
+  imageProviders = [],
   onSaveImageProvider,
   onResetImageProvider,
   onTestImageProvider,
@@ -123,53 +125,53 @@ export function AdminPanel({
     }
   };
 
-  const [providerDraft, setProviderDraft] = useState({ baseUrl: "", model: "" });
+  const [providerDrafts, setProviderDrafts] = useState<Record<string, { baseUrl: string; model: string }>>({});
   const [providerBusy, setProviderBusy] = useState("");
   const [providerNotice, setProviderNotice] = useState("");
 
   // 后台数据回来（或被别处改过）之后，把输入框同步成当前生效的值
   useEffect(() => {
-    if (imageProvider) setProviderDraft({ baseUrl: imageProvider.baseUrl, model: imageProvider.model });
-  }, [imageProvider?.baseUrl, imageProvider?.model]);
+    setProviderDrafts(Object.fromEntries(imageProviders.map((provider) => [provider.id, { baseUrl: provider.baseUrl, model: provider.model }])));
+  }, [imageProviders]);
 
-  const saveProvider = async (event: FormEvent) => {
+  const saveProvider = async (event: FormEvent, providerId: string) => {
     event.preventDefault();
     if (!onSaveImageProvider || providerBusy) return;
-    setProviderBusy("save");
+    setProviderBusy(`${providerId}:save`);
     setProviderNotice("");
     try {
-      const error = await onSaveImageProvider(providerDraft);
+      const error = await onSaveImageProvider({ providerId, ...(providerDrafts[providerId] || { baseUrl: "", model: "" }) });
       setProviderNotice(error || "已保存，立刻生效，不用重启服务。");
     } finally {
       setProviderBusy("");
     }
   };
 
-  const resetProvider = async () => {
+  const resetProvider = async (providerId: string) => {
     if (!onResetImageProvider || providerBusy) return;
-    setProviderBusy("reset");
+    setProviderBusy(`${providerId}:reset`);
     setProviderNotice("");
     try {
-      const error = await onResetImageProvider();
+      const error = await onResetImageProvider(providerId);
       setProviderNotice(error || "已恢复成 .env 里的默认值。");
     } finally {
       setProviderBusy("");
     }
   };
 
-  const testProvider = async () => {
+  const testProvider = async (providerId: string) => {
     if (!onTestImageProvider || providerBusy) return;
-    setProviderBusy("test");
+    setProviderBusy(`${providerId}:test`);
     setProviderNotice("正在连接…");
     try {
-      const result = await onTestImageProvider();
+      const result = await onTestImageProvider(providerId);
       setProviderNotice(`${result.ok ? "✓ " : "✗ "}${result.message}`);
     } finally {
       setProviderBusy("");
     }
   };
 
-  const [draft, setDraft] = useState({ username: "", password: "", name: "", apiKey: "", unlimited: false, credits: 0 });
+  const [draft, setDraft] = useState({ username: "", password: "", name: "", apiKey: "", apiProviderId: "default", unlimited: false, credits: 0 });
   const [creating, setCreating] = useState(false);
   const [createNotice, setCreateNotice] = useState("");
 
@@ -183,7 +185,7 @@ export function AdminPanel({
       if (error) setCreateNotice(error);
       else {
         setCreateNotice(`已创建账号「${draft.username}」，把账号名和这个密码发给对方就能登录。`);
-        setDraft({ username: "", password: "", name: "", apiKey: "", unlimited: false, credits: 0 });
+        setDraft({ username: "", password: "", name: "", apiKey: "", apiProviderId: "default", unlimited: false, credits: 0 });
       }
     } finally {
       setCreating(false);
@@ -205,9 +207,13 @@ export function AdminPanel({
       "",
     );
     if (next === null) return;
-    const error = await onSetApiKey(user.id, next.trim());
+    const error = await onSetApiKey(user.id, next.trim(), user.apiProviderId || "default");
     setCreateNotice(error || (next.trim() ? `已给「${user.username ?? user.name}」配好 Key。` : `已清除「${user.username ?? user.name}」的 Key。`));
   };
+
+  /** 这条线路本身最高能出到几 K；账号上限只能在这个范围内往下压。 */
+  const providerCapOf = (providerId?: string): ResolutionKey =>
+    imageProviders.find((provider) => provider.id === (providerId || "default"))?.maxResolution ?? "fourK";
 
   const updateUser = (id: string, patch: Partial<UserAccount>) => {
     onUsersChange(users.map((user) => (user.id === id ? { ...user, ...patch } : user)));
@@ -231,64 +237,51 @@ export function AdminPanel({
         </Section>
       ) : null}
 
-      {imageProvider && onSaveImageProvider ? (
+      {imageProviders.length && onSaveImageProvider ? (
         <Section title="图像接口" action={<Plug size={17} />}>
           <p className="admin-note">
-            这里改的是全站出图走的接口地址和模型名，保存后立刻生效、不用重启。
-            留空某一项再保存就回到 <code>.env</code> 里的默认值。
-            账号自备的 Key 也走这个地址，所以换地址前先确认大家的 Key 是同一家的。
+            多套 URL Base 同时生效。用户在账户页选择供应商，服务端会把该供应商的地址、模型和对应 Key 成套使用。
+            留空某一项再保存会恢复对应的 <code>.env</code> 默认值。
           </p>
-          <form className="admin-provider" onSubmit={saveProvider}>
-            <label className="field admin-provider-url">
-              <span>
-                接口地址
-                <em className={`admin-tag ${imageProvider.baseUrlSource === "custom" ? "admin-tag-ok" : ""}`}>
-                  {imageProvider.baseUrlSource === "custom" ? "后台已改" : "来自 .env"}
-                </em>
-              </span>
-              <input
-                value={providerDraft.baseUrl}
-                onChange={(e) => setProviderDraft({ ...providerDraft, baseUrl: e.target.value })}
-                placeholder={imageProvider.defaults.baseUrl}
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              <span>
-                模型名
-                <em className={`admin-tag ${imageProvider.modelSource === "custom" ? "admin-tag-ok" : ""}`}>
-                  {imageProvider.modelSource === "custom" ? "后台已改" : "来自 .env"}
-                </em>
-              </span>
-              <input
-                value={providerDraft.model}
-                onChange={(e) => setProviderDraft({ ...providerDraft, model: e.target.value })}
-                placeholder={imageProvider.defaults.model}
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </label>
-            <div className="admin-provider-actions">
-              <button type="submit" className="btn btn-primary" disabled={Boolean(providerBusy)}>
-                {providerBusy === "save" ? "保存中…" : "保存"}
-              </button>
-              {onTestImageProvider ? (
-                <button type="button" className="btn btn-secondary" disabled={Boolean(providerBusy)} onClick={() => void testProvider()}>
-                  {providerBusy === "test" ? "测试中…" : "测试连接"}
-                </button>
-              ) : null}
-              {onResetImageProvider ? (
-                <button type="button" className="btn btn-secondary" disabled={Boolean(providerBusy)} onClick={() => void resetProvider()}>
-                  恢复默认
-                </button>
-              ) : null}
-            </div>
-          </form>
-          <p className="admin-provider-current">
-            当前生效：<code>{imageProvider.baseUrl}/images/generations</code> · 模型 <code>{imageProvider.model}</code>
-            {imageProvider.updatedAt ? ` · 最后修改 ${new Date(imageProvider.updatedAt).toLocaleString("zh-CN")}` : ""}
-          </p>
+          <div className="admin-provider-list">
+            {imageProviders.map((imageProvider) => {
+              const providerDraft = providerDrafts[imageProvider.id] || { baseUrl: imageProvider.baseUrl, model: imageProvider.model };
+              return (
+                <form className="admin-provider" key={imageProvider.id} onSubmit={(event) => void saveProvider(event, imageProvider.id)}>
+                  <header className="admin-provider-head">
+                    <strong>{imageProvider.name}</strong>
+                    <span>{imageProvider.serverKeyConfigured ? "共享 Key 已配置" : "共享 Key 未配置"} · {imageProvider.protocol === "apimart" ? "异步任务协议" : "OpenAI 兼容协议"}</span>
+                  </header>
+                  <label className="field admin-provider-url">
+                    <span>接口地址 <em className={`admin-tag ${imageProvider.baseUrlSource === "custom" ? "admin-tag-ok" : ""}`}>{imageProvider.baseUrlSource === "custom" ? "后台已改" : "来自 .env"}</em></span>
+                    <input
+                      value={providerDraft.baseUrl}
+                      onChange={(event) => setProviderDrafts((current) => ({ ...current, [imageProvider.id]: { ...providerDraft, baseUrl: event.target.value } }))}
+                      placeholder={imageProvider.defaults.baseUrl}
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>模型名 <em className={`admin-tag ${imageProvider.modelSource === "custom" ? "admin-tag-ok" : ""}`}>{imageProvider.modelSource === "custom" ? "后台已改" : "来自 .env"}</em></span>
+                    <input
+                      value={providerDraft.model}
+                      onChange={(event) => setProviderDrafts((current) => ({ ...current, [imageProvider.id]: { ...providerDraft, model: event.target.value } }))}
+                      placeholder={imageProvider.defaults.model}
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <div className="admin-provider-actions">
+                    <button type="submit" className="btn btn-primary" disabled={Boolean(providerBusy)}>{providerBusy === `${imageProvider.id}:save` ? "保存中…" : "保存"}</button>
+                    {onTestImageProvider ? <button type="button" className="btn btn-secondary" disabled={Boolean(providerBusy)} onClick={() => void testProvider(imageProvider.id)}>{providerBusy === `${imageProvider.id}:test` ? "测试中…" : "测试连接"}</button> : null}
+                    {onResetImageProvider ? <button type="button" className="btn btn-secondary" disabled={Boolean(providerBusy)} onClick={() => void resetProvider(imageProvider.id)}>恢复默认</button> : null}
+                  </div>
+                  <p className="admin-provider-current">当前生效：<code>{imageProvider.baseUrl}/images/generations</code> · 模型 <code>{imageProvider.model}</code>{imageProvider.updatedAt ? ` · 最后修改 ${new Date(imageProvider.updatedAt).toLocaleString("zh-CN")}` : ""}</p>
+                </form>
+              );
+            })}
+          </div>
           {providerNotice ? <p className="admin-create-notice">{providerNotice}</p> : null}
         </Section>
       ) : null}
@@ -459,6 +452,7 @@ export function AdminPanel({
             : "自助注册开放中：别人注册后默认「待开通」，需要在这里点「开通」才放行。"}
           {" "}勾了「无限」的账号生成不扣积分、顶栏显示 ∞；不勾就按「初始积分」计费。
           配了专属 Key 的账号出图走自己那把 Key，不占站点额度也不扣积分。
+          「上限」是这个账号能开到几 K：Packy 线路本身只出 1K，APIMart 才有 2K / 4K，留「跟随线路」就按线路能力走。
         </p>
 
         {onCreateUser ? (
@@ -478,6 +472,12 @@ export function AdminPanel({
             <label className="field admin-create-key">
               <span>图像接口 Key（可选）</span>
               <input value={draft.apiKey} onChange={(e) => setDraft({ ...draft, apiKey: e.target.value })} placeholder="配了对方登录就能直接用" autoComplete="off" spellCheck={false} />
+            </label>
+            <label className="field">
+              <span>URL Base</span>
+              <select value={draft.apiProviderId} onChange={(event) => setDraft({ ...draft, apiProviderId: event.target.value })}>
+                {imageProviders.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}</option>)}
+              </select>
             </label>
             <label className="field">
               <span>初始积分</span>
@@ -502,7 +502,7 @@ export function AdminPanel({
             <span>无限</span>
             <span>余额</span>
             <span>用量</span>
-            <span>Key</span>
+            <span>线路 / Key</span>
             <span>状态</span>
             <span>操作</span>
           </div>
@@ -568,15 +568,37 @@ export function AdminPanel({
                   </small>
                 </span>
                 <span>
-                  <button
-                    type="button"
-                    className={`admin-tag admin-tag-button ${user.hasOwnApiKey ? "admin-tag-ok" : ""}`}
-                    title={user.hasOwnApiKey ? `已配 ${user.apiKeyHint ?? ""}，点击更换或清除` : "点击给这个账号配专属 Key"}
-                    onClick={() => void editApiKey(user)}
-                    disabled={!onSetApiKey}
-                  >
-                    {user.hasOwnApiKey ? user.apiKeyHint ?? "已配" : "共享"}
-                  </button>
+                  <span className="admin-user-provider">
+                    <select className="admin-input" value={user.apiProviderId || "default"} onChange={(event) => updateUser(user.id, { apiProviderId: event.target.value })} aria-label={`${user.name} URL Base`}>
+                      {imageProviders.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}</option>)}
+                    </select>
+                    {/* 分辨率上限：留空跟随线路本身的能力，选了就是在线路能力之内再往下压。 */}
+                    <select
+                      className="admin-input"
+                      value={user.maxResolutionSetting || ""}
+                      onChange={(event) => updateUser(user.id, { maxResolutionSetting: event.target.value as UserAccount["maxResolutionSetting"] })}
+                      aria-label={`${user.name} 分辨率上限`}
+                      title={`当前实际上限 ${resolutionShortLabels[user.maxResolution ?? "native"]}${
+                        user.maxResolutionSource === "account" ? "（后台设定）" : "（线路能力）"
+                      }`}
+                    >
+                      <option value="">跟随线路 · {resolutionShortLabels[providerCapOf(user.apiProviderId)]}</option>
+                      {resolutionOrder.map((key) => (
+                        <option value={key} key={key} disabled={!isResolutionAllowed(key, providerCapOf(user.apiProviderId))}>
+                          最高 {resolutionShortLabels[key]}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className={`admin-tag admin-tag-button ${user.hasOwnApiKey ? "admin-tag-ok" : ""}`}
+                      title={user.hasOwnApiKey ? `已配 ${user.apiKeyHint ?? ""}，点击更换或清除` : "点击给这个账号配专属 Key"}
+                      onClick={() => void editApiKey(user)}
+                      disabled={!onSetApiKey}
+                    >
+                      {user.hasOwnApiKey ? user.apiKeyHint ?? "已配" : "共享"}
+                    </button>
+                  </span>
                 </span>
                 {user.id === currentUserId ? (
                   <span className="admin-self-role" title="不能锁定自己">正常</span>

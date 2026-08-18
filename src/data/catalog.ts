@@ -7,6 +7,7 @@ import type {
   RechargePackage,
   ReferenceImage,
   ResolutionOption,
+  ResolutionKey,
   UserAccount,
 } from "../types";
 
@@ -148,6 +149,13 @@ export const resolutionOptions: ResolutionOption[] = [
   },
 ];
 
+/** APIMart 原生输出档位；自由生成使用这组直观名称。 */
+export const freeResolutionOptions = [
+  { id: "native" as const, label: "1K" },
+  { id: "hd" as const, label: "2K" },
+  { id: "fourK" as const, label: "4K" },
+];
+
 export const ratioOptions: RatioOption[] = [
   {
     id: "auto",
@@ -155,7 +163,7 @@ export const ratioOptions: RatioOption[] = [
     apiSize: "auto",
     width: 1,
     height: 1,
-    allowedResolutions: ["native", "hd"],
+    allowedResolutions: ["native", "hd", "fourK"],
     native: true,
   },
   {
@@ -168,21 +176,21 @@ export const ratioOptions: RatioOption[] = [
     native: true,
   },
   {
-    id: "2-3",
-    label: "2:3",
-    apiSize: "1024x1536",
-    width: 2,
-    height: 3,
-    allowedResolutions: ["native", "hd"],
-    native: true,
-  },
-  {
     id: "3-2",
     label: "3:2",
     apiSize: "1536x1024",
     width: 3,
     height: 2,
-    allowedResolutions: ["native", "hd"],
+    allowedResolutions: ["native", "hd", "fourK"],
+    native: true,
+  },
+  {
+    id: "2-3",
+    label: "2:3",
+    apiSize: "1024x1536",
+    width: 2,
+    height: 3,
+    allowedResolutions: ["native", "hd", "fourK"],
     native: true,
   },
   {
@@ -191,8 +199,8 @@ export const ratioOptions: RatioOption[] = [
     apiSize: "1024x1536",
     width: 3,
     height: 4,
-    allowedResolutions: ["hd"],
-    native: false,
+    allowedResolutions: ["native", "hd", "fourK"],
+    native: true,
   },
   {
     id: "4-3",
@@ -200,27 +208,45 @@ export const ratioOptions: RatioOption[] = [
     apiSize: "1536x1024",
     width: 4,
     height: 3,
-    allowedResolutions: ["hd"],
-    native: false,
+    allowedResolutions: ["native", "hd", "fourK"],
+    native: true,
   },
   {
-    id: "9-16",
-    label: "9:16",
-    apiSize: "1024x1536",
-    width: 9,
-    height: 16,
-    allowedResolutions: ["fourK"],
-    native: false,
-  },
-  {
-    id: "16-9",
-    label: "16:9",
+    id: "5-4",
+    label: "5:4",
     apiSize: "1536x1024",
-    width: 16,
-    height: 9,
-    allowedResolutions: ["fourK"],
-    native: false,
+    width: 5,
+    height: 4,
+    allowedResolutions: ["native", "hd", "fourK"],
+    native: true,
   },
+  {
+    id: "4-5",
+    label: "4:5",
+    apiSize: "1024x1536",
+    width: 4,
+    height: 5,
+    allowedResolutions: ["native", "hd", "fourK"],
+    native: true,
+  },
+  ...[
+    ["16-9", "16:9", "1536x1024", 16, 9],
+    ["9-16", "9:16", "1024x1536", 9, 16],
+    ["2-1", "2:1", "1536x1024", 2, 1],
+    ["1-2", "1:2", "1024x1536", 1, 2],
+    ["3-1", "3:1", "1536x1024", 3, 1],
+    ["1-3", "1:3", "1024x1536", 1, 3],
+    ["21-9", "21:9", "1536x1024", 21, 9],
+    ["9-21", "9:21", "1024x1536", 9, 21],
+  ].map(([id, label, apiSize, width, height]) => ({
+    id: String(id),
+    label: String(label),
+    apiSize: String(apiSize),
+    width: Number(width),
+    height: Number(height),
+    allowedResolutions: ["native", "hd", "fourK"] as ResolutionKey[],
+    native: true,
+  })),
 ];
 
 export const initialReferences: ReferenceImage[] = [
@@ -324,4 +350,3 @@ export const modelRoutes: ModelRoute[] = [
     creditFormula: "基础分 + 合成复杂度 + 存储费",
   },
 ];
-

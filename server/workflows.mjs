@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { requireAccount } from "./auth.mjs";
 import { resolveProviderApiKey } from "./user-keys.mjs";
-import { imageApiBaseUrl, imageApiModel, imageApiUrl } from "./provider-config.mjs";
+import { imageApiUrl } from "./provider-config.mjs";
 import { nowIso, runTransaction, sqlite } from "./db.mjs";
 import {
   generatedImageStaticMount,
@@ -479,19 +479,19 @@ function brandTrainingProviderStatus() {
 
 /** 传 userId 时把账号自备的 Key 也算进去——服务端没配 Key、账号自己有，也能走真实生成。 */
 export function workflowImageProviderStatus(userId) {
-  const providerReady = Boolean(workflowProviderApiKey(userId));
+  const resolved = resolveProviderApiKey(userId);
+  const providerReady = Boolean(resolved.apiKey);
   return {
     mode: process.env.OPENAI_DEMO_MODE === "true" || !providerReady ? "demo" : "live",
     providerReady,
-    baseUrl: imageApiBaseUrl(),
-    model: imageApiModel(),
+    baseUrl: resolved.provider.baseUrl,
+    model: resolved.provider.model,
   };
 }
 
 /** 这次调用该用的 Key。单独一个函数，别把原文塞进会被序列化的状态对象里。 */
 function workflowProviderApiKey(userId) {
-  if (userId) return resolveProviderApiKey(userId).apiKey;
-  return String(process.env.OPENAI_API_KEY || "").trim();
+  return resolveProviderApiKey(userId).apiKey;
 }
 
 function productionReadinessSummary() {
@@ -673,6 +673,88 @@ async function withImageRetry(operation) {
   throw lastError;
 }
 
+function waitForWorkflowProvider(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function apimartWorkflowResultItems(task) {
+  const images = Array.isArray(task?.result?.images) ? task.result.images : [];
+  return images.flatMap((image) => {
+    const urls = Array.isArray(image?.url) ? image.url : image?.url ? [image.url] : [];
+    return urls.map((url) => ({ url }));
+  });
+}
+
+async function callApimartWorkflowImage(prompt, assets, userId) {
+  const resolved = resolveProviderApiKey(userId);
+  const provider = resolved.provider;
+  const apiKey = resolved.apiKey;
+  const body = {
+    model: provider.model,
+    prompt,
+    n: 1,
+    size: "1:1",
+    resolution: "1k",
+  };
+
+  if (assets.length > 0) {
+    const imageUrls = [];
+    for (const [index, asset] of assets.slice(0, 16).entries()) {
+      const image = await workflowAssetToBlob(asset, index);
+      if (!image) continue;
+      const buffer = Buffer.from(await image.blob.arrayBuffer());
+      if (buffer.length > 20 * 1024 * 1024) throw new Error("APIMart 单张参考图不能超过 20MB。");
+      imageUrls.push(`data:${image.blob.type || "image/png"};base64,${buffer.toString("base64")}`);
+    }
+    if (imageUrls.length === 0) throw new Error("没有可用于图像编辑的有效素材。");
+    body.image_urls = imageUrls;
+  }
+
+  const submitted = await fetchWithTimeout(
+    imageApiUrl("/images/generations", provider.id),
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    { timeoutMs: workflowImageTimeoutMs(), timeoutMessage: "APIMart 图像任务提交超时。" },
+  );
+  if (!submitted.ok) {
+    const text = await submitted.text();
+    const error = new Error(`APIMart 图像任务提交失败 (${submitted.status})：${summarizeProviderError(submitted.status, text)}`);
+    error.status = submitted.status;
+    throw error;
+  }
+  const taskId = (await submitted.json())?.data?.[0]?.task_id;
+  if (!taskId) throw new Error("APIMart 没有返回任务 ID。");
+
+  const deadline = Date.now() + workflowImageTimeoutMs();
+  let task = null;
+  while (Date.now() < deadline) {
+    await waitForWorkflowProvider(1500);
+    const statusResponse = await fetchWithTimeout(
+      `${imageApiUrl(`/tasks/${encodeURIComponent(taskId)}`, provider.id)}?language=zh`,
+      { headers: { Authorization: `Bearer ${apiKey}` } },
+      { timeoutMs: Math.max(100, deadline - Date.now()), timeoutMessage: "APIMart 图像任务查询超时。" },
+    );
+    if (!statusResponse.ok) {
+      const text = await statusResponse.text();
+      const error = new Error(`APIMart 图像任务查询失败 (${statusResponse.status})：${summarizeProviderError(statusResponse.status, text)}`);
+      error.status = statusResponse.status;
+      throw error;
+    }
+    task = (await statusResponse.json())?.data;
+    if (["failed", "cancelled"].includes(task?.status)) {
+      throw new Error(`APIMart 图像任务失败：${task?.error?.message || task?.status || "未知错误"}`);
+    }
+    if (task?.status === "completed") break;
+  }
+  if (task?.status !== "completed") throw new Error("APIMart 图像任务等待超时。");
+  const item = apimartWorkflowResultItems(task)[0];
+  if (!item) throw new Error("APIMart 图像任务完成但没有返回图片。");
+  return persistGeneratedImage(item);
+}
+
 function qualityGateForResult({ generationMode, assetInputCount, imageInspection, result }) {
   const checks = ["provider_response", "no_watermark_prompt", "commercial_prompt"];
   if (imageInspection?.bytes > 0) checks.push("image_persisted");
@@ -760,10 +842,14 @@ function canUseSegmentationService(result) {
 
 async function generateLiveWorkflowImage(prompt, userId) {
   const provider = workflowImageProviderStatus(userId);
+  const providerConfig = resolveProviderApiKey(userId).provider;
   if (provider.mode !== "live") return null;
+  if (providerConfig.protocol === "apimart") {
+    return withImageRetry(() => callApimartWorkflowImage(prompt, [], userId));
+  }
   return withImageRetry(async () => {
     const response = await fetchWithTimeout(
-      imageApiUrl("/images/generations"),
+      imageApiUrl("/images/generations", providerConfig.id),
       {
         method: "POST",
         headers: {
@@ -847,7 +933,12 @@ async function segmentLiveWorkflowImage(prompt, assets) {
 
 async function editLiveWorkflowImage(prompt, assets, userId) {
   const provider = workflowImageProviderStatus(userId);
+  const providerConfig = resolveProviderApiKey(userId).provider;
   if (provider.mode !== "live") return null;
+  if (providerConfig.protocol === "apimart") {
+    const persisted = await withImageRetry(() => callApimartWorkflowImage(prompt, assets, userId));
+    return { ...persisted, imageCount: Math.min(assets.length, 16) };
+  }
   const form = new FormData();
   form.append("model", provider.model);
   form.append("prompt", prompt);
@@ -870,7 +961,7 @@ async function editLiveWorkflowImage(prompt, assets, userId) {
 
   return withImageRetry(async () => {
     const response = await fetchWithTimeout(
-      imageApiUrl("/images/edits"),
+      imageApiUrl("/images/edits", providerConfig.id),
       {
         method: "POST",
         headers: {

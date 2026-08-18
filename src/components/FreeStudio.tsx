@@ -1,9 +1,10 @@
-import { Suspense, useCallback, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { generationModes } from "../data/catalog";
 import { estimateCredits } from "../lib/costing";
 import { resetCanvasStore } from "../lib/canvasStore";
 import { filesToAttachments, MAX_ATTACHMENTS } from "../lib/freeStudio";
 import { lazyWithReload } from "../lib/lazyChunk";
+import { clampResolution } from "../lib/resolution";
 import { useStoredState } from "../lib/storedState";
 import type {
   AttachmentUsage,
@@ -11,6 +12,8 @@ import type {
   FreeAttachment,
   GeneratedResult,
   PendingCanvasImage,
+  ProviderCapability,
+  ResolutionKey,
   StudioSettings,
   SubmissionRecord,
 } from "../types";
@@ -28,6 +31,7 @@ export interface FreeGenerationInput {
   prompt: string;
   attachments: FreeAttachment[];
   ratioId: string;
+  resolution: ResolutionKey;
   quantity: number;
   /** free = 按描述出图；annotation = 带批注的截图当修改需求书；sketch = 手绘草图当构图需求。 */
   intent?: "free" | "annotation" | "sketch";
@@ -43,6 +47,8 @@ interface FreeStudioProps {
   creditPolicy: CreditPolicy;
   settings: StudioSettings;
   apiConfig: ApiConfig | null;
+  /** 当前账号走哪条图像线路、最高能开到几 K。 */
+  capability: ProviderCapability;
   /** 简易/画布切换由顶栏承载，工作区里不再单独占一条标题栏。 */
   layout: FreeLayout;
   onLayoutChange: (layout: FreeLayout) => void;
@@ -65,6 +71,7 @@ export function FreeStudio({
   creditPolicy,
   settings,
   apiConfig,
+  capability,
   layout,
   onLayoutChange,
   onGenerate,
@@ -74,7 +81,13 @@ export function FreeStudio({
   const [prompt, setPrompt] = useStoredState("clothdesign:free:prompt", "");
   const [attachments, setAttachments] = useStoredState<FreeAttachment[]>("clothdesign:free:attachments", []);
   const [ratioId, setRatioId] = useStoredState("clothdesign:free:ratio", "1-1");
+  const [resolution, setResolution] = useStoredState<ResolutionKey>("clothdesign:free:resolution", "native");
   const [quantity, setQuantity] = useStoredState("clothdesign:free:quantity", 1);
+  // 换线路（或管理员改了上限）之后，本地存着的 4K 得跟着落回能出的档位，
+  // 否则界面显示 4K、服务端按 1K 出图，两边对不上。
+  useEffect(() => {
+    setResolution((current) => clampResolution(current, capability.maxResolution));
+  }, [capability.maxResolution, setResolution]);
   const [pendingImages, setPendingImages] = useState<PendingCanvasImage[]>([]);
   const [notice, setNotice] = useState("");
   /** 手上有几张还在生成。简易模式不再因此锁住输入框，只用来显示进度。 */
@@ -84,7 +97,7 @@ export function FreeStudio({
     (referenceCount: number, count = 1) =>
       estimateCredits(
         freeMode,
-        { ...settings, mode: "free", ratioId, quantity: count },
+        { ...settings, mode: "free", ratioId, resolution, quantity: count },
         Array.from({ length: referenceCount }, (_, index) => ({
           id: `count-${index}`,
           label: String(index + 1),
@@ -94,7 +107,7 @@ export function FreeStudio({
         })),
         creditPolicy,
       ),
-    [creditPolicy, ratioId, settings],
+    [creditPolicy, ratioId, resolution, settings],
   );
 
   const canvasCostFor = useCallback((referenceCount: number) => costFor(referenceCount, 1), [costFor]);
@@ -119,7 +132,7 @@ export function FreeStudio({
     if (!submitted.prompt.trim()) return;
     setNotice("");
     setPendingCount((count) => count + 1);
-    const running = onGenerate({ prompt: submitted.prompt, attachments: submitted.attachments, ratioId, quantity });
+    const running = onGenerate({ prompt: submitted.prompt, attachments: submitted.attachments, ratioId, resolution, quantity });
     setPrompt("");
     setAttachments([]);
     running
@@ -180,8 +193,8 @@ export function FreeStudio({
 
   const handleCanvasGenerate = useCallback(
     (input: CanvasGenerateInput) =>
-      onGenerate({ prompt: input.prompt, attachments: input.attachments, ratioId: input.ratioId, quantity: 1, intent: input.intent }),
-    [onGenerate],
+      onGenerate({ prompt: input.prompt, attachments: input.attachments, ratioId: input.ratioId, resolution, quantity: 1, intent: input.intent }),
+    [onGenerate, resolution],
   );
 
   const handlePendingConsumed = useCallback(
@@ -198,6 +211,8 @@ export function FreeStudio({
             prompt={prompt}
             attachments={attachments}
             ratioId={ratioId}
+            resolution={resolution}
+            capability={capability}
             quantity={quantity}
             cost={simpleCost}
             credits={credits}
@@ -220,6 +235,7 @@ export function FreeStudio({
             }
             onRemoveAttachment={(id) => setAttachments((current) => current.filter((item) => item.id !== id))}
             onRatioChange={setRatioId}
+            onResolutionChange={setResolution}
             onQuantityChange={setQuantity}
             onGenerate={handleSimpleGenerate}
             onUseAsAttachment={handleUseAsAttachment}

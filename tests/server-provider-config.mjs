@@ -7,6 +7,8 @@ const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clothdesign-provider-"))
 process.env.DATABASE_URL = `file:${path.join(tmpDir, "test.db")}`;
 process.env.OPENAI_BASE_URL = "https://www.packyapi.com";
 process.env.OPENAI_IMAGE_MODEL = "gpt-image-2";
+process.env.APIMART_BASE_URL = "https://api.apimart.ai/v1";
+process.env.APIMART_IMAGE_MODEL = "gpt-image-2";
 
 const { migrateBusinessDatabase, sqlite } = await import("../server/db.mjs");
 migrateBusinessDatabase();
@@ -18,6 +20,33 @@ assert.equal(pc.imageApiModel(), "gpt-image-2");
 assert.equal(pc.imageProviderSettings().baseUrlSource, "env");
 assert.equal(pc.imageApiUrl("/images/generations"), "https://www.packyapi.com/v1/images/generations");
 assert.equal(pc.imageApiUrl("images/edits"), "https://www.packyapi.com/v1/images/edits", "前导斜杠有没有都要拼对");
+assert.equal(pc.imageProviderSettingsList().length, 2, "两套 URL Base 要同时存在");
+assert.equal(pc.imageProviderSettings("apimart").protocol, "apimart");
+assert.equal(pc.imageApiUrl("/images/generations", "apimart"), "https://api.apimart.ai/v1/images/generations");
+
+const savedApimart = pc.saveImageProviderSettings({ providerId: "apimart", baseUrl: "https://relay.apimart.test", model: "gpt-image-2-ext" });
+assert.equal(savedApimart.settings.baseUrl, "https://relay.apimart.test/v1");
+assert.equal(pc.imageProviderSettings().baseUrl, "https://www.packyapi.com/v1", "改 APIMart 不能覆盖原供应商");
+pc.resetImageProviderSettings("apimart");
+
+/* ── 每条线路能出到几 K ──────────────────────────────────────────────────── */
+// OpenAI 兼容协议压根没有 resolution 这个参数，出图恒定是 1024/1536 那一档；
+// 让界面继续给 2K/4K 只会多扣积分却拿到同一张图。
+assert.equal(pc.providerMaxResolution("default"), "native");
+assert.equal(pc.providerMaxResolution("apimart"), "fourK");
+assert.equal(pc.imageProviderSettings("apimart").maxResolution, "fourK", "线路能力要随配置一起下发给前端");
+
+assert.equal(pc.clampResolution("fourK", "native"), "native");
+assert.equal(pc.clampResolution("native", "fourK"), "native", "上限高不代表要把用户选的顶上去");
+assert.equal(pc.clampResolution("哈哈", "fourK"), "native", "认不出来的档位按最低算");
+
+// 账号上限只能在线路能力之内往下压。
+assert.equal(pc.effectiveMaxResolution("apimart", ""), "fourK", "没设就跟随线路");
+assert.equal(pc.effectiveMaxResolution("apimart", "hd"), "hd");
+assert.equal(pc.effectiveMaxResolution("default", "fourK"), "native", "后台设了 4K，Packy 线路也只能出 1K");
+assert.equal(pc.maxResolutionSource("apimart", "hd"), "account");
+assert.equal(pc.maxResolutionSource("apimart", ""), "provider");
+assert.equal(pc.maxResolutionSource("default", "fourK"), "provider", "压不动的设定不能说成是后台压的");
 
 /* ── 校验 ────────────────────────────────────────────────────────────────── */
 assert(pc.normalizeBaseUrl("").error, "空地址要挡住");

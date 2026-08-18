@@ -16,7 +16,7 @@ const { ensureDebugUserProfile, newDebugSeat, debugUserIdFromSeat } = await impo
 
 /* ── 迁移：老库升级后老账号视为已开通，任务表带 key_source ───────────────── */
 const profileColumns = sqlite.prepare("PRAGMA table_info(user_profile)").all().map((row) => row.name);
-for (const column of ["approved", "api_key_encrypted", "api_key_hint", "api_key_updated_at"]) {
+for (const column of ["approved", "api_key_encrypted", "api_key_hint", "api_key_updated_at", "api_provider_id", "max_resolution"]) {
   assert(profileColumns.includes(column), `user_profile should have ${column}`);
 }
 assert(sqlite.prepare("PRAGMA table_info(generation_task)").all().some((row) => row.name === "key_source"));
@@ -42,6 +42,28 @@ sqlite
   )
   .run(timestamp, timestamp);
 assert.equal(sqlite.prepare("SELECT approved FROM user_profile WHERE user_id = 'u-legacy'").get().approved, 1, "老账号默认已开通");
+
+/* ── 每个账号能开到几 K：线路能力和后台上限取低 ──────────────────────────── */
+const policyUserId = "u-second-real";
+assert.deepEqual(keys.userResolutionPolicy(policyUserId), {
+  maxResolution: "native",
+  maxResolutionSetting: "",
+  maxResolutionSource: "provider",
+});
+// 出图那一刻用的也是同一份上限，前端漏拦了服务端还能兜住。
+assert.equal(keys.resolveProviderApiKey(policyUserId).maxResolution, "native");
+
+sqlite.prepare("UPDATE user_profile SET api_provider_id = 'apimart' WHERE user_id = ?").run(policyUserId);
+assert.equal(keys.userResolutionPolicy(policyUserId).maxResolution, "fourK", "APIMart 线路才有 4K");
+sqlite.prepare("UPDATE user_profile SET max_resolution = 'hd' WHERE user_id = ?").run(policyUserId);
+assert.deepEqual(keys.userResolutionPolicy(policyUserId), {
+  maxResolution: "hd",
+  maxResolutionSetting: "hd",
+  maxResolutionSource: "account",
+});
+sqlite.prepare("UPDATE user_profile SET api_provider_id = 'default' WHERE user_id = ?").run(policyUserId);
+assert.equal(keys.userResolutionPolicy(policyUserId).maxResolution, "native", "换回只出 1K 的线路，后台设的 2K 也顶不上去");
+sqlite.prepare("UPDATE user_profile SET max_resolution = NULL WHERE user_id = ?").run(policyUserId);
 
 /* ── 账号名 ↔ 内部邮箱 ───────────────────────────────────────────────────── */
 const accounts = await import("../server/accounts.mjs");
@@ -113,16 +135,24 @@ assert.equal(keys.apiKeyHint("sk-test-key-1234567890"), "sk-…7890");
 assert.equal(keys.apiKeyHint("abcdefg"), "ab…");
 
 /* ── 落库 / 解析 / 优先级 ────────────────────────────────────────────────── */
-assert.deepEqual(keys.resolveProviderApiKey("u-legacy"), { apiKey: "", source: "" }, "没有任何 Key 时要能识别出来");
+assert.equal(keys.resolveProviderApiKey("u-legacy").source, "", "没有任何 Key 时要能识别出来");
+assert.equal(keys.resolveProviderApiKey("u-legacy").providerId, "default");
 process.env.OPENAI_API_KEY = "sk-server-shared-key-0000";
-assert.deepEqual(keys.resolveProviderApiKey("u-legacy"), { apiKey: "sk-server-shared-key-0000", source: "server" });
+assert.equal(keys.resolveProviderApiKey("u-legacy").apiKey, "sk-server-shared-key-0000");
+assert.equal(keys.resolveProviderApiKey("u-legacy").source, "server");
 
 const saved = keys.setUserApiKey("u-legacy", "sk-test-key-1234567890");
 assert.equal(saved.apiKeyHint, "sk-…7890");
 const stored = sqlite.prepare("SELECT api_key_encrypted, api_key_hint FROM user_profile WHERE user_id = 'u-legacy'").get();
 assert(stored.api_key_encrypted.startsWith("v1:") && !stored.api_key_encrypted.includes("sk-test-key"), "库里只放密文");
 assert.equal(stored.api_key_hint, "sk-…7890");
-assert.deepEqual(keys.resolveProviderApiKey("u-legacy"), { apiKey: "sk-test-key-1234567890", source: "user" }, "自备 Key 优先于服务端 Key");
+assert.equal(keys.resolveProviderApiKey("u-legacy").apiKey, "sk-test-key-1234567890", "自备 Key 优先于服务端 Key");
+assert.equal(keys.resolveProviderApiKey("u-legacy").source, "user");
+assert.equal(keys.setUserApiProvider("u-legacy", "apimart").apiProviderId, "apimart");
+process.env.APIMART_API_KEY = "sk-apimart-shared-key-0000";
+assert.equal(keys.resolveProviderApiKey("u-legacy").provider.protocol, "apimart");
+assert.equal(keys.resolveProviderApiKey("u-legacy").apiKey, "sk-test-key-1234567890", "切换 URL Base 后自备 Key 仍优先");
+assert(keys.setUserApiProvider("u-legacy", "missing").error, "未知 URL Base 要拒绝");
 
 // AUTH_SECRET 换了解不开：当成没有 Key，回退到服务端，别把整个请求打挂
 process.env.AUTH_SECRET = "another-secret-after-rotation-1234567890";
@@ -139,7 +169,7 @@ const index = await fs.readFile("server/index.mjs", "utf8");
 assert(index.includes("resolveProviderApiKey(account.user.id)"), "生成路由要先解析这次该用谁的 Key");
 assert(index.includes('cost = ownKey ? 0 : estimateCredits(payload)'), "自备 Key 不扣积分");
 assert(index.includes('keySource: ownKey ? "user" : "server"'), "任务要记下 Key 来源");
-assert(index.includes("callOpenAIImages(payload, files, providerKey.apiKey)"), "调接口时用解析出来的 Key");
+assert(index.includes("callOpenAIImages(payload, files, providerKey.apiKey, providerKey.provider)"), "调接口时 Key 和 URL Base 要成套使用");
 const api = await fs.readFile("server/api.mjs", "utf8");
 const auth = await fs.readFile("server/auth.mjs", "utf8");
 assert(api.includes('app.put("/api/me/api-key"') && api.includes('app.delete("/api/me/api-key"'), "账户要能保存 / 清除自备 Key");
@@ -161,7 +191,7 @@ assert(adminPanel.includes("setCreateNotice(error)"), "改动被服务端拒绝�
 assert(api.includes('app.post("/api/admin/users"'), "后台能直接建账号");
 assert(api.includes('app.put("/api/admin/users/:id/api-key"'), "后台能给账号配 Key");
 assert(api.includes('const role = "user";'), "后台发的号一律普通用户，保证只有管理员能进 /admin");
-assert(api.includes("if (presetKey) setUserApiKey(userId, presetKey);"), "建号时填的 Key 要落到这个账号上");
+assert(api.includes("if (presetKey) setUserApiKey(userId, presetKey, apiProviderId);"), "建号时填的 Key 要和 URL Base 一起落到这个账号上");
 assert(api.includes("username: emailToUsername(user.email)"), "账号信息里要带账号名");
 assert(api.includes('app.post("/api/admin/users/:id/password"'), "后台能重置密码");
 assert(api.includes("export function adminSummary"), "后台要有一眼概览");

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { generationModes, ratioOptions, roleLabels } from "../data/catalog";
 import { usePasteImages } from "../lib/clipboardImages";
 import { estimateCredits } from "../lib/costing";
+import { capabilityFromAccount, clampResolution } from "../lib/resolution";
 import { useStoredState } from "../lib/storedState";
 import type {
   CreditPolicy,
@@ -122,6 +123,13 @@ export function StudioWorkspace({
 
   const mode = generationModes.find((item) => item.id === settings.mode) ?? generationModes[0];
   const ratio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
+  const capability = useMemo(() => capabilityFromAccount(user), [user]);
+  // 线路开不到 4K 时，本地存着的旧设置得落回能出的档位：
+  // 否则这里按 4K 报价，服务端按 1K 出图，用户看到的价和拿到的图对不上。
+  useEffect(() => {
+    const capped = clampResolution(settings.resolution, capability.maxResolution);
+    if (capped !== settings.resolution) onSettingsChange({ resolution: capped });
+  }, [capability.maxResolution, settings.resolution, onSettingsChange]);
   const cost = useMemo(
     () => estimateCredits(mode, settings, references, creditPolicy),
     [mode, references, settings, creditPolicy],
@@ -305,6 +313,7 @@ export function StudioWorkspace({
         <div className="settings-aside-body">
           <ParameterPanel
             settings={settings}
+            capability={capability}
             onChange={onSettingsChange}
             showAdvanced={level === "expert"}
             onExpandAdvanced={() => setLevel("expert")}

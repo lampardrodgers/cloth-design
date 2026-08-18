@@ -1,5 +1,14 @@
 import crypto from "node:crypto";
 import { nowIso, sqlite } from "./db.mjs";
+import {
+  effectiveMaxResolution,
+  imageProviderSettings,
+  isValidProviderId,
+  maxResolutionSource,
+  normalizeProviderId,
+  normalizeResolution,
+  providerKeyEnv,
+} from "./provider-config.mjs";
 
 /**
  * 每个账号可以自备图像接口的 API Key。
@@ -48,14 +57,51 @@ export function decryptApiKey(stored) {
   return Buffer.concat([decipher.update(Buffer.from(data, "base64")), decipher.final()]).toString("utf8");
 }
 
-export function setUserApiKey(userId, plain) {
+export function setUserApiKey(userId, plain, providerId) {
   const timestamp = nowIso();
+  const selectedProviderId = providerId === undefined ? userApiProviderId(userId) : normalizeProviderId(providerId, "");
+  if (!selectedProviderId) return { error: "图像供应商不存在。" };
   sqlite
     .prepare(
-      "UPDATE user_profile SET api_key_encrypted = ?, api_key_hint = ?, api_key_updated_at = ?, updated_at = ? WHERE user_id = ?",
+      "UPDATE user_profile SET api_key_encrypted = ?, api_key_hint = ?, api_key_updated_at = ?, api_provider_id = ?, updated_at = ? WHERE user_id = ?",
     )
-    .run(encryptApiKey(plain), apiKeyHint(plain), timestamp, timestamp, userId);
-  return { apiKeyHint: apiKeyHint(plain), apiKeyUpdatedAt: timestamp };
+    .run(encryptApiKey(plain), apiKeyHint(plain), timestamp, selectedProviderId, timestamp, userId);
+  return { apiKeyHint: apiKeyHint(plain), apiKeyUpdatedAt: timestamp, apiProviderId: selectedProviderId };
+}
+
+export function setUserApiProvider(userId, providerId) {
+  if (!isValidProviderId(providerId)) return { error: "图像供应商不存在。" };
+  const timestamp = nowIso();
+  sqlite.prepare("UPDATE user_profile SET api_provider_id = ?, updated_at = ? WHERE user_id = ?").run(providerId, timestamp, userId);
+  return { apiProviderId: providerId };
+}
+
+export function userApiProviderId(userId) {
+  if (!userId) return "default";
+  const row = sqlite.prepare("SELECT api_provider_id FROM user_profile WHERE user_id = ?").get(userId);
+  return normalizeProviderId(row?.api_provider_id);
+}
+
+/**
+ * 这个账号最高能出到哪一档：线路能力和后台按账号设的上限取低的那个。
+ * 前端拿它决定 1K/2K/4K 哪些能点，服务端出图前也按它兜底裁剪。
+ */
+export function userResolutionPolicy(userId) {
+  const row = userId
+    ? sqlite.prepare("SELECT api_provider_id, max_resolution FROM user_profile WHERE user_id = ?").get(userId)
+    : null;
+  return resolutionPolicyFor(row?.api_provider_id, row?.max_resolution);
+}
+
+/** 同上，但直接吃 user_profile 那一行，省掉重复查询。 */
+export function resolutionPolicyFor(providerId, accountLimit) {
+  const id = normalizeProviderId(providerId);
+  return {
+    maxResolution: effectiveMaxResolution(id, accountLimit),
+    // 后台设的原值（空串 = 跟随线路），后台表格要拿它回显下拉框。
+    maxResolutionSetting: normalizeResolution(accountLimit, ""),
+    maxResolutionSource: maxResolutionSource(id, accountLimit),
+  };
 }
 
 export function clearUserApiKey(userId) {
@@ -78,8 +124,8 @@ export function userApiKey(userId) {
   }
 }
 
-export function serverApiKey() {
-  return String(process.env.OPENAI_API_KEY || "").trim();
+export function serverApiKey(providerId = "default") {
+  return String(process.env[providerKeyEnv(providerId)] || "").trim();
 }
 
 /**
@@ -87,9 +133,16 @@ export function serverApiKey() {
  * source 供扣费逻辑判断——自备 Key 的请求不扣积分。
  */
 export function resolveProviderApiKey(userId) {
+  const row = userId
+    ? sqlite.prepare("SELECT api_provider_id, max_resolution FROM user_profile WHERE user_id = ?").get(userId)
+    : null;
+  const providerId = normalizeProviderId(row?.api_provider_id);
+  const provider = imageProviderSettings(providerId);
+  const policy = resolutionPolicyFor(providerId, row?.max_resolution);
+  const base = { providerId, provider, ...policy };
   const own = userId ? userApiKey(userId) : "";
-  if (own) return { apiKey: own, source: "user" };
-  const shared = serverApiKey();
-  if (shared) return { apiKey: shared, source: "server" };
-  return { apiKey: "", source: "" };
+  if (own) return { ...base, apiKey: own, source: "user" };
+  const shared = serverApiKey(providerId);
+  if (shared) return { ...base, apiKey: shared, source: "server" };
+  return { ...base, apiKey: "", source: "" };
 }

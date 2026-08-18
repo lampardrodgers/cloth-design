@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { auth, ensureUserProfile, getAuthSession, isAdminRole, requireAccount, requireAdmin, selfSignupAllowed } from "./auth.mjs";
 import { emailToUsername, normalizeUsername, usernameToEmail } from "./accounts.mjs";
-import { imageProviderSettings, resetImageProviderSettings, saveImageProviderSettings } from "./provider-config.mjs";
-import { fetchWithTimeout } from "./timeouts.mjs";
+import {
+  RESOLUTION_KEYS,
+  imageProviderSettings,
+  imageProviderSettingsList,
+  isValidProviderId,
+  normalizeResolution,
+  resetImageProviderSettings,
+  saveImageProviderSettings,
+} from "./provider-config.mjs";
+import { testProviderConnectivity } from "./provider-connectivity.mjs";
 import { nowIso, sqlite } from "./db.mjs";
 import {
   DEBUG_UNLIMITED_CREDITS,
@@ -16,7 +24,15 @@ import {
   newDebugSeat,
 } from "./debug.mjs";
 import { deleteManagedGeneratedImage } from "./image-provider.mjs";
-import { clearUserApiKey, normalizeApiKey, serverApiKey, setUserApiKey } from "./user-keys.mjs";
+import {
+  clearUserApiKey,
+  normalizeApiKey,
+  resolutionPolicyFor,
+  resolveProviderApiKey,
+  serverApiKey,
+  setUserApiKey,
+  setUserApiProvider,
+} from "./user-keys.mjs";
 import {
   archivePendingResults,
   archiveResultToWebdav,
@@ -51,6 +67,7 @@ export function serializeAccount(user, profile) {
   const debugUser = isDebugUserId(user.id);
   // 管理员开过「无限额度」的账号，和调试座位一样不受积分限制。
   const unlimited = debugUser || Number(safeProfile.unlimited ?? 0) === 1;
+  const apiProviderId = isValidProviderId(safeProfile.api_provider_id) ? safeProfile.api_provider_id : "default";
   return {
     id: user.id,
     email: user.email,
@@ -68,8 +85,20 @@ export function serializeAccount(user, profile) {
     hasOwnApiKey: Boolean(safeProfile.api_key_encrypted),
     apiKeyHint: safeProfile.api_key_hint || null,
     apiKeyUpdatedAt: safeProfile.api_key_updated_at || null,
-    serverKeyConfigured: Boolean(serverApiKey()),
+    apiProviderId,
+    apiProviderName: imageProviderSettings(apiProviderId).name,
+    apiProviderProtocol: imageProviderSettings(apiProviderId).protocol,
+    // 1K/2K/4K 哪些能点：前端照这个渲染，服务端出图前还会再裁一次。
+    ...resolutionPolicyFor(apiProviderId, safeProfile.max_resolution),
+    serverKeyConfigured: Boolean(serverApiKey(apiProviderId)),
   };
+}
+
+function publicImageProviders() {
+  return imageProviderSettingsList().map((provider) => ({
+    ...provider,
+    serverKeyConfigured: Boolean(serverApiKey(provider.id)),
+  }));
 }
 
 /**
@@ -337,6 +366,8 @@ function serializeAdminUser(row, usage = usageByUser().get(row.user_id)) {
     unlimited: Number(row.unlimited ?? 0) === 1,
     hasOwnApiKey: Boolean(row.api_key_encrypted),
     apiKeyHint: row.api_key_hint || null,
+    apiProviderId: isValidProviderId(row.api_provider_id) ? row.api_provider_id : "default",
+    ...resolutionPolicyFor(row.api_provider_id, row.max_resolution),
     createdAt: row.created_at,
     usage: usage || {
       taskCount: 0,
@@ -428,6 +459,7 @@ export function registerBusinessRoutes(app) {
       orders: recentOrdersForUser(account.user.id),
       ledger: recentLedgerForUser(account.user.id),
       generationResults: recentGeneratedResultsForUser(account.user.id),
+      imageProviders: publicImageProviders(),
       debugUnlimited: isDebugUserId(account.user.id),
       paymentCapabilities: paymentCapabilities(),
       paymentConfig: paymentConfigStatus(),
@@ -448,7 +480,12 @@ export function registerBusinessRoutes(app) {
       res.status(400).json({ error: normalized.error });
       return;
     }
-    const saved = setUserApiKey(account.user.id, normalized.value);
+    const providerId = req.body?.providerId ?? account.profile.api_provider_id ?? "default";
+    if (!isValidProviderId(providerId)) {
+      res.status(400).json({ error: "图像供应商不存在。" });
+      return;
+    }
+    const saved = setUserApiKey(account.user.id, normalized.value, providerId);
     insertAudit({ actorUserId: account.user.id, action: "user.api_key.set", targetType: "user", targetId: account.user.id, detail: { hint: saved.apiKeyHint } });
     res.json({ account: serializeAccount(account.user, getProfileWithUser(account.user.id)) });
   });
@@ -463,6 +500,38 @@ export function registerBusinessRoutes(app) {
     clearUserApiKey(account.user.id);
     insertAudit({ actorUserId: account.user.id, action: "user.api_key.clear", targetType: "user", targetId: account.user.id, detail: {} });
     res.json({ account: serializeAccount(account.user, getProfileWithUser(account.user.id)) });
+  });
+
+  /** 账号选择自己的 Key / 站点共享 Key 应该配对哪一个 URL Base。 */
+  app.put("/api/me/image-provider", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    const result = setUserApiProvider(account.user.id, req.body?.providerId);
+    if (result.error) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    insertAudit({
+      actorUserId: account.user.id,
+      action: "user.image_provider.set",
+      targetType: "user",
+      targetId: account.user.id,
+      detail: { providerId: result.apiProviderId },
+    });
+    res.json({ account: serializeAccount(account.user, getProfileWithUser(account.user.id)) });
+  });
+
+  /** 普通账号自己的连通性测试：只请求 /models，不生成图片。 */
+  app.post("/api/me/image-provider/test", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    const providerKey = resolveProviderApiKey(account.user.id);
+    const result = await testProviderConnectivity({
+      baseUrl: providerKey.provider.baseUrl,
+      model: providerKey.provider.model,
+      apiKey: providerKey.apiKey,
+    });
+    res.json({ ...result, providerId: providerKey.providerId, keySource: providerKey.source || null });
   });
 
   app.get("/api/admin/payment-config", async (req, res) => {
@@ -729,6 +798,7 @@ export function registerBusinessRoutes(app) {
     res.json({
       summary: adminSummary(),
       imageProvider: imageProviderSettings(),
+      imageProviders: publicImageProviders(),
       users,
       packages: getAllPackages(),
       orders,
@@ -768,11 +838,40 @@ export function registerBusinessRoutes(app) {
       typeof req.body.name === "string" && req.body.name.trim() ? req.body.name.trim().slice(0, 80) : current.display_name;
     const nextApproved = typeof req.body.approved === "boolean" ? (req.body.approved ? 1 : 0) : Number(current.approved ?? 1);
     const nextUnlimited = typeof req.body.unlimited === "boolean" ? (req.body.unlimited ? 1 : 0) : Number(current.unlimited ?? 0);
+    const nextApiProviderId =
+      req.body.apiProviderId === undefined
+        ? (isValidProviderId(current.api_provider_id) ? current.api_provider_id : "default")
+        : (isValidProviderId(req.body.apiProviderId) ? req.body.apiProviderId : "");
+    if (!nextApiProviderId) {
+      res.status(400).json({ error: "图像供应商不存在。" });
+      return;
+    }
+    // 分辨率上限：空串 = 跟随线路自己的能力，不写死在账号上。
+    let nextMaxResolution = normalizeResolution(current.max_resolution, "") || null;
+    if (req.body.maxResolutionSetting !== undefined) {
+      const raw = String(req.body.maxResolutionSetting ?? "").trim();
+      if (raw && !RESOLUTION_KEYS.includes(raw)) {
+        res.status(400).json({ error: "分辨率上限只能是 1K / 2K / 4K，或留空跟随线路。" });
+        return;
+      }
+      nextMaxResolution = raw || null;
+    }
     sqlite
       .prepare(
-        "UPDATE user_profile SET display_name = ?, role = ?, plan = ?, status = ?, approved = ?, unlimited = ?, updated_at = ? WHERE user_id = ?",
+        "UPDATE user_profile SET display_name = ?, role = ?, plan = ?, status = ?, approved = ?, unlimited = ?, api_provider_id = ?, max_resolution = ?, updated_at = ? WHERE user_id = ?",
       )
-      .run(nextName, nextRole, nextPlan, nextStatus, nextApproved, nextUnlimited, nowIso(), req.params.id);
+      .run(
+        nextName,
+        nextRole,
+        nextPlan,
+        nextStatus,
+        nextApproved,
+        nextUnlimited,
+        nextApiProviderId,
+        nextMaxResolution,
+        nowIso(),
+        req.params.id,
+      );
     insertAudit({
       actorUserId: account.user.id,
       action: "user.update",
@@ -785,6 +884,8 @@ export function registerBusinessRoutes(app) {
         name: nextName,
         approved: Boolean(nextApproved),
         unlimited: Boolean(nextUnlimited),
+        apiProviderId: nextApiProviderId,
+        maxResolution: nextMaxResolution || "跟随线路",
       },
     });
     res.json({ user: serializeAdminUser(getProfileWithUser(req.params.id)) });
@@ -812,6 +913,7 @@ export function registerBusinessRoutes(app) {
     }
     // 管理员可以在建号时就把这个账号要用的图像接口 Key 配好，对方登录即可用。
     let presetKey = "";
+    const apiProviderId = isValidProviderId(req.body?.apiProviderId) ? req.body.apiProviderId : "default";
     if (String(req.body?.apiKey || "").trim()) {
       const key = normalizeApiKey(req.body.apiKey);
       if (key.error) {
@@ -844,13 +946,14 @@ export function registerBusinessRoutes(app) {
            WHERE user_id = ?`,
         )
         .run(name, role, unlimited, credits, nowIso(), userId);
-      if (presetKey) setUserApiKey(userId, presetKey);
+      setUserApiProvider(userId, apiProviderId);
+      if (presetKey) setUserApiKey(userId, presetKey, apiProviderId);
       insertAudit({
         actorUserId: account.user.id,
         action: "user.create",
         targetType: "user",
         targetId: userId,
-        detail: { username, role, unlimited: Boolean(unlimited), credits, apiKey: presetKey ? "preset" : "none" },
+        detail: { username, role, unlimited: Boolean(unlimited), credits, apiKey: presetKey ? "preset" : "none", apiProviderId },
       });
       res.status(201).json({ user: serializeAdminUser(getProfileWithUser(userId)) });
     } catch (error) {
@@ -879,7 +982,12 @@ export function registerBusinessRoutes(app) {
       res.status(400).json({ error: key.error });
       return;
     }
-    const saved = setUserApiKey(req.params.id, key.value);
+    const providerId = req.body?.providerId ?? target.api_provider_id ?? "default";
+    if (!isValidProviderId(providerId)) {
+      res.status(400).json({ error: "图像供应商不存在。" });
+      return;
+    }
+    const saved = setUserApiKey(req.params.id, key.value, providerId);
     insertAudit({ actorUserId: account.user.id, action: "user.api_key.set", targetType: "user", targetId: req.params.id, detail: { hint: saved.apiKeyHint } });
     res.json({ user: serializeAdminUser(getProfileWithUser(req.params.id)) });
   });
@@ -924,7 +1032,7 @@ export function registerBusinessRoutes(app) {
   app.put("/api/admin/image-provider", async (req, res) => {
     const account = await requireAdmin(req, res);
     if (!account) return;
-    const result = saveImageProviderSettings({ baseUrl: req.body?.baseUrl, model: req.body?.model });
+    const result = saveImageProviderSettings({ providerId: req.body?.providerId, baseUrl: req.body?.baseUrl, model: req.body?.model });
     if (result.error) {
       res.status(400).json({ error: result.error });
       return;
@@ -933,8 +1041,8 @@ export function registerBusinessRoutes(app) {
       actorUserId: account.user.id,
       action: "image_provider.update",
       targetType: "app_config",
-      targetId: "imageProvider",
-      detail: { baseUrl: result.settings.baseUrl, model: result.settings.model },
+      targetId: result.settings.id,
+      detail: { providerId: result.settings.id, baseUrl: result.settings.baseUrl, model: result.settings.model },
     });
     res.json({ imageProvider: result.settings });
   });
@@ -942,13 +1050,17 @@ export function registerBusinessRoutes(app) {
   app.delete("/api/admin/image-provider", async (req, res) => {
     const account = await requireAdmin(req, res);
     if (!account) return;
-    const settings = resetImageProviderSettings();
+    const settings = resetImageProviderSettings(req.body?.providerId);
+    if (!settings) {
+      res.status(400).json({ error: "图像供应商不存在。" });
+      return;
+    }
     insertAudit({
       actorUserId: account.user.id,
       action: "image_provider.reset",
       targetType: "app_config",
-      targetId: "imageProvider",
-      detail: {},
+      targetId: settings.id,
+      detail: { providerId: settings.id },
     });
     res.json({ imageProvider: settings });
   });
@@ -960,37 +1072,15 @@ export function registerBusinessRoutes(app) {
   app.post("/api/admin/image-provider/test", async (req, res) => {
     const account = await requireAdmin(req, res);
     if (!account) return;
-    const settings = imageProviderSettings();
-    const apiKey = serverApiKey();
-    if (!apiKey) {
-      res.json({ ok: false, message: "服务端没有配 OPENAI_API_KEY，无法测试。可以先让某个账号用自备 Key 出图验证。" });
+    const providerId = req.body?.providerId ?? "default";
+    if (!isValidProviderId(providerId)) {
+      res.status(400).json({ error: "图像供应商不存在。" });
       return;
     }
-    try {
-      const response = await fetchWithTimeout(
-        `${settings.baseUrl}/models`,
-        { headers: { Authorization: `Bearer ${apiKey}` } },
-        { timeoutMs: 15000, timeoutMessage: "接口 15 秒没有响应。" },
-      );
-      const text = await response.text();
-      if (!response.ok) {
-        res.json({ ok: false, message: `${settings.baseUrl} 返回 ${response.status}：${text.slice(0, 200)}` });
-        return;
-      }
-      let count = null;
-      try {
-        const parsed = JSON.parse(text);
-        if (Array.isArray(parsed?.data)) count = parsed.data.length;
-      } catch {
-        // 有的中转不返回标准结构，能连通就算过
-      }
-      res.json({
-        ok: true,
-        message: `连通正常${count === null ? "" : `，可见 ${count} 个模型`}。当前模型名 ${settings.model}。`,
-      });
-    } catch (error) {
-      res.json({ ok: false, message: error instanceof Error ? error.message : "连接失败。" });
-    }
+    const settings = imageProviderSettings(providerId);
+    const apiKey = serverApiKey(providerId);
+    const result = await testProviderConnectivity({ baseUrl: settings.baseUrl, model: settings.model, apiKey });
+    res.json(result);
   });
 
   app.patch("/api/admin/packages/:id", async (req, res) => {

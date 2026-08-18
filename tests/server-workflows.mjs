@@ -193,6 +193,24 @@ assert.equal(
     "补标记之后接口状态应该回到真实的那一次结果",
   );
 
+  // 账号自备 Key 的失败不能污染全站服务器线路健康度；具体失败仍由该账号的任务展示。
+  insertTask.run(
+    "task-health-user-key",
+    userId,
+    "failed",
+    "图像引擎请求失败 (502)：账号自备线路异常",
+    "provider",
+    "2026-08-18T06:00:00.000Z",
+    "2026-08-18T06:00:00.000Z",
+  );
+  sqlite.prepare("UPDATE generation_task SET key_source = 'user' WHERE id = 'task-health-user-key'").run();
+  const afterUserKeyFailure = latestImageProviderEvent();
+  assert.equal(
+    afterUserKeyFailure.message,
+    "图像引擎请求超时。",
+    "自备 Key 的账号失败不能覆盖服务器线路最近状态",
+  );
+
   sqlite.prepare("DELETE FROM generation_task WHERE id LIKE 'task-health-%'").run();
 }
 

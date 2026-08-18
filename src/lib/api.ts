@@ -2,12 +2,15 @@ import type {
   CreditLedgerEntry,
   GeneratedResult,
   GenerationMode,
+  ImageProviderOption,
   PaymentCapabilities,
   PaymentConfigStatus,
   PaymentOrder,
   PaymentProvider,
+  ProviderProtocol,
   RechargePackage,
   ReferenceImage,
+  ResolutionKey,
   StorageOverview,
   StudioSettings,
   UserAccount,
@@ -28,6 +31,15 @@ export interface ApiConfig {
   /** 服务器暂存成片的天数（服务端写死）。 */
   storageRetentionDays?: number;
   port: number;
+  imageProviders?: ImageProviderOption[];
+}
+
+export interface ImageProviderTestResponse {
+  ok: boolean;
+  label: string;
+  message: string;
+  providerId?: string;
+  keySource?: "user" | "server" | null;
 }
 
 export interface StorageAdminOverview {
@@ -89,6 +101,7 @@ export interface MeResponse {
   debugUnlimited?: boolean;
   paymentCapabilities: PaymentCapabilities;
   paymentConfig: PaymentConfigStatus;
+  imageProviders: ImageProviderOption[];
 }
 
 export interface AdminSummary {
@@ -100,17 +113,24 @@ export interface AdminSummary {
 }
 
 export interface ImageProviderSettings {
+  id: string;
+  name: string;
+  protocol: ProviderProtocol;
+  /** 这条线路本身最高能出到哪一档（1K / 2K / 4K）。 */
+  maxResolution?: ResolutionKey;
   baseUrl: string;
   model: string;
   baseUrlSource: "env" | "custom";
   modelSource: "env" | "custom";
   defaults: { baseUrl: string; model: string };
   updatedAt: string | null;
+  serverKeyConfigured?: boolean;
 }
 
 export interface AdminOverviewResponse {
   summary?: AdminSummary;
   imageProvider?: ImageProviderSettings;
+  imageProviders?: ImageProviderSettings[];
   users: UserAccount[];
   packages: RechargePackage[];
   orders: PaymentOrder[];
@@ -237,6 +257,14 @@ export async function fetchMe(): Promise<MeResponse> {
   return parseJson<MeResponse>(response);
 }
 
+export async function testMyImageProvider(): Promise<ImageProviderTestResponse> {
+  const response = await fetch("/api/me/image-provider/test", {
+    method: "POST",
+    credentials: "include",
+  });
+  return parseJson<ImageProviderTestResponse>(response);
+}
+
 export async function startDebugSession() {
   const response = await fetch("/api/debug/session", {
     method: "POST",
@@ -273,12 +301,22 @@ export async function signUpEmail(name: string, email: string, password: string)
   return parseJson(response);
 }
 
-export async function saveMyApiKey(apiKey: string) {
+export async function saveMyApiKey(apiKey: string, providerId?: string) {
   const response = await fetch("/api/me/api-key", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ apiKey }),
+    body: JSON.stringify({ apiKey, providerId }),
+  });
+  return parseJson<{ account: UserAccount }>(response);
+}
+
+export async function selectMyImageProvider(providerId: string) {
+  const response = await fetch("/api/me/image-provider", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ providerId }),
   });
   return parseJson<{ account: UserAccount }>(response);
 }
@@ -403,6 +441,7 @@ export async function createAdminUser(input: {
   apiKey?: string;
   unlimited?: boolean;
   credits?: number;
+  apiProviderId?: string;
 }) {
   const response = await fetch("/api/admin/users", {
     method: "POST",
@@ -413,7 +452,7 @@ export async function createAdminUser(input: {
   return parseJson<{ user: UserAccount }>(response);
 }
 
-export async function saveImageProvider(input: { baseUrl?: string; model?: string }) {
+export async function saveImageProvider(input: { providerId?: string; baseUrl?: string; model?: string }) {
   const response = await fetch("/api/admin/image-provider", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -423,22 +462,32 @@ export async function saveImageProvider(input: { baseUrl?: string; model?: strin
   return parseJson<{ imageProvider: ImageProviderSettings }>(response);
 }
 
-export async function resetImageProvider() {
-  const response = await fetch("/api/admin/image-provider", { method: "DELETE", credentials: "include" });
+export async function resetImageProvider(providerId = "default") {
+  const response = await fetch("/api/admin/image-provider", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ providerId }),
+  });
   return parseJson<{ imageProvider: ImageProviderSettings }>(response);
 }
 
-export async function testImageProvider() {
-  const response = await fetch("/api/admin/image-provider/test", { method: "POST", credentials: "include" });
-  return parseJson<{ ok: boolean; message: string }>(response);
+export async function testImageProvider(providerId = "default") {
+  const response = await fetch("/api/admin/image-provider/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ providerId }),
+  });
+  return parseJson<ImageProviderTestResponse>(response);
 }
 
-export async function setAdminUserApiKey(id: string, apiKey: string) {
+export async function setAdminUserApiKey(id: string, apiKey: string, providerId?: string) {
   const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}/api-key`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ apiKey }),
+    body: JSON.stringify({ apiKey, providerId }),
   });
   return parseJson<{ user: UserAccount }>(response);
 }

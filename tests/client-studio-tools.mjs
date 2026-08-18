@@ -30,6 +30,13 @@ assert.equal(outputSizeMismatch(portrait), "", "2:3 和 1024x1536 是一致的�
 
 // 9:16 实际按 1024x1536（2:3）交付——这个落差必须说出来，不能让用户以为拿到的是 9:16。
 const tall = ratioOptions.find((ratio) => ratio.id === "9-16");
+assert.equal(ratioOptions.length, 16, "自由生成要有 auto + 15 种文档比例");
+assert(ratioOptions.some((ratio) => ratio.label === "21:9"));
+assert.equal(outputSizeForRatio(tall, "fourK", "apimart").label, "2160 × 3840 px");
+// OpenAI 兼容线路（Packy）没有 resolution 这个参数：填 4K 也还是那一档，
+// 不能拿 APIMart 的尺寸表去报一个它出不来的像素。
+assert.equal(outputSizeForRatio(tall, "fourK").label, "1024 × 1536 px");
+assert.equal(outputSizeForRatio(tall, "fourK", "openai").label, "1024 × 1536 px");
 assert(outputSizeMismatch(tall).includes("1024×1536"), outputSizeMismatch(tall));
 
 /* ── 提示词原子 chip ─────────────────────────────────────────────────────── */
@@ -100,7 +107,13 @@ assert(studio.includes("references.find((reference) => !reference.previewUrl)"),
 
 // 2. 输出像素回显
 assert(parameters.includes("OutputSizeReadout"), "成片设置里要有输出像素回显");
-assert(simple.includes("outputSizeForRatio"), "自由创作也要显示输出像素");
+// 输出像素现在写在比例选择器上（按钮副标题 + 每一项），不再单独占一条高亮带。
+const ratioPicker = await fs.readFile("src/components/RatioPicker.tsx", "utf8");
+assert(ratioPicker.includes("outputSizeForRatio"), "自由创作也要显示输出像素");
+assert(simple.includes("protocol={capability.protocol}"), "输出像素要按当前线路算");
+// 比例改成自画的选择器：原生 select 的系统菜单只有一列数字，看不出横竖。
+assert(simple.includes("<RatioPicker"), "自由生成比例要用带示意图的选择器");
+assert(simple.includes("freeResolutionOptions") && simple.includes("onResolutionChange"), "自由生成要能选 1K / 2K / 4K");
 
 // 3. 参数锁定 + 只读摘要
 assert(studio.includes('useStoredState("clothdesign:settingsLocked", false)'), "锁定状态要留在本地");

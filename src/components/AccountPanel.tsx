@@ -1,8 +1,10 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { imageQualityLabel } from "../lib/imageQuality";
+import { resolutionShortLabels } from "../lib/resolution";
 import type {
   CreditLedgerEntry,
   GeneratedResult,
+  ImageProviderOption,
   PaymentCapabilities,
   PaymentOrder,
   PaymentProvider,
@@ -12,6 +14,7 @@ import type {
 
 interface AccountPanelProps {
   currentUser: UserAccount;
+  imageProviders: ImageProviderOption[];
   packages: RechargePackage[];
   orders: PaymentOrder[];
   ledger: CreditLedgerEntry[];
@@ -22,8 +25,9 @@ interface AccountPanelProps {
   onRecharge: (pkg: RechargePackage, provider: PaymentProvider) => void;
   onDemoComplete: (order: PaymentOrder) => void;
   /** 保存 / 清除账号自备的图像接口 Key。返回错误文案时留在原地提示。 */
-  onSaveApiKey?: (apiKey: string) => Promise<string | void>;
+  onSaveApiKey?: (apiKey: string, providerId: string) => Promise<string | void>;
   onClearApiKey?: () => Promise<string | void>;
+  onSelectImageProvider?: (providerId: string) => Promise<string | void>;
 }
 
 const providerLabels: Record<PaymentProvider, string> = {
@@ -40,6 +44,7 @@ const ledgerKindLabels: Record<string, string> = {
 
 export function AccountPanel({
   currentUser,
+  imageProviders,
   packages: packagesList,
   orders,
   ledger,
@@ -51,10 +56,14 @@ export function AccountPanel({
   onDemoComplete,
   onSaveApiKey,
   onClearApiKey,
+  onSelectImageProvider,
 }: AccountPanelProps) {
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [apiKeyBusy, setApiKeyBusy] = useState(false);
   const [apiKeyNotice, setApiKeyNotice] = useState("");
+  const [providerId, setProviderId] = useState(currentUser.apiProviderId || imageProviders[0]?.id || "default");
+  useEffect(() => setProviderId(currentUser.apiProviderId || imageProviders[0]?.id || "default"), [currentUser.apiProviderId, imageProviders]);
+  const selectedProvider = imageProviders.find((provider) => provider.id === providerId);
 
   const submitApiKey = async (event: FormEvent) => {
     event.preventDefault();
@@ -62,12 +71,25 @@ export function AccountPanel({
     setApiKeyBusy(true);
     setApiKeyNotice("");
     try {
-      const error = await onSaveApiKey(apiKeyDraft);
+      const error = await onSaveApiKey(apiKeyDraft, providerId);
       if (error) setApiKeyNotice(error);
       else {
         setApiKeyDraft("");
         setApiKeyNotice("已保存。之后的生成都走这把 Key，不再扣积分。");
       }
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
+  const selectProvider = async (nextProviderId: string) => {
+    setProviderId(nextProviderId);
+    setApiKeyNotice("");
+    if (!onSelectImageProvider) return;
+    setApiKeyBusy(true);
+    try {
+      const error = await onSelectImageProvider(nextProviderId);
+      setApiKeyNotice(error || `已切换到 ${imageProviders.find((provider) => provider.id === nextProviderId)?.name || "新接口"}。`);
     } finally {
       setApiKeyBusy(false);
     }
@@ -111,6 +133,16 @@ export function AccountPanel({
                 : "站点还没配置共享 Key。填入你自己的 Key 才能真实出图，否则只会得到演示占位图。"}
           </p>
           <form className="api-key-form" onSubmit={submitApiKey}>
+            <select
+              value={providerId}
+              onChange={(event) => void selectProvider(event.target.value)}
+              disabled={apiKeyBusy}
+              aria-label="图像接口 URL Base"
+            >
+              {imageProviders.map((provider) => (
+                <option value={provider.id} key={provider.id}>{provider.name}</option>
+              ))}
+            </select>
             <input
               type="password"
               value={apiKeyDraft}
@@ -130,6 +162,16 @@ export function AccountPanel({
               </button>
             ) : null}
           </form>
+          {selectedProvider ? (
+            <small className="api-provider-url">
+              URL Base：<code>{selectedProvider.baseUrl}</code> · 模型 <code>{selectedProvider.model}</code>
+              {/* 换线路会直接改变能选的分辨率，别让人换完才发现 4K 没了。 */}
+              {selectedProvider.maxResolution ? ` · 最高 ${resolutionShortLabels[selectedProvider.maxResolution]}` : ""}
+              {currentUser.maxResolutionSource === "account" && currentUser.maxResolution
+                ? `（管理员把这个账号压到 ${resolutionShortLabels[currentUser.maxResolution]}）`
+                : ""}
+            </small>
+          ) : null}
           {apiKeyNotice ? <small className="api-key-notice">{apiKeyNotice}</small> : null}
           <small className="muted-text">Key 加密保存在本站服务器上，页面上永远只显示前 3 位和后 4 位。</small>
         </section>

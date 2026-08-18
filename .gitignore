@@ -1,6 +1,8 @@
 # 本地依赖、构建产物和 API 密钥配置
 node_modules/
-dist/
+/dist
+.dist-releases/
+.dist-link-*
 .env
 .env.*
 !.env.example

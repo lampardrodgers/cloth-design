@@ -136,6 +136,9 @@ export function latestImageProviderEvent() {
          FROM generation_task
          WHERE status IN ('running', 'success', 'failed')
            AND (failure_source IS NULL OR failure_source <> 'system')
+           -- 账号自备 Key 的成功/失败只属于该账号，不能把全站顶栏打成异常。
+           -- 顶栏这里是全局服务器线路健康度；自备 Key 的具体错误仍会留在任务里。
+           AND (key_source IS NULL OR key_source = 'server')
          ORDER BY updated_at DESC
          LIMIT 1`,
       )

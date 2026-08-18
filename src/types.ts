@@ -19,6 +19,7 @@ export type ReferenceRole =
   | "style";
 
 export type ResolutionKey = "native" | "hd" | "fourK";
+export type ProviderProtocol = "openai" | "apimart";
 export type QualityKey = "auto" | "low" | "medium" | "high";
 export type OutputFormat = "png" | "jpeg" | "webp";
 export type BackgroundMode = "auto" | "opaque" | "transparent";
@@ -80,7 +81,7 @@ export interface PendingCanvasImage {
 export interface RatioOption {
   id: string;
   label: string;
-  apiSize: "auto" | "1024x1024" | "1024x1536" | "1536x1024";
+  apiSize: string;
   width: number;
   height: number;
   allowedResolutions: ResolutionKey[];
@@ -216,10 +217,43 @@ export interface UserAccount {
   hasOwnApiKey?: boolean;
   apiKeyHint?: string | null;
   apiKeyUpdatedAt?: string | null;
+  /** 这把自备 Key（或共享 Key）要配对的 URL Base。 */
+  apiProviderId?: string;
+  /** 当前线路的显示名和协议，界面上要照实说是哪条线。 */
+  apiProviderName?: string;
+  apiProviderProtocol?: ProviderProtocol;
+  /** 这个账号最高能出到哪一档（线路能力与后台上限取低）。 */
+  maxResolution?: ResolutionKey;
+  /** 后台按账号设的上限原值；空串 = 跟随线路。 */
+  maxResolutionSetting?: ResolutionKey | "";
+  /** 上限是线路给的（provider）还是后台压的（account）。 */
+  maxResolutionSource?: "provider" | "account";
   /** 服务端 .env 里有没有共享 Key，账户页据此解释「不填也能用」。 */
   serverKeyConfigured?: boolean;
   /** 后台用量汇总（只在管理员总览里出现）。 */
   usage?: AccountUsage;
+}
+
+export interface ImageProviderOption {
+  id: string;
+  name: string;
+  protocol: ProviderProtocol;
+  baseUrl: string;
+  model: string;
+  /** 这条线路本身最高能出到哪一档。 */
+  maxResolution?: ResolutionKey;
+  serverKeyConfigured?: boolean;
+}
+
+/**
+ * 当前账号的出图能力：分辨率能点到哪一档、像素怎么算，都看这个。
+ * 由服务端按「线路能力 + 后台按账号设的上限」算好后下发。
+ */
+export interface ProviderCapability {
+  providerName: string;
+  protocol: ProviderProtocol;
+  maxResolution: ResolutionKey;
+  maxResolutionSource: "provider" | "account";
 }
 
 export interface RechargePackage {

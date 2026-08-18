@@ -1,18 +1,29 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
-import { ratioOptions } from "../data/catalog";
-import { outputSizeForRatio } from "../lib/outputSize";
+import { freeResolutionOptions } from "../data/catalog";
 import { isPlaceholderImage } from "../lib/providerMode";
 import { attachmentUsageLabels } from "../lib/freeStudio";
+import { isResolutionAllowed, resolutionLimitNote, resolutionOptionTitle } from "../lib/resolution";
 import { formatResultTime, resultFileName } from "../lib/resultFiles";
-import type { AttachmentUsage, FreeAttachment, GeneratedResult, SubmissionRecord } from "../types";
+import type {
+  AttachmentUsage,
+  FreeAttachment,
+  GeneratedResult,
+  ProviderCapability,
+  ResolutionKey,
+  SubmissionRecord,
+} from "../types";
 import { AttachmentStrip } from "./AttachmentStrip";
 import { PromptChipBar, usePromptChips } from "./PromptChips";
+import { RatioPicker } from "./RatioPicker";
 import { NumberStepper } from "./ui";
 
 interface SimpleComposerProps {
   prompt: string;
   attachments: FreeAttachment[];
   ratioId: string;
+  resolution: ResolutionKey;
+  /** 当前账号走的哪条线路、最高能开到几 K。 */
+  capability: ProviderCapability;
   quantity: number;
   cost: number;
   credits: number;
@@ -29,6 +40,7 @@ interface SimpleComposerProps {
   onUsageChange: (id: string, usage: AttachmentUsage) => void;
   onRemoveAttachment: (id: string) => void;
   onRatioChange: (ratioId: string) => void;
+  onResolutionChange: (resolution: ResolutionKey) => void;
   onQuantityChange: (quantity: number) => void;
   onGenerate: () => void;
   onUseAsAttachment: (result: GeneratedResult) => void;
@@ -42,6 +54,8 @@ export function SimpleComposer({
   prompt,
   attachments,
   ratioId,
+  resolution,
+  capability,
   quantity,
   cost,
   credits,
@@ -55,6 +69,7 @@ export function SimpleComposer({
   onUsageChange,
   onRemoveAttachment,
   onRatioChange,
+  onResolutionChange,
   onQuantityChange,
   onGenerate,
   onUseAsAttachment,
@@ -67,9 +82,7 @@ export function SimpleComposer({
   const [promptOpen, setPromptOpen] = useState(false);
   const [dropActive, setDropActive] = useState(false);
 
-  const nativeRatios = ratioOptions.filter((ratio) => ratio.native);
-  const ratio = ratioOptions.find((item) => item.id === ratioId) ?? ratioOptions[0];
-  const outputSize = outputSizeForRatio(ratio);
+  const resolutionNote = resolutionLimitNote(capability);
   const hasEnoughCredits = cost <= credits;
   const isGenerating = pendingCount > 0;
   // 提交后描述会被清空，按钮自然就灰了，所以不用再拿「正在生成」锁住整块表单——
@@ -179,7 +192,7 @@ export function SimpleComposer({
               aria-label="画面描述"
               rows={4}
               value={prompt}
-              placeholder="例如：一件米白色羊毛大衣挂在木质衣架上，晨光从侧面打进来，背景是安静的水泥墙。"
+              placeholder="例如：黄昏的城市天台，一只橘猫蹲在栏杆上看远处的高楼，光线很柔。人物、产品、风景、插画、海报都行，想到什么写什么。"
               onKeyDown={handleKeyDown}
               {...chips.textareaProps}
             />
@@ -199,19 +212,30 @@ export function SimpleComposer({
           <div className="simple-controls">
             <div className="simple-control">
               <span className="rail-kicker">比例</span>
-              <div className="chip-group chip-sm" role="radiogroup" aria-label="画面比例">
-                {nativeRatios.map((option) => (
-                  <button
-                    type="button"
-                    key={option.id}
-                    role="radio"
-                    aria-checked={option.id === ratioId}
-                    className={option.id === ratioId ? "chip selected" : "chip"}
-                    onClick={() => onRatioChange(option.id)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
+              <RatioPicker value={ratioId} resolution={resolution} protocol={capability.protocol} onChange={onRatioChange} />
+            </div>
+
+            <div className="simple-control">
+              <span className="rail-kicker">分辨率</span>
+              {/* 线路开不到的档位照样列出来但点不动：藏起来只会让人以为功能没了。 */}
+              <div className="chip-group chip-sm" role="radiogroup" aria-label="输出分辨率">
+                {freeResolutionOptions.map((option) => {
+                  const allowed = isResolutionAllowed(option.id, capability.maxResolution);
+                  return (
+                    <button
+                      type="button"
+                      key={option.id}
+                      role="radio"
+                      aria-checked={option.id === resolution}
+                      disabled={!allowed}
+                      title={resolutionOptionTitle(option.id, capability)}
+                      className={option.id === resolution ? "chip selected" : "chip"}
+                      onClick={() => onResolutionChange(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -221,10 +245,8 @@ export function SimpleComposer({
             </div>
           </div>
 
-          <div className={`output-size ${outputSize.auto ? "auto" : ""}`}>
-            <span>输出像素</span>
-            <strong>{outputSize.label}</strong>
-          </div>
+          {/* 说明单独占一行：塞进分辨率那一列会把「张数」挤歪。 */}
+          {resolutionNote ? <p className="simple-controls-note">{resolutionNote}</p> : null}
 
           {/* 状态在左、按钮钉右：状态文案和「N 张生成中」长短变化都不会推着生成按钮乱跑。 */}
           <div className="simple-submit">

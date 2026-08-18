@@ -1,17 +1,90 @@
 import { nowIso, sqlite } from "./db.mjs";
 
 /**
- * 图像接口的地址和模型名。
- * `.env` 里的值是默认值；管理员在后台改过之后覆盖值落在 app_config 里，
- * 改完立刻生效，不用重启服务。清空即回到 .env 的默认值。
+ * 多图像供应商配置。default 保留原 OPENAI_* / Packy 配置和旧数据库 key；
+ * apimart 使用独立的 APIMART_* 环境变量。账号只保存 provider id，Key 与
+ * URL Base 在服务端按同一个 id 配对，避免把 A 供应商的 Key 发给 B。
  */
+const PROVIDER_DEFINITIONS = Object.freeze({
+  default: {
+    id: "default",
+    name: "Packy / OpenAI 兼容接口",
+    protocol: "openai",
+    configKey: "imageProvider",
+    baseUrlEnv: ["OPENAI_BASE_URL", "OPENAI_API_BASE_URL", "PACKY_API_BASE_URL"],
+    modelEnv: "OPENAI_IMAGE_MODEL",
+    keyEnv: "OPENAI_API_KEY",
+    defaultBaseUrl: "https://api.openai.com",
+    defaultModel: "gpt-image-2",
+    // OpenAI 兼容协议没有 resolution 这个参数，出图就是 1024/1536 那一档，
+    // 再给用户 2K / 4K 只会多扣积分却拿到同样的图。
+    maxResolution: "native",
+  },
+  apimart: {
+    id: "apimart",
+    name: "APIMart",
+    protocol: "apimart",
+    configKey: "imageProvider:apimart",
+    baseUrlEnv: ["APIMART_BASE_URL"],
+    modelEnv: "APIMART_IMAGE_MODEL",
+    keyEnv: "APIMART_API_KEY",
+    defaultBaseUrl: "https://api.apimart.ai/v1",
+    defaultModel: "gpt-image-2",
+    // APIMart 的 /images/generations 接受 resolution=1k|2k|4k。
+    maxResolution: "fourK",
+  },
+});
 
-const CONFIG_KEY = "imageProvider";
-const DEFAULT_BASE_URL = "https://api.openai.com";
-const DEFAULT_MODEL = "gpt-image-2";
+const caches = new Map();
 
-// 每个请求都要用，做一层内存缓存；写入时主动失效。
-let cache = null;
+/** 分辨率档位从低到高；1K = native、2K = hd、4K = fourK。 */
+export const RESOLUTION_KEYS = Object.freeze(["native", "hd", "fourK"]);
+
+export const RESOLUTION_LABELS = Object.freeze({ native: "1K", hd: "2K", fourK: "4K" });
+
+export function normalizeResolution(raw, fallback = "native") {
+  const value = String(raw ?? "").trim();
+  return RESOLUTION_KEYS.includes(value) ? value : fallback;
+}
+
+/** 取「请求档位」和「上限」里低的那个。 */
+export function clampResolution(value, cap) {
+  const requested = RESOLUTION_KEYS.indexOf(normalizeResolution(value));
+  const limit = RESOLUTION_KEYS.indexOf(normalizeResolution(cap));
+  return RESOLUTION_KEYS[Math.min(requested, limit)];
+}
+
+export function providerMaxResolution(providerId = "default") {
+  return definitionFor(providerId).maxResolution;
+}
+
+/**
+ * 这个账号实际能开到多高：先看线路本身给不给，再看管理员有没有按账号往下压。
+ * 账号上限只能压低、压不高——线路出不来的档位，后台点了也没用。
+ */
+export function effectiveMaxResolution(providerId, accountLimit) {
+  const providerCap = providerMaxResolution(providerId);
+  const raw = String(accountLimit ?? "").trim();
+  if (!raw) return providerCap;
+  return clampResolution(raw, providerCap);
+}
+
+/** 上限是线路给的还是后台按账号压的——UI 要照实说清楚是哪一种。 */
+export function maxResolutionSource(providerId, accountLimit) {
+  const providerCap = providerMaxResolution(providerId);
+  const raw = normalizeResolution(accountLimit, "");
+  if (!raw) return "provider";
+  return RESOLUTION_KEYS.indexOf(raw) < RESOLUTION_KEYS.indexOf(providerCap) ? "account" : "provider";
+}
+
+export function normalizeProviderId(raw, fallback = "default") {
+  const value = String(raw || "").trim();
+  return Object.hasOwn(PROVIDER_DEFINITIONS, value) ? value : fallback;
+}
+
+export function isValidProviderId(raw) {
+  return Object.hasOwn(PROVIDER_DEFINITIONS, String(raw || "").trim());
+}
 
 export function normalizeBaseUrl(raw) {
   const value = String(raw ?? "").trim();
@@ -22,11 +95,8 @@ export function normalizeBaseUrl(raw) {
   } catch {
     return { error: "接口地址不是合法的 URL，要带 http:// 或 https://。" };
   }
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    return { error: "接口地址只支持 http 或 https。" };
-  }
+  if (!["http:", "https:"].includes(parsed.protocol)) return { error: "接口地址只支持 http 或 https。" };
   if (!parsed.hostname) return { error: "接口地址缺少域名。" };
-  // 统一收敛成 .../v1，和原来 .env 的处理保持一致：填根地址或 /v1 都行
   const trimmed = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, "");
   return { value: trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1` };
 }
@@ -39,19 +109,23 @@ export function normalizeModel(raw) {
   return { value };
 }
 
-/** .env 里的默认值（后台「恢复默认」就是回到这里）。 */
-export function envImageProvider() {
-  const raw =
-    process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE_URL || process.env.PACKY_API_BASE_URL || DEFAULT_BASE_URL;
-  const normalized = normalizeBaseUrl(raw);
+function definitionFor(providerId = "default") {
+  return PROVIDER_DEFINITIONS[normalizeProviderId(providerId)];
+}
+
+export function envImageProvider(providerId = "default") {
+  const definition = definitionFor(providerId);
+  const rawBaseUrl = definition.baseUrlEnv.map((name) => process.env[name]).find((value) => String(value || "").trim());
+  const normalized = normalizeBaseUrl(rawBaseUrl || definition.defaultBaseUrl);
   return {
-    baseUrl: normalized.value || `${DEFAULT_BASE_URL}/v1`,
-    model: (process.env.OPENAI_IMAGE_MODEL || "").trim() || DEFAULT_MODEL,
+    baseUrl: normalized.value || normalizeBaseUrl(definition.defaultBaseUrl).value,
+    model: String(process.env[definition.modelEnv] || "").trim() || definition.defaultModel,
   };
 }
 
-function readOverride() {
-  const row = sqlite.prepare("SELECT value_json FROM app_config WHERE key = ?").get(CONFIG_KEY);
+function readOverride(providerId = "default") {
+  const definition = definitionFor(providerId);
+  const row = sqlite.prepare("SELECT value_json FROM app_config WHERE key = ?").get(definition.configKey);
   if (!row) return {};
   try {
     const parsed = JSON.parse(row.value_json);
@@ -61,12 +135,18 @@ function readOverride() {
   }
 }
 
-/** 当前实际生效的地址和模型，以及每一项是来自 .env 还是后台改过的。 */
-export function imageProviderSettings() {
-  if (cache) return cache;
-  const fallback = envImageProvider();
-  const override = readOverride();
-  cache = {
+/** 当前某个供应商实际生效的安全配置（永不包含 Key）。 */
+export function imageProviderSettings(providerId = "default") {
+  const id = normalizeProviderId(providerId);
+  if (caches.has(id)) return caches.get(id);
+  const definition = definitionFor(id);
+  const fallback = envImageProvider(id);
+  const override = readOverride(id);
+  const settings = {
+    id,
+    name: definition.name,
+    protocol: definition.protocol,
+    maxResolution: definition.maxResolution,
     baseUrl: override.baseUrl || fallback.baseUrl,
     model: override.model || fallback.model,
     baseUrlSource: override.baseUrl ? "custom" : "env",
@@ -74,26 +154,37 @@ export function imageProviderSettings() {
     defaults: fallback,
     updatedAt: override.updatedAt || null,
   };
-  return cache;
+  caches.set(id, settings);
+  return settings;
 }
 
-export function imageApiBaseUrl() {
-  return imageProviderSettings().baseUrl;
+export function imageProviderSettingsList() {
+  return Object.keys(PROVIDER_DEFINITIONS).map((id) => imageProviderSettings(id));
 }
 
-export function imageApiModel() {
-  return imageProviderSettings().model;
+export function imageApiBaseUrl(providerId = "default") {
+  return imageProviderSettings(providerId).baseUrl;
 }
 
-/** 拼出具体端点，例如 /images/generations。 */
-export function imageApiUrl(pathname) {
-  return `${imageApiBaseUrl()}/${String(pathname).replace(/^\/+/, "")}`;
+export function imageApiModel(providerId = "default") {
+  return imageProviderSettings(providerId).model;
 }
 
-/** 传空字符串表示这一项恢复成 .env 的默认值。 */
-export function saveImageProviderSettings({ baseUrl, model }) {
-  const override = readOverride();
-  const fallback = envImageProvider();
+export function imageApiUrl(pathname, providerId = "default") {
+  return `${imageApiBaseUrl(providerId)}/${String(pathname).replace(/^\/+/, "")}`;
+}
+
+export function providerKeyEnv(providerId = "default") {
+  return definitionFor(providerId).keyEnv;
+}
+
+/** 传空字符串表示这一项恢复成该供应商对应的 .env 默认值。 */
+export function saveImageProviderSettings({ providerId = "default", baseUrl, model }) {
+  const id = normalizeProviderId(providerId, "");
+  if (!id) return { error: "图像供应商不存在。" };
+  const definition = definitionFor(id);
+  const override = readOverride(id);
+  const fallback = envImageProvider(id);
   const next = { ...override };
 
   if (baseUrl !== undefined) {
@@ -102,7 +193,6 @@ export function saveImageProviderSettings({ baseUrl, model }) {
     else {
       const normalized = normalizeBaseUrl(raw);
       if (normalized.error) return { error: normalized.error };
-      // 和 .env 里一样就不记成覆盖，否则「来自 .env / 后台已改」的标签会说谎
       if (normalized.value === fallback.baseUrl) delete next.baseUrl;
       else next.baseUrl = normalized.value;
     }
@@ -120,7 +210,7 @@ export function saveImageProviderSettings({ baseUrl, model }) {
 
   const timestamp = nowIso();
   if (!next.baseUrl && !next.model) {
-    sqlite.prepare("DELETE FROM app_config WHERE key = ?").run(CONFIG_KEY);
+    sqlite.prepare("DELETE FROM app_config WHERE key = ?").run(definition.configKey);
   } else {
     next.updatedAt = timestamp;
     sqlite
@@ -128,19 +218,21 @@ export function saveImageProviderSettings({ baseUrl, model }) {
         `INSERT INTO app_config (key, value_json, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
       )
-      .run(CONFIG_KEY, JSON.stringify(next), timestamp);
+      .run(definition.configKey, JSON.stringify(next), timestamp);
   }
-  cache = null;
-  return { settings: imageProviderSettings() };
+  caches.delete(id);
+  return { settings: imageProviderSettings(id) };
 }
 
-export function resetImageProviderSettings() {
-  sqlite.prepare("DELETE FROM app_config WHERE key = ?").run(CONFIG_KEY);
-  cache = null;
-  return imageProviderSettings();
+export function resetImageProviderSettings(providerId = "default") {
+  const id = normalizeProviderId(providerId, "");
+  if (!id) return null;
+  sqlite.prepare("DELETE FROM app_config WHERE key = ?").run(definitionFor(id).configKey);
+  caches.delete(id);
+  return imageProviderSettings(id);
 }
 
-/** 测试用：让单元测试能清掉内存缓存。 */
-export function invalidateImageProviderCache() {
-  cache = null;
+export function invalidateImageProviderCache(providerId) {
+  if (providerId === undefined) caches.clear();
+  else caches.delete(normalizeProviderId(providerId));
 }

@@ -16,7 +16,7 @@ import { generatedVideoStaticMount } from "./video-provider.mjs";
 import { migrateWorkflowDatabase, registerWorkflowRoutes } from "./workflows.mjs";
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
 import { resolveProviderApiKey } from "./user-keys.mjs";
-import { imageApiModel, imageApiUrl, imageProviderSettings } from "./provider-config.mjs";
+import { clampResolution, imageApiUrl, imageProviderSettings, imageProviderSettingsList, normalizeResolution } from "./provider-config.mjs";
 import { SERVER_RETENTION_DAYS, autoArchiveTaskResults, scheduleStorageMaintenance } from "./storage.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -73,32 +73,34 @@ app.post("/api/payments/wechat/notify", express.raw({ type: "application/json", 
 
 app.use(express.json({ limit: "25mb" }));
 
-function hasOpenAIKey() {
-  return Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim().length > 0);
+function hasServerImageKey() {
+  return imageProviderSettingsList().some((provider) => Boolean(process.env[provider.id === "apimart" ? "APIMART_API_KEY" : "OPENAI_API_KEY"]?.trim()));
 }
 
 /** 有没有可用的 Key：账号自备的也算。没传 apiKey 时只看服务端 .env。 */
-function isDemoMode(apiKey = process.env.OPENAI_API_KEY) {
-  return process.env.OPENAI_DEMO_MODE === "true" || !String(apiKey || "").trim();
+function isDemoMode(apiKey) {
+  const ready = apiKey === undefined ? hasServerImageKey() : Boolean(String(apiKey || "").trim());
+  return process.env.OPENAI_DEMO_MODE === "true" || !ready;
 }
 
 function imageRequestTimeoutMs() {
   return timeoutMsFromEnv("OPENAI_IMAGE_TIMEOUT_MS", 180000);
 }
 
-function publicConfig() {
-  const mode = isDemoMode() ? "demo" : "live";
-  const providerReady = hasOpenAIKey();
+function publicConfig(apiKey, provider = imageProviderSettings()) {
+  const mode = isDemoMode(apiKey) ? "demo" : "live";
+  const providerReady = apiKey === undefined ? hasServerImageKey() : Boolean(String(apiKey || "").trim());
   return {
     mode,
     providerReady,
-    imageModelConfigured: Boolean(imageProviderSettings().model),
+    imageModelConfigured: Boolean(provider.model),
     authEnabled: true,
     selfSignupAllowed: selfSignupAllowed(),
     debugUnlimitedAvailable: debugUnlimitedAvailable(),
     storageRetentionDays: SERVER_RETENTION_DAYS,
     port,
     providerHealth: imageProviderHealth({ mode, providerReady }),
+    imageProviders: imageProviderSettingsList().map(({ id, name, protocol, maxResolution, baseUrl, model }) => ({ id, name, protocol, maxResolution, baseUrl, model })),
   };
 }
 
@@ -164,8 +166,26 @@ function normalizePayload(rawPayload) {
     outputFormat: format,
     outputCompression: Number(settings.compression || 100),
     inputFidelity: settings.inputFidelity === "high" ? "high" : "low",
-    resolution: settings.resolution || "native",
+    resolution: normalizeResolution(settings.resolution),
+    apiResolution: apiResolutionOf(settings.resolution),
   };
+}
+
+/** 内部档位名换成接口认的写法。 */
+function apiResolutionOf(resolution) {
+  return normalizeResolution(resolution) === "fourK" ? "4k" : normalizeResolution(resolution) === "hd" ? "2k" : "1k";
+}
+
+/**
+ * 出图前按账号上限裁一刀：线路给不了的档位不能提交，也不能按那个档位计费。
+ * 前端已经把超限的档位禁掉了，这里是老页面 / 直接打接口的兜底。
+ */
+function applyResolutionLimit(payload, maxResolution) {
+  const capped = clampResolution(payload.resolution, maxResolution);
+  if (capped === payload.resolution) return payload;
+  payload.resolution = capped;
+  payload.apiResolution = apiResolutionOf(capped);
+  return payload;
 }
 
 function validateGenerationPayload(payload) {
@@ -361,14 +381,21 @@ async function parseOpenAIResponse(response, outputFormat, targetSize, outputCom
     throw new Error(summarizeImagesApiError(response.status, text));
   }
   const data = await response.json();
-  const mime = mimeForFormat(outputFormat);
   const items = Array.isArray(data.data) ? data.data : [];
   if (items.length === 0) {
     throw new Error("图像引擎没有返回图片。");
   }
+  return persistApiImageItems(items, { outputFormat, targetSize, outputCompression });
+}
+
+async function persistApiImageItems(items, { outputFormat = "png", targetSize, outputCompression } = {}) {
   return Promise.all(
     items.map(async (item, index) => {
-      const persisted = await persistGeneratedImage(item, { fallbackMimeType: mime, targetSize, outputCompression });
+      const persisted = await persistGeneratedImage(item, {
+        fallbackMimeType: mimeForFormat(outputFormat),
+        targetSize,
+        outputCompression,
+      });
       return {
         ...persisted,
         qualityGate: imageQualityGate(persisted.imageInspection),
@@ -379,8 +406,84 @@ async function parseOpenAIResponse(response, outputFormat, targetSize, outputCom
   );
 }
 
-async function callOpenAIImages(payload, files, apiKey = process.env.OPENAI_API_KEY) {
-  const model = imageApiModel();
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function apimartResultItems(task) {
+  const images = Array.isArray(task?.result?.images) ? task.result.images : [];
+  return images.flatMap((image) => {
+    const urls = Array.isArray(image?.url) ? image.url : image?.url ? [image.url] : [];
+    return urls.map((url) => ({ url }));
+  });
+}
+
+async function callApimartImages(payload, files, apiKey, provider) {
+  const headers = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+  const results = [];
+  for (let index = 0; index < Math.max(1, payload.quantity); index += 1) {
+    const body = {
+      model: provider.model,
+      prompt: payload.prompt,
+      n: 1,
+      size: payload.size === "auto" ? "auto" : payload.ratioLabel || "1:1",
+      resolution: payload.apiResolution,
+    };
+    if (files.length > 0) {
+      body.image_urls = files.map((file) => {
+        if (file.buffer.length > 20 * 1024 * 1024) throw new Error("APIMart 单张参考图不能超过 20MB。");
+        return `data:${file.mimetype || "image/png"};base64,${file.buffer.toString("base64")}`;
+      });
+    }
+    const submitted = await fetchWithTimeout(imageApiUrl("/images/generations", provider.id), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    }, {
+      timeoutMs: imageRequestTimeoutMs(),
+      timeoutMessage: "APIMart 图像任务提交超时。",
+    });
+    if (!submitted.ok) {
+      const text = await submitted.text();
+      throw new Error(summarizeImagesApiError(submitted.status, text));
+    }
+    const submitData = await submitted.json();
+    const taskId = submitData?.data?.[0]?.task_id;
+    if (!taskId) throw new Error("APIMart 没有返回任务 ID。");
+
+    const deadline = Date.now() + imageRequestTimeoutMs();
+    let task = null;
+    while (Date.now() < deadline) {
+      await wait(1500);
+      const statusResponse = await fetchWithTimeout(
+        `${imageApiUrl(`/tasks/${encodeURIComponent(taskId)}`, provider.id)}?language=zh`,
+        { headers: { Authorization: `Bearer ${apiKey}` } },
+        { timeoutMs: Math.max(100, deadline - Date.now()), timeoutMessage: "APIMart 图像任务查询超时。" },
+      );
+      if (!statusResponse.ok) {
+        const text = await statusResponse.text();
+        throw new Error(summarizeImagesApiError(statusResponse.status, text));
+      }
+      task = (await statusResponse.json())?.data;
+      if (["failed", "cancelled"].includes(task?.status)) {
+        throw new Error(`APIMart 图像任务失败：${task?.error?.message || task?.status || "未知错误"}`);
+      }
+      if (task?.status === "completed") break;
+    }
+    if (task?.status !== "completed") throw new Error("APIMart 图像任务等待超时。");
+    const items = apimartResultItems(task);
+    if (items.length === 0) throw new Error("APIMart 图像任务完成但没有返回图片。");
+    results.push(...(await persistApiImageItems(items, {
+      outputFormat: payload.outputFormat,
+      outputCompression: payload.outputCompression,
+    })));
+  }
+  return results.map((result, index) => ({ ...result, index }));
+}
+
+async function callOpenAIImages(payload, files, apiKey, provider) {
+  if (provider.protocol === "apimart") return callApimartImages(payload, files, apiKey, provider);
+  const model = provider.model;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
   };
@@ -408,7 +511,7 @@ async function callOpenAIImages(payload, files, apiKey = process.env.OPENAI_API_
         form.append("image", blob, file.originalname || "reference.png");
       }
 
-      const response = await fetchWithTimeout(imageApiUrl("/images/edits"), {
+      const response = await fetchWithTimeout(imageApiUrl("/images/edits", provider.id), {
         method: "POST",
         headers,
         body: form,
@@ -435,7 +538,7 @@ async function callOpenAIImages(payload, files, apiKey = process.env.OPENAI_API_
       body.output_compression = payload.outputCompression;
     }
 
-    const response = await fetchWithTimeout(imageApiUrl("/images/generations"), {
+    const response = await fetchWithTimeout(imageApiUrl("/images/generations", provider.id), {
       method: "POST",
       headers: {
         ...headers,
@@ -463,6 +566,7 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
   let taskId = "";
   let account = null;
   let cost = 0;
+  let providerKey = null;
   try {
     account = await requireAccount(req, res);
     if (!account) return;
@@ -479,7 +583,8 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
     const files = await orderedReferenceFiles(payload, Array.isArray(req.files) ? req.files : []);
     taskId = `task-${Date.now()}`;
     // 账号自备 Key 的请求接口费用是他们自己的，不再扣积分；用服务端 Key 才计费。
-    const providerKey = resolveProviderApiKey(account.user.id);
+    providerKey = resolveProviderApiKey(account.user.id);
+    applyResolutionLimit(payload, providerKey.maxResolution);
     const ownKey = providerKey.source === "user";
     cost = ownKey ? 0 : estimateCredits(payload);
 
@@ -502,13 +607,16 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
         failureSource: "system",
       });
       res.status(402).json({
-        ...publicConfig(),
+        ...publicConfig(providerKey.apiKey, providerKey.provider),
         error: error instanceof Error ? error.message : "积分余额不足。",
       });
       return;
     }
 
     if (isDemoMode(providerKey.apiKey)) {
+      const demoMessage = process.env.OPENAI_DEMO_MODE === "true"
+        ? "演示模式已开启，未调用图像引擎。"
+        : `${providerKey.provider.name} 未配置可用 API Key，已使用演示模式。`;
       const results = Array.from({ length: payload.quantity }, (_, index) => ({
         imageUrl: createDemoImage({
           mode: payload.mode,
@@ -522,23 +630,25 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
         id: taskId,
         status: "success",
         credits: cost,
-        message: hasOpenAIKey() ? "演示模式已开启，未调用图像引擎。" : "未配置 OPENAI_API_KEY，已使用演示模式。",
+        message: demoMessage,
       });
       insertGeneratedResults({ userId: account.user.id, taskId, payload, results, cost });
       const profile = sqlite.prepare("SELECT * FROM user_profile WHERE user_id = ?").get(account.user.id);
       res.json({
-        ...publicConfig(),
+        ...publicConfig(providerKey.apiKey, providerKey.provider),
         results,
         taskId,
         credits: cost,
         account: serializeAccount(account.user, profile),
-        message: hasOpenAIKey() ? "演示模式已开启，未调用图像引擎。" : "未配置 OPENAI_API_KEY，已使用演示模式。",
+        message: demoMessage,
       });
       return;
     }
 
-    const results = await callOpenAIImages(payload, files, providerKey.apiKey);
-    const doneMessage = ownKey ? "图像引擎已返回结果（自备 Key，未扣积分）。" : "图像引擎已返回结果。";
+    const results = await callOpenAIImages(payload, files, providerKey.apiKey, providerKey.provider);
+    const doneMessage = ownKey
+      ? `${providerKey.provider.name} 已返回结果（自备 Key，未扣积分）。`
+      : `${providerKey.provider.name} 已返回结果。`;
     updateGenerationTask({
       id: taskId,
       status: "success",
@@ -550,7 +660,7 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
     void autoArchiveTaskResults(account.user.id, taskId).catch((error) => console.warn("[storage] auto archive", error));
     const profile = sqlite.prepare("SELECT * FROM user_profile WHERE user_id = ?").get(account.user.id);
     res.json({
-      ...publicConfig(),
+      ...publicConfig(providerKey.apiKey, providerKey.provider),
       results,
       taskId,
       credits: cost,
@@ -586,7 +696,7 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
     }
     const status = !taskId && error instanceof Error && /^参考图/.test(error.message) ? 400 : 500;
     res.status(status).json({
-      ...publicConfig(),
+      ...publicConfig(providerKey?.apiKey, providerKey?.provider),
       error: error instanceof Error ? error.message : "Unknown generation error",
     });
   }

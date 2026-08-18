@@ -1,9 +1,19 @@
 import { ratioOptions, resolutionOptions } from "../data/catalog";
 import { outputSizeForRatio, outputSizeMismatch } from "../lib/outputSize";
-import type { BackgroundMode, ModerationMode, OutputFormat, QualityKey, StudioSettings } from "../types";
+import { isResolutionAllowed, resolutionLimitNote } from "../lib/resolution";
+import type {
+  BackgroundMode,
+  ModerationMode,
+  OutputFormat,
+  ProviderCapability,
+  QualityKey,
+  StudioSettings,
+} from "../types";
 
 interface ParameterPanelProps {
   settings: StudioSettings;
+  /** 当前账号的线路能力：出不来的清晰度档位不给选。 */
+  capability: ProviderCapability;
   onChange: (patch: Partial<StudioSettings>) => void;
   /** 专家模式下展开压缩、审核与身份保持等专业项。 */
   showAdvanced: boolean;
@@ -91,6 +101,7 @@ function OutputSizeReadout({ settings }: { settings: StudioSettings }) {
 
 export function ParameterPanel({
   settings,
+  capability,
   onChange,
   showAdvanced,
   onExpandAdvanced,
@@ -151,9 +162,12 @@ export function ParameterPanel({
             onChange={(event) => onChange({ resolution: event.target.value as StudioSettings["resolution"] })}
           >
             {resolutionOptions.map((option) => (
-              <option value={option.id} key={option.id}>{resolutionCopy[option.id]}</option>
+              <option value={option.id} key={option.id} disabled={!isResolutionAllowed(option.id, capability.maxResolution)}>
+                {resolutionCopy[option.id]}
+              </option>
             ))}
           </select>
+          {resolutionLimitNote(capability) ? <small className="field-note">{resolutionLimitNote(capability)}</small> : null}
         </label>
 
         <label className="field">

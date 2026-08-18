@@ -13,6 +13,8 @@ export const userProfile = sqliteTable("user_profile", {
   apiKeyEncrypted: text("api_key_encrypted"),
   apiKeyHint: text("api_key_hint"),
   apiKeyUpdatedAt: text("api_key_updated_at"),
+  apiProviderId: text("api_provider_id").notNull(),
+  maxResolution: text("max_resolution"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

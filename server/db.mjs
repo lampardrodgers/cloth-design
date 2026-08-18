@@ -226,6 +226,14 @@ function createBusinessTables() {
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_hint TEXT");
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_key_updated_at TEXT");
   }
+  if (!profileColumns.has("api_provider_id")) {
+    // 老账号继续使用原来的 Packy / OpenAI 兼容地址；新账号也从这个安全默认值开始。
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN api_provider_id TEXT NOT NULL DEFAULT 'default'");
+  }
+  if (!profileColumns.has("max_resolution")) {
+    // 后台按账号压的分辨率上限。空 = 跟随线路本身能力（Packy 只有 1K，APIMart 到 4K）。
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN max_resolution TEXT");
+  }
 
   // 后台只认 owner（部署时建的 admin 账号）。早期用下拉框提成 admin 的账号一律降回普通用户。
   sqlite.prepare("UPDATE user_profile SET role = 'user', updated_at = ? WHERE role = 'admin'").run(nowIso());

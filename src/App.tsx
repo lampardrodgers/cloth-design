@@ -18,6 +18,7 @@ import {
   saveImageProvider,
   setAdminUserApiKey,
   testImageProvider,
+  testMyImageProvider,
   completeDemoPayment,
   createPaymentOrder,
   deleteGenerationResult,
@@ -29,6 +30,7 @@ import {
   requestGeneration,
   runAdminStorageMaintenance,
   saveMyApiKey,
+  selectMyImageProvider,
   saveWebdavSettings,
   testWebdavSettings,
   endDebugSession,
@@ -42,6 +44,7 @@ import {
 } from "./lib/api";
 import { folderPermission, forgetLocalFolder, loadSavedFolder, localFolderSupported, pickLocalFolder, saveImageToFolder } from "./lib/localFolder";
 import { outputSizeForRatio } from "./lib/outputSize";
+import { capabilityFromAccount } from "./lib/resolution";
 import { resultFileName } from "./lib/resultFiles";
 import { buildEditablePrompt, buildOptimizedPrompt } from "./lib/prompt";
 import {
@@ -59,6 +62,7 @@ import type {
   GeneratedResult,
   GenerationMode,
   GenerationTask,
+  ImageProviderOption,
   ModeKey,
   PaymentCapabilities,
   PaymentConfigStatus,
@@ -216,6 +220,7 @@ function App() {
   const [activeOrder, setActiveOrder] = useState<PaymentOrder | null>(null);
   const [paymentCapabilities, setPaymentCapabilities] = useState<PaymentCapabilities>(defaultPaymentCapabilities);
   const [paymentConfig, setPaymentConfig] = useState<PaymentConfigStatus>(defaultPaymentConfig);
+  const [imageProviders, setImageProviders] = useState<ImageProviderOption[]>([]);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState("");
   const [debugUnlimited, setDebugUnlimited] = useState(false);
@@ -237,10 +242,76 @@ function App() {
   const localFolderRef = useRef<FileSystemDirectoryHandle | null>(null);
   const localFolderAutoSaveRef = useRef(true);
   const [apiConfig, setApiConfig] = useState<ApiConfig | null>(null);
+  const [providerTesting, setProviderTesting] = useState(false);
+  const [providerTestResult, setProviderTestResult] = useState<{
+    ok: boolean;
+    label: string;
+    message: string;
+  } | null>(null);
+  const [providerTestNotice, setProviderTestNotice] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
   const [railCollapsed, setRailCollapsed] = useStoredState("clothdesign:railCollapsed", false);
   // 自由创作的简易/画布切换放在顶栏，省掉工作区里那条只写着同一句话的标题栏。
   const [freeLayout, setFreeLayout] = useStoredState<FreeLayout>("clothdesign:free:layout", "simple");
   const providerHealth = apiConfig?.providerHealth;
+  const providerStatusBlocked = providerTestResult ? !providerTestResult.ok : Boolean(providerHealth?.blocking);
+
+  /**
+   * 测当前账号的图像接口（只打 /models，不出图）。
+   * silent = 打开页面时自动测的那一次：结果照样更新顶栏，但不弹提示条打扰人。
+   */
+  const handleTestImageProvider = async ({ silent = false } = {}) => {
+    if (providerTesting) return;
+    setProviderTesting(true);
+    setProviderTestResult(null);
+    if (!silent) setProviderTestNotice(null);
+    try {
+      const result = await testMyImageProvider();
+      const next = {
+        ok: result.ok,
+        label: result.label || (result.ok ? "连接成功" : "连接失败"),
+        message: result.message,
+      };
+      setProviderTestResult(next);
+      // 自动测通了就安静地把顶栏点亮；测不通是要马上知道的事，照样弹。
+      if (!silent || !result.ok) setProviderTestNotice({ ok: result.ok, message: result.message });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "测试图像接口失败。";
+      setProviderTestResult({ ok: false, label: "连接失败", message });
+      setProviderTestNotice({ ok: false, message });
+    } finally {
+      setProviderTesting(false);
+    }
+  };
+
+  /**
+   * 顶栏那颗状态灯原来靠「最近一次真实出图」推断，自备 Key 的账号一条都不算，
+   * 于是跑了一天图还是写着「未实测」。登录后自动实测一次，让它一开始就说人话。
+   */
+  const autoTestedForRef = useRef("");
+  useEffect(() => {
+    const accountId = currentUser?.id;
+    if (!accountId || !apiConfig || apiConfig.mode !== "live") return;
+    // 换账号、换线路都要重新测一次；同一套配置只测一次。
+    const signature = `${accountId}:${currentUser?.apiProviderId ?? "default"}:${currentUser?.hasOwnApiKey ? "own" : "shared"}`;
+    if (autoTestedForRef.current === signature) return;
+    autoTestedForRef.current = signature;
+    void handleTestImageProvider({ silent: true });
+    // handleTestImageProvider 每次渲染都是新函数，放进依赖会把自己测循环。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id, currentUser?.apiProviderId, currentUser?.hasOwnApiKey, apiConfig?.mode]);
+
+  // 提示条自己会退场：成功看一眼就够了，失败多留一会儿好把原因读完。
+  useEffect(() => {
+    if (!providerTestNotice) return;
+    const timer = window.setTimeout(() => setProviderTestNotice(null), providerTestNotice.ok ? 6000 : 15000);
+    return () => window.clearTimeout(timer);
+  }, [providerTestNotice]);
+
+  /** 当前账号的出图能力（走哪条线、最高几 K），比例与分辨率控件都照它渲染。 */
+  const providerCapability = useMemo(() => capabilityFromAccount(currentUser), [currentUser]);
 
   // 左栏素材卡与描述里「参考 X」标记之间的连线，用来说明素材和文字的对应关系。
   const referenceCardEls = useRef<Record<string, HTMLElement | null>>({});
@@ -346,6 +417,7 @@ function App() {
       setOrders(data.orders);
       setLedger(data.ledger);
       setPaymentCapabilities(data.paymentCapabilities);
+      setImageProviders(data.imageProviders || []);
       setResults((items) => mergeResults(items, data.generationResults));
       if ("paymentConfig" in data) setPaymentConfig(data.paymentConfig as PaymentConfigStatus);
       return data.account;
@@ -558,6 +630,7 @@ function App() {
     prompt: rawPrompt,
     attachments,
     ratioId,
+    resolution,
     quantity,
     intent = "free",
   }: FreeGenerationInput) => {
@@ -572,7 +645,7 @@ function App() {
       mode: "free",
       ratioId: ratio.id,
       quantity,
-      resolution: "native",
+      resolution,
     };
     const references = await attachmentsToReferences(attachments);
     const finalPrompt =
@@ -606,7 +679,7 @@ function App() {
       prompt: taskLabel,
       attachments,
       ratioLabel: ratio.label,
-      sizeLabel: outputSizeForRatio(ratio).label,
+      sizeLabel: outputSizeForRatio(ratio, resolution, providerCapability.protocol).label,
       quantity,
       settings: freeSettings,
       createdAt: nowLabel(),
@@ -975,6 +1048,7 @@ function App() {
           creditPolicy={creditPolicy}
           settings={settings}
           apiConfig={apiConfig}
+          capability={providerCapability}
           layout={freeLayout}
           onLayoutChange={setFreeLayout}
           onGenerate={handleFreeGenerate}
@@ -989,6 +1063,7 @@ function App() {
         <main className="single-view panel-scroll">
           <AccountPanel
             currentUser={currentUser}
+            imageProviders={imageProviders}
             packages={packages}
             orders={orders}
             ledger={ledger}
@@ -998,12 +1073,20 @@ function App() {
             activeOrder={activeOrder}
             onRecharge={handleRecharge}
             onDemoComplete={handleDemoComplete}
-            onSaveApiKey={async (apiKey) => {
+            onSaveApiKey={async (apiKey, providerId) => {
               try {
-                const { account } = await saveMyApiKey(apiKey);
+                const { account } = await saveMyApiKey(apiKey, providerId);
                 setCurrentUser(account);
               } catch (error) {
                 return error instanceof Error ? error.message : "保存失败";
+              }
+            }}
+            onSelectImageProvider={async (providerId) => {
+              try {
+                const { account } = await selectMyImageProvider(providerId);
+                setCurrentUser(account);
+              } catch (error) {
+                return error instanceof Error ? error.message : "切换图像接口失败";
               }
             }}
             onClearApiKey={async () => {
@@ -1097,7 +1180,7 @@ function App() {
             onRoutesChange={setRoutes}
             summary={adminOverview?.summary}
             currentUserId={currentUser.id}
-            imageProvider={adminOverview?.imageProvider}
+            imageProviders={adminOverview?.imageProviders ?? (adminOverview?.imageProvider ? [adminOverview.imageProvider] : [])}
             onSaveImageProvider={async (input) => {
               try {
                 await saveImageProvider(input);
@@ -1106,17 +1189,17 @@ function App() {
                 return error instanceof Error ? error.message : "保存接口配置失败";
               }
             }}
-            onResetImageProvider={async () => {
+            onResetImageProvider={async (providerId) => {
               try {
-                await resetImageProvider();
+                await resetImageProvider(providerId);
                 await loadAdminOverview();
               } catch (error) {
                 return error instanceof Error ? error.message : "恢复默认失败";
               }
             }}
-            onTestImageProvider={async () => {
+            onTestImageProvider={async (providerId) => {
               try {
-                return await testImageProvider();
+                return await testImageProvider(providerId);
               } catch (error) {
                 return { ok: false, message: error instanceof Error ? error.message : "测试失败" };
               }
@@ -1136,9 +1219,9 @@ function App() {
                 return error instanceof Error ? error.message : "重置密码失败";
               }
             }}
-            onSetApiKey={async (id, apiKey) => {
+            onSetApiKey={async (id, apiKey, providerId) => {
               try {
-                await setAdminUserApiKey(id, apiKey);
+                await setAdminUserApiKey(id, apiKey, providerId);
                 await loadAdminOverview();
               } catch (error) {
                 return error instanceof Error ? error.message : "配置 Key 失败";
@@ -1242,10 +1325,19 @@ function App() {
           </div>
 
           <div className="top-status">
-            <span className={`engine-status ${providerHealth?.blocking ? "blocked" : "ready"}`}>
+            <button
+              type="button"
+              className={`engine-status ${providerStatusBlocked ? "blocked" : "ready"} ${providerTesting ? "testing" : ""}`}
+              onClick={() => void handleTestImageProvider()}
+              disabled={providerTesting}
+              title={providerTesting ? "正在测试当前账号的图像接口（不会生成图片）" : providerTestResult?.message || "点击测试当前账号的图像接口连通性（不会生成图片）"}
+              aria-label="测试当前账号的图像接口连通性"
+            >
               <i aria-hidden="true" />
-              {providerHealth?.label ?? (apiConfig?.mode === "live" ? "图像服务已就绪" : "演示模式")}
-            </span>
+              {providerTesting
+                ? "测试中…"
+                : providerTestResult?.label ?? providerHealth?.label ?? (apiConfig?.mode === "live" ? "图像服务已就绪" : "演示模式")}
+            </button>
             <button
               className="credit-button"
               onClick={() => setView("account")}
@@ -1388,6 +1480,12 @@ function App() {
         <div className="global-notice" role="alert">
           <span>{authError}</span>
           <button type="button" onClick={() => setAuthError("")} aria-label="关闭提示">×</button>
+        </div>
+      ) : null}
+      {providerTestNotice ? (
+        <div className={`global-notice provider-test-notice ${providerTestNotice.ok ? "" : "failed"}`} role={providerTestNotice.ok ? "status" : "alert"}>
+          <span>{providerTestNotice.message}</span>
+          <button type="button" onClick={() => setProviderTestNotice(null)} aria-label="关闭接口测试提示">×</button>
         </div>
       ) : null}
     </>
