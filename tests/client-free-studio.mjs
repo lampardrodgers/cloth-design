@@ -63,6 +63,30 @@ assert(annotationPrompt.includes("补充说明:\n顺便把背景调亮一点"), 
 const bareAnnotationPrompt = freeStudio.buildAnnotationEditPrompt("", settings);
 assert(!bareAnnotationPrompt.includes("补充说明"), bareAnnotationPrompt);
 
+// 标注图也可以当成画框的参考图（画布上「带标注」那条路）：这时走的是自由生成的提示词，
+// 必须自己交代清楚「箭头是指令不是画面」，否则成片里会把箭头一起画出来。
+const annotatedReferencePrompt = freeStudio.buildFreePrompt(
+  "按标注改",
+  [
+    { id: "a", name: "带标注的图.png", previewUrl: "data:image/png;base64,x", usage: "merge", annotated: true },
+    { id: "b", name: "mood.jpg", previewUrl: "data:image/jpeg;base64,y", usage: "reference" },
+  ],
+  settings,
+);
+assert(annotatedReferencePrompt.includes("上传图片1 = 入画（带标注的图.png） · 带人工标注"), annotatedReferencePrompt);
+assert(annotatedReferencePrompt.includes("带标注图片要求"), annotatedReferencePrompt);
+assert(annotatedReferencePrompt.includes("箭头指向哪里，修改就发生在哪里"), annotatedReferencePrompt);
+assert(annotatedReferencePrompt.includes("不得保留任何标注箭头"), annotatedReferencePrompt);
+assert(!mixedPrompt.includes("带标注图片要求"), "没有标注图时不该出现这一段");
+
+// 送到服务端的素材说明同样要跟着变，否则服务端记录里看不出这张是标注图。
+const onePixelPng =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const annotatedReferences = await freeStudio.attachmentsToReferences([
+  { id: "a", name: "带标注的图.png", previewUrl: onePixelPng, usage: "merge", annotated: true },
+]);
+assert(annotatedReferences[0].note.startsWith("带标注"), annotatedReferences[0].note);
+
 /* ── 按草图生成的提示词 ─────────────────────────────────────────────────── */
 
 const sketchPrompt = freeStudio.buildSketchPrompt("要真实布料质感", settings);
@@ -123,7 +147,15 @@ assert(canvasSource.includes("collectAnnotationShapeIds"), "按标注改图要�
 assert(canvasSource.includes("StylePanel: CanvasStylePanel") && canvasSource.includes("canvas-aspect-preset"), "选中画框时右侧要能改比例和尺寸");
 assert(canvasSource.includes("isAspectRatioLocked"), "画框拖角只缩放不变形");
 assert(canvasSource.includes("refIds"), "引用图记在画框上，不靠多选");
-assert(canvasSource.includes("onPaste") && canvasSource.includes("clipboardImageFiles"), "描述框里粘贴图片要能直接成为参考图");
+// 选中画框时整块画布都收粘贴，不必先把光标点进描述框；捕获阶段拦下来，tldraw 自己那套粘贴不再重复跑。
+assert(
+  canvasSource.includes("clipboardImageFiles") && canvasSource.includes('document.addEventListener("paste", handlePaste, true)'),
+  "选中画框时粘贴图片要能直接成为参考图",
+);
+assert(canvasSource.includes("attachFilesToFrame"), "粘贴和上传要走同一条挂参考图的路");
+// 标注过的图能直接拍平成参考图，不必先走一次「按标注改图」。
+assert(canvasSource.includes("flattenShapesToDataUrl") && canvasSource.includes("linkAnnotatedImage"), "标注图要能拍平成参考图");
+assert(canvasSource.includes("annotated: true"), "拍平出来的参考图要标成带标注");
 assert(canvasSource.includes('colorScheme: "light"'), "画布回到浅色，和工作台一致");
 assert(!canvasSource.includes("canvas-top-panel"), "不再有自定义顶栏，用 tldraw 自己的工具栏");
 // 画框即契约：生成结果必须原地替换画框，而不是另起一张。
@@ -171,6 +203,9 @@ for (const selector of [
   ".canvas-annotation-edit",
   ".canvas-library",
   ".canvas-guide",
+  ".canvas-picker-annotated",
+  ".canvas-ref-annotated",
+  ".tlui-menu-zone",
 ]) {
   assert(styles.includes(selector), `styles.css should define ${selector}`);
 }

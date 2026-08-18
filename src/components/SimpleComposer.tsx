@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEven
 import { ratioOptions } from "../data/catalog";
 import { outputSizeForRatio } from "../lib/outputSize";
 import { isPlaceholderImage } from "../lib/providerMode";
+import { attachmentUsageLabels } from "../lib/freeStudio";
 import { formatResultTime, resultFileName } from "../lib/resultFiles";
-import type { AttachmentUsage, FreeAttachment, GeneratedResult } from "../types";
+import type { AttachmentUsage, FreeAttachment, GeneratedResult, SubmissionRecord } from "../types";
 import { AttachmentStrip } from "./AttachmentStrip";
 import { PromptChipBar, usePromptChips } from "./PromptChips";
 import { NumberStepper } from "./ui";
@@ -15,7 +16,10 @@ interface SimpleComposerProps {
   quantity: number;
   cost: number;
   credits: number;
-  isGenerating: boolean;
+  /** 手上还有几张在生成。提交后左边就清空了，这个数只用来显示进度。 */
+  pendingCount: number;
+  /** 每次提交的现场存档（描述 / 参考图 / 参数），按 taskId 对上成片。 */
+  submissions: SubmissionRecord[];
   notice?: string;
   results: GeneratedResult[];
   onPromptChange: (value: string) => void;
@@ -41,7 +45,8 @@ export function SimpleComposer({
   quantity,
   cost,
   credits,
-  isGenerating,
+  pendingCount,
+  submissions,
   notice,
   results,
   onPromptChange,
@@ -66,8 +71,14 @@ export function SimpleComposer({
   const ratio = ratioOptions.find((item) => item.id === ratioId) ?? ratioOptions[0];
   const outputSize = outputSizeForRatio(ratio);
   const hasEnoughCredits = cost <= credits;
-  const canGenerate = prompt.trim().length > 0 && hasEnoughCredits && !isGenerating;
+  const isGenerating = pendingCount > 0;
+  // 提交后描述会被清空，按钮自然就灰了，所以不用再拿「正在生成」锁住整块表单——
+  // 用户可以马上写下一张排队生成。
+  const canGenerate = prompt.trim().length > 0 && hasEnoughCredits;
   const selected = results.find((result) => result.id === selectedId) ?? results[0];
+  // 提交现场按 taskId 对上；旧成片没有存档，退回到成片自己记的那句描述。
+  const submission = selected ? submissions.find((item) => item.taskId === selected.taskId) : undefined;
+  const submittedPrompt = submission?.prompt ?? selected?.prompt ?? "";
 
   // `@` 引用已经传进来的附件，插入的标记和提示词构建器里的编号一致。
   const galleryChips = useMemo(
@@ -125,13 +136,14 @@ export function SimpleComposer({
     if (images.length) onAddFiles(images);
   };
 
-  const statusMessage = isGenerating
-    ? "生成中…"
-    : !prompt.trim()
-      ? "先写一句你想要的画面"
-      : !hasEnoughCredits
-        ? `积分不足 · 需要 ${cost}`
-        : "已就绪 · ⌘ / Ctrl + Enter 生成";
+  // 张数只在右边那颗「N 张生成中」上说一次，状态位不重复。
+  const statusMessage = !prompt.trim()
+    ? isGenerating
+      ? "已提交，可以接着写下一张"
+      : "先写一句你想要的画面"
+    : !hasEnoughCredits
+      ? `积分不足 · 需要 ${cost}`
+      : "已就绪 · ⌘ / Ctrl + Enter 生成";
 
   return (
     <div
@@ -148,11 +160,11 @@ export function SimpleComposer({
           <header className="simple-card-head">
             <span className="rail-kicker">画面描述</span>
             <span className="simple-card-head-side">
-              <small className="muted-text">不限题材 · 可直接拖入图片</small>
+              <small className="muted-text">不限题材 · 图片可拖入或 ⌘/Ctrl + V 粘贴</small>
               <button
                 type="button"
                 className="text-button"
-                disabled={isGenerating || (!prompt.trim() && !attachments.length)}
+                disabled={!prompt.trim() && !attachments.length}
                 title="清空描述和附件，成片历史保留"
                 onClick={onClear}
               >
@@ -182,7 +194,6 @@ export function SimpleComposer({
             onAddFiles={onAddFiles}
             onUsageChange={onUsageChange}
             onRemove={onRemoveAttachment}
-            disabled={isGenerating}
           />
 
           <div className="simple-controls">
@@ -215,27 +226,38 @@ export function SimpleComposer({
             <strong>{outputSize.label}</strong>
           </div>
 
+          {/* 状态在左、按钮钉右：状态文案和「N 张生成中」长短变化都不会推着生成按钮乱跑。 */}
           <div className="simple-submit">
+            <div className="simple-submit-status">
+              <span className={`prompt-status ${!isGenerating && !hasEnoughCredits ? "blocked" : ""}`} aria-live="polite">
+                {notice || statusMessage}
+              </span>
+              {!hasEnoughCredits ? (
+                <button type="button" className="text-button" onClick={onOpenAccount}>
+                  去充值
+                </button>
+              ) : null}
+              {isGenerating ? <em className="simple-pending-chip">{pendingCount} 张生成中</em> : null}
+            </div>
             <button type="button" className="btn btn-primary" disabled={!canGenerate} onClick={onGenerate}>
-              {isGenerating ? "正在生成…" : `生成 ${quantity} 张 · ${cost} 积分`}
+              生成 {quantity} 张 · {cost} 积分
             </button>
-            <span className={`prompt-status ${!isGenerating && !hasEnoughCredits ? "blocked" : ""}`} aria-live="polite">
-              {notice || statusMessage}
-            </span>
-            {!hasEnoughCredits ? (
-              <button type="button" className="text-button" onClick={onOpenAccount}>
-                去充值
-              </button>
-            ) : null}
           </div>
         </section>
 
         <section className="simple-stage" aria-label="当前成片">
-          {isGenerating ? (
+          {isGenerating && selected ? (
+            <div className="simple-stage-pending-bar" aria-live="polite">
+              <span className="simple-pending-mark" aria-hidden="true">◇</span>
+              <strong>{pendingCount} 张生成中…</strong>
+              <small>出图后自动切到这里，右下角「任务」能看进度</small>
+            </div>
+          ) : null}
+          {isGenerating && !selected ? (
             <div className="simple-stage-body simple-stage-pending" aria-live="polite">
               <span className="simple-pending-mark" aria-hidden="true">◇</span>
-              <strong>正在生成…</strong>
-              <small>已提交给图像引擎，完成后这里会变成成片</small>
+              <strong>{pendingCount} 张生成中…</strong>
+              <small>已提交给图像引擎，左边可以接着写下一张</small>
               <div className="stage-progress" aria-hidden="true"><i /></div>
             </div>
           ) : selected ? (
@@ -245,19 +267,56 @@ export function SimpleComposer({
                   <img src={selected.imageUrl} alt={selected.title} />
                   {isPlaceholderImage(selected.imageUrl) ? <em className="placeholder-tag">演示占位图</em> : null}
                 </button>
-                {promptOpen && selected.prompt ? (
-                  <div className="stage-prompt" role="dialog" aria-label="这张成片的描述">
+                {promptOpen && (submission || selected.prompt) ? (
+                  <div className="stage-prompt" role="dialog" aria-label="这张成片的提交详情">
                     <header>
-                      <span className="rail-kicker">当时的描述</span>
-                      <button type="button" onClick={() => setPromptOpen(false)} aria-label="关闭描述">×</button>
+                      <span className="rail-kicker">当时提交了什么</span>
+                      <button type="button" onClick={() => setPromptOpen(false)} aria-label="关闭提交详情">×</button>
                     </header>
-                    <p>{selected.prompt}</p>
+                    <p>{submittedPrompt || "（没有写描述）"}</p>
+                    {submission?.references.length ? (
+                      <div className="submission-refs">
+                        <span className="rail-kicker">参考图 {submission.references.length} 张</span>
+                        <div className="submission-ref-list">
+                          {submission.references.map((reference, index) => (
+                            <figure className="submission-ref" key={`${reference.name}-${index}`}>
+                              {reference.thumbUrl ? (
+                                <img src={reference.thumbUrl} alt={reference.name} />
+                              ) : (
+                                <span className="submission-ref-missing">无缩略图</span>
+                              )}
+                              <figcaption title={reference.name}>
+                                <em>{attachmentUsageLabels[reference.usage]}</em>
+                                {reference.name}
+                              </figcaption>
+                            </figure>
+                          ))}
+                        </div>
+                      </div>
+                    ) : submission ? (
+                      <p className="submission-empty">这次没有带参考图</p>
+                    ) : null}
+                    {submission ? (
+                      <dl className="submission-params">
+                        <div><dt>比例</dt><dd>{submission.ratioLabel}</dd></div>
+                        <div><dt>输出像素</dt><dd>{submission.sizeLabel}</dd></div>
+                        <div><dt>张数</dt><dd>{submission.quantity}</dd></div>
+                        <div><dt>画质</dt><dd>{submission.quality}</dd></div>
+                        <div><dt>格式</dt><dd>{submission.outputFormat}</dd></div>
+                        <div><dt>背景</dt><dd>{submission.background}</dd></div>
+                        <div><dt>参考图保真</dt><dd>{submission.inputFidelity}</dd></div>
+                        <div><dt>提交时间</dt><dd>{submission.createdAt}</dd></div>
+                      </dl>
+                    ) : (
+                      <p className="submission-empty">这张成片是旧版本生成的，只留下了描述</p>
+                    )}
                     <div className="stage-prompt-actions">
                       <button
                         type="button"
                         className="text-button"
+                        disabled={!submittedPrompt}
                         onClick={() => {
-                          onPromptChange(selected.prompt ?? "");
+                          onPromptChange(submittedPrompt);
                           setPromptOpen(false);
                         }}
                       >
@@ -266,9 +325,10 @@ export function SimpleComposer({
                       <button
                         type="button"
                         className="text-button"
-                        onClick={() => navigator.clipboard?.writeText(selected.prompt ?? "")}
+                        disabled={!submittedPrompt}
+                        onClick={() => navigator.clipboard?.writeText(submittedPrompt)}
                       >
-                        复制
+                        复制描述
                       </button>
                     </div>
                   </div>
@@ -290,11 +350,17 @@ export function SimpleComposer({
                   <button
                     type="button"
                     className="text-button"
-                    disabled={!selected.prompt}
-                    title={selected.prompt ? "看看这张是用什么描述出来的" : "这张成片没有记录描述"}
+                    disabled={!submission && !selected.prompt}
+                    title={
+                      submission
+                        ? "看看这张当时提交的描述、参考图和参数"
+                        : selected.prompt
+                          ? "看看这张是用什么描述出来的"
+                          : "这张成片没有留下提交记录"
+                    }
                     onClick={() => setPromptOpen((value) => !value)}
                   >
-                    提示词
+                    提交详情
                   </button>
                   <a className="text-button" href={selected.imageUrl} download={resultFileName(selected)}>
                     下载

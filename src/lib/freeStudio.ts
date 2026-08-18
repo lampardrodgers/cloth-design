@@ -4,6 +4,7 @@ import type {
   RatioOption,
   ReferenceImage,
   StudioSettings,
+  SubmissionRecord,
 } from "../types";
 
 /** 附件最长边，避免把原始大图整张塞进 localStorage 和请求体。 */
@@ -131,13 +132,79 @@ export async function attachmentsToReferences(attachments: FreeAttachment[]): Pr
       id: attachment.id,
       label: String(index + 1),
       role: "style",
-      note: `${attachmentUsageLabels[attachment.usage]}：${attachmentUsageHints[attachment.usage]}`,
+      note: attachment.annotated
+        ? `带标注：图上的箭头和文字是修改指令，成片里不保留`
+        : `${attachmentUsageLabels[attachment.usage]}：${attachmentUsageHints[attachment.usage]}`,
       fileName: attachment.name,
       previewUrl: attachment.previewUrl,
       file,
     });
   }
   return references;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 提交存档
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** 存档缩略图的长边。够认出是哪张图，又不至于把 localStorage 撑爆。 */
+export const SUBMISSION_THUMB_EDGE = 128;
+/** 最多留多少次提交记录（连着缩略图存的，不能无限涨）。 */
+export const MAX_SUBMISSION_RECORDS = 20;
+
+async function thumbnailDataUrl(previewUrl: string, edge = SUBMISSION_THUMB_EDGE) {
+  try {
+    const image = await loadImageElement(previewUrl);
+    const naturalWidth = image.naturalWidth || edge;
+    const naturalHeight = image.naturalHeight || edge;
+    const scale = Math.min(1, edge / Math.max(naturalWidth, naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return "";
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.72);
+  } catch {
+    // 缩略图失败不该拦住生成，回看时显示成一个空位就好。
+    return "";
+  }
+}
+
+/**
+ * 把这次提交的现场存下来：描述、参考图缩略图、参数。
+ * 简易模式提交完就清空输入框，全靠这份存档回答「我刚才提交的是什么」。
+ */
+export async function buildSubmissionRecord(input: {
+  taskId: string;
+  prompt: string;
+  attachments: FreeAttachment[];
+  ratioLabel: string;
+  sizeLabel: string;
+  quantity: number;
+  settings: FreePromptSettings;
+  createdAt: string;
+}): Promise<SubmissionRecord> {
+  const references = await Promise.all(
+    input.attachments.map(async (attachment) => ({
+      name: attachment.name,
+      usage: attachment.usage,
+      thumbUrl: await thumbnailDataUrl(attachment.previewUrl),
+    })),
+  );
+  return {
+    taskId: input.taskId,
+    prompt: input.prompt,
+    references,
+    ratioLabel: input.ratioLabel,
+    sizeLabel: input.sizeLabel,
+    quantity: input.quantity,
+    quality: input.settings.quality,
+    outputFormat: input.settings.outputFormat,
+    background: input.settings.background,
+    inputFidelity: input.settings.inputFidelity,
+    createdAt: input.createdAt,
+  };
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -163,13 +230,15 @@ export function buildFreePrompt(
     .map((attachment, index) => {
       const usage = attachmentUsageLabels[attachment.usage];
       const name = attachment.name ? `（${attachment.name}）` : "";
+      const mark = attachment.annotated ? " · 带人工标注" : "";
       const note = attachment.note?.trim() ? ` · ${attachment.note.trim()}` : "";
-      return `上传图片${index + 1} = ${usage}${name}${note}`;
+      return `上传图片${index + 1} = ${usage}${name}${mark}${note}`;
     })
     .join("\n");
 
   const hasMerge = attachments.some((attachment) => attachment.usage === "merge");
   const hasReference = attachments.some((attachment) => attachment.usage === "reference");
+  const hasAnnotated = attachments.some((attachment) => attachment.annotated);
 
   return [
     "模式: 自由生成（不限题材，按用户描述直接出图）",
@@ -178,6 +247,9 @@ export function buildFreePrompt(
       ? "入画图片要求: 图中主体必须真实出现在最终成片里，保持款式、颜色、材质、细节和比例一致，只允许调整光线、角度和构图让它自然融入画面。"
       : "",
     hasReference ? "参考图片要求: 只借鉴风格、构图、配色和质感，不要求原样复制其中的具体元素。" : "",
+    hasAnnotated
+      ? "带标注图片要求: 标注图上的箭头、线条、圈选和文字是人工写下的修改指令，不是画面内容。箭头指向哪里，修改就发生在哪里；成片里不得保留任何标注箭头、线条、圈选、文字、选中框或界面元素。"
+      : "",
     `输出参数: ${settings.quality} quality, ${settings.outputFormat}, ${settings.background} background, ${settings.inputFidelity} input fidelity.`,
     `用户描述:\n${subject}`,
   ]

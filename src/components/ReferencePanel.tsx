@@ -146,6 +146,7 @@ export function ReferencePanel({
                 onClick={() => inputRefs.current[reference.id]?.click()}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={(event) => handleDrop(reference.id, event)}
+                title={`点击选图、拖图进来，或把鼠标停在这里按 ⌘/Ctrl + V 粘贴`}
                 aria-label={reference.previewUrl ? `替换${roleName}图片` : `上传${roleName}图片`}
               >
                 {reference.previewUrl ? (
@@ -153,7 +154,7 @@ export function ReferencePanel({
                 ) : (
                   <span className="reference-empty">
                     <em>+</em>
-                    点击或拖入
+                    点击 / 拖入 / 粘贴
                   </span>
                 )}
               </button>

@@ -31,7 +31,7 @@ const {
 	migrateWorkflowDatabase,
 	workflowImageProviderStatus,
 } = await import("../server/workflows.mjs");
-const { classifyImageProviderHealth } = await import("../server/provider-health.mjs");
+const { classifyImageProviderHealth, latestImageProviderEvent } = await import("../server/provider-health.mjs");
 const { createMotionPreviewMp4 } = await import("../server/video-provider.mjs");
 
 migrateBusinessDatabase();
@@ -126,6 +126,76 @@ assert.equal(
   }).status,
   "usage_limited",
 );
+
+/* ── 接口健康度只看图像接口自己的失败 ─────────────────────────────────────── */
+// 服务重启收口、积分扣费失败这类「我们自己的锅」也会写成 failed，
+// 但不能让它把顶栏报成「图像接口不可用」——线上真误报过一次。
+{
+  const insertTask = sqlite.prepare(
+    `INSERT INTO generation_task (id, user_id, mode, prompt, status, credits, message, failure_source, created_at, updated_at)
+     VALUES (?, ?, 'free', '健康度测试', ?, 0, ?, ?, ?, ?)`,
+  );
+  insertTask.run("task-health-ok", userId, "success", "图像引擎已返回结果。", null, "2026-08-18T02:00:00.000Z", "2026-08-18T02:00:00.000Z");
+  insertTask.run(
+    "task-health-restart",
+    userId,
+    "failed",
+    "服务重启时这条任务被中断，没有出图。",
+    "system",
+    "2026-08-18T01:00:00.000Z",
+    "2026-08-18T03:00:00.000Z",
+  );
+  const afterRestart = latestImageProviderEvent();
+  assert.equal(afterRestart.status, "success", "系统原因的失败不该被当成最近一次图像接口事件");
+  assert.equal(
+    classifyImageProviderHealth({ mode: "live", providerReady: true, latest: afterRestart }).blocking,
+    false,
+    "重启收口不该把图像接口报成不可用",
+  );
+
+  // 真正的接口失败仍然要报出来
+  insertTask.run(
+    "task-health-provider",
+    userId,
+    "failed",
+    "图像引擎请求超时。",
+    "provider",
+    "2026-08-18T04:00:00.000Z",
+    "2026-08-18T04:00:00.000Z",
+  );
+  const afterProviderFailure = latestImageProviderEvent();
+  assert.equal(afterProviderFailure.status, "failed");
+  assert.equal(
+    classifyImageProviderHealth({ mode: "live", providerReady: true, latest: afterProviderFailure }).status,
+    "timeout",
+  );
+  // 老库升级：failure_source 是后加的列，已经落库的重启收口记录要补上标记，
+  // 否则升上去之后顶栏会一直挂着「图像接口异常」。
+  sqlite.exec("ALTER TABLE generation_task DROP COLUMN failure_source");
+  sqlite
+    .prepare(
+      `INSERT INTO generation_task (id, user_id, mode, prompt, status, credits, message, created_at, updated_at)
+       VALUES ('task-health-legacy', ?, 'free', '升级前的记录', 'failed', 0, ?, ?, ?)`,
+    )
+    .run(userId, "服务重启时这条任务被中断，没有出图。", "2026-08-18T05:00:00.000Z", "2026-08-18T05:00:00.000Z");
+  migrateBusinessDatabase();
+  assert.equal(
+    sqlite.prepare("SELECT failure_source FROM generation_task WHERE id = 'task-health-legacy'").get().failure_source,
+    "system",
+    "升级时要把历史的重启收口记录补成 system",
+  );
+  // 补上标记后，这条 05:00 的系统失败不再算最近事件，最近的仍是 04:00 那次真正的接口超时
+  const afterBackfill = latestImageProviderEvent();
+  assert.equal(afterBackfill.message, "图像引擎请求超时。");
+  assert.equal(
+    classifyImageProviderHealth({ mode: "live", providerReady: true, latest: afterBackfill }).status,
+    "timeout",
+    "补标记之后接口状态应该回到真实的那一次结果",
+  );
+
+  sqlite.prepare("DELETE FROM generation_task WHERE id LIKE 'task-health-%'").run();
+}
+
 const savedKey = process.env.OPENAI_API_KEY;
 delete process.env.OPENAI_API_KEY;
 assert.deepEqual(workflowImageProviderStatus(), {

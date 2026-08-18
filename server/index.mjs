@@ -303,10 +303,15 @@ function insertGenerationTask({ id, userId, payload, cost, keySource = "server" 
     .run(id, userId, payload.mode, payload.prompt, cost, keySource, timestamp, timestamp);
 }
 
-function updateGenerationTask({ id, status, credits, message }) {
+/**
+ * failureSource：这次失败算谁的。
+ * - provider：图像接口（超时、报错、额度）——「图像接口健康度」看的就是这一类；
+ * - system：我们自己（积分扣费失败、服务重启收口）——不能拿它把接口报成故障。
+ */
+function updateGenerationTask({ id, status, credits, message, failureSource = null }) {
   sqlite
-    .prepare("UPDATE generation_task SET status = ?, credits = ?, message = ?, updated_at = ? WHERE id = ?")
-    .run(status, credits, message, nowIso(), id);
+    .prepare("UPDATE generation_task SET status = ?, credits = ?, message = ?, failure_source = ?, updated_at = ? WHERE id = ?")
+    .run(status, credits, message, failureSource, nowIso(), id);
 }
 
 function generatedResultMetadata(result, index, payload = {}) {
@@ -494,6 +499,7 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
         status: "failed",
         credits: 0,
         message: error instanceof Error ? error.message : "积分扣费失败",
+        failureSource: "system",
       });
       res.status(402).json({
         ...publicConfig(),
@@ -552,22 +558,30 @@ app.post("/api/generate", upload.array("images", 16), async (req, res) => {
       message: doneMessage,
     });
   } catch (error) {
-    if (account && taskId && cost > 0) {
+    const reason = error instanceof Error ? error.message : "生成失败";
+    // 任务状态必须收口。以前退款和落库写在一起，自备 Key 的账号 cost 恒为 0，
+    // 一失败就跳过整段，任务永远停在「运行中」，后台看着像还在跑，其实早就断了。
+    if (taskId) {
+      console.error(`[generate] task ${taskId} failed: ${reason}`);
+      let message = reason;
+      if (account && cost > 0) {
+        try {
+          refundCredits({
+            userId: account.user.id,
+            taskId,
+            amount: cost,
+            reason: "生成失败自动退款",
+          });
+          message = `${reason}，积分已退回`;
+        } catch (refundError) {
+          console.error(refundError);
+          message = `${reason}（积分退回失败，请联系管理员）`;
+        }
+      }
       try {
-        refundCredits({
-          userId: account.user.id,
-          taskId,
-          amount: cost,
-          reason: "生成失败自动退款",
-        });
-        updateGenerationTask({
-          id: taskId,
-          status: "failed",
-          credits: 0,
-          message: error instanceof Error ? `${error.message}，积分已退回` : "生成失败，积分已退回",
-        });
-      } catch (refundError) {
-        console.error(refundError);
+        updateGenerationTask({ id: taskId, status: "failed", credits: 0, message, failureSource: "provider" });
+      } catch (updateError) {
+        console.error(updateError);
       }
     }
     const status = !taskId && error instanceof Error && /^参考图/.test(error.message) ? 400 : 500;
@@ -597,6 +611,21 @@ if (isProduction) {
   });
   app.use(vite.middlewares);
 }
+
+/**
+ * 进程重启会把手上正在跑的生成一起带走：请求断了，任务却还写着「运行中」，
+ * 后台看上去像在跑，其实永远不会有结果。启动时统一收口成失败。
+ */
+function failInterruptedTasks() {
+  const stuck = sqlite
+    .prepare(
+      "UPDATE generation_task SET status = 'failed', message = ?, failure_source = 'system', updated_at = ? WHERE status = 'running'",
+    )
+    .run("服务重启时这条任务被中断，没有出图。", nowIso());
+  if (stuck.changes > 0) console.warn(`[startup] ${stuck.changes} 条中断的生成任务已标记为失败`);
+}
+
+failInterruptedTasks();
 
 app.listen(port, host, () => {
   console.log(`ClothDesign AI running at http://${host}:${port}/ (${isDemoMode() ? "demo" : "live"} mode)`);

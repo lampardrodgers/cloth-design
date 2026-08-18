@@ -41,9 +41,17 @@ import {
   type WebdavSettingsInput,
 } from "./lib/api";
 import { folderPermission, forgetLocalFolder, loadSavedFolder, localFolderSupported, pickLocalFolder, saveImageToFolder } from "./lib/localFolder";
+import { outputSizeForRatio } from "./lib/outputSize";
 import { resultFileName } from "./lib/resultFiles";
 import { buildEditablePrompt, buildOptimizedPrompt } from "./lib/prompt";
-import { attachmentsToReferences, buildAnnotationEditPrompt, buildFreePrompt, buildSketchPrompt } from "./lib/freeStudio";
+import {
+  attachmentsToReferences,
+  buildAnnotationEditPrompt,
+  buildFreePrompt,
+  buildSketchPrompt,
+  buildSubmissionRecord,
+  MAX_SUBMISSION_RECORDS,
+} from "./lib/freeStudio";
 import { useStoredState } from "./lib/storedState";
 import type {
   CreditPolicy,
@@ -61,6 +69,7 @@ import type {
   ReferenceRole,
   LocalFolderPolicy,
   StudioSettings,
+  SubmissionRecord,
   SystemPromptMap,
   UserAccount,
   ViewKey,
@@ -182,6 +191,24 @@ function App() {
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [tasks, setTasks] = useStoredState<GenerationTask[]>("clothdesign:tasks", initialTasks);
   const [results, setResults] = useStoredState<GeneratedResult[]>("clothdesign:results", []);
+  // 每次提交的现场（描述 / 参考图缩略图 / 参数）。简易模式提交完就清空输入框，靠这份存档回看。
+  const [submissions, setSubmissions] = useStoredState<SubmissionRecord[]>("clothdesign:submissions", []);
+
+  // 页面关掉/刷新时，正在跑的那次请求就跟着断了，任务却会以「运行中」留在本地列表里，
+  // 看着像还在生成、其实永远不会有结果。启动时收口一次；真出了图仍会从服务端同步进成片。
+  useEffect(() => {
+    setTasks((items) =>
+      items.some((task) => task.status === "running")
+        ? items.map((task) =>
+            task.status === "running"
+              ? { ...task, status: "failed" as const, progress: 100, message: "页面刷新时断开了跟踪；如果这次出图成功，成片会出现在列表里。" }
+              : task,
+          )
+        : items,
+    );
+    // 只在挂载时收口一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [packages, setPackages] = useState<RechargePackage[]>([]);
   const [orders, setOrders] = useState<PaymentOrder[]>([]);
@@ -572,6 +599,19 @@ function App() {
       ...items,
     ]);
 
+    // 存档要在提交那一刻就落下：输入框马上会被清空，之后只能从这里回看。
+    // 缩略图是异步压的，后面换任务 id 时得接在这条链后面，否则出图太快会改到一个还没落地的记录。
+    const submissionStored = buildSubmissionRecord({
+      taskId,
+      prompt: taskLabel,
+      attachments,
+      ratioLabel: ratio.label,
+      sizeLabel: outputSizeForRatio(ratio).label,
+      quantity,
+      settings: freeSettings,
+      createdAt: nowLabel(),
+    }).then((record) => setSubmissions((items) => [record, ...items].slice(0, MAX_SUBMISSION_RECORDS)));
+
     try {
       const response = await requestGeneration({
         mode,
@@ -594,6 +634,14 @@ function App() {
       }));
 
       const serverTaskId = response.taskId || taskId;
+      // 服务端会换一个任务 id，存档跟着改，成片才找得到自己的提交现场。
+      if (serverTaskId !== taskId) {
+        void submissionStored.then(() =>
+          setSubmissions((items) =>
+            items.map((item) => (item.taskId === taskId ? { ...item, taskId: serverTaskId } : item)),
+          ),
+        );
+      }
       const newResults = response.results.map((result, index) => ({
         id: `result-${serverTaskId}-${index}`,
         taskId: serverTaskId,
@@ -922,6 +970,7 @@ function App() {
       return (
         <FreeStudio
           results={results.filter((result) => result.mode === "free")}
+          submissions={submissions}
           credits={unlimitedCredits ? Number.MAX_SAFE_INTEGER : currentUser.credits}
           creditPolicy={creditPolicy}
           settings={settings}
@@ -1324,7 +1373,13 @@ function App() {
         <>
           <div className="task-scrim" onClick={() => setTaskMenuOpen(false)} />
           <div className="task-popover" role="dialog" aria-label="生成任务">
-            <TaskRail tasks={tasks} results={results} onRetry={handleRetryTask} onClose={() => setTaskMenuOpen(false)} />
+            <TaskRail
+              tasks={tasks}
+              results={results}
+              submissions={submissions}
+              onRetry={handleRetryTask}
+              onClose={() => setTaskMenuOpen(false)}
+            />
           </div>
         </>
       ) : null}

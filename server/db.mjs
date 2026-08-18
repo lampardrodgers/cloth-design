@@ -240,6 +240,15 @@ function createBusinessTables() {
     // 记下这次生成走的是服务端 Key 还是账号自备 Key，后台看用量要分开算。
     sqlite.exec("ALTER TABLE generation_task ADD COLUMN key_source TEXT NOT NULL DEFAULT 'server'");
   }
+  if (!taskColumns.has("failure_source")) {
+    // 失败是图像接口的锅（provider），还是我们自己的（system：积分扣费、服务重启收口）。
+    // 「图像接口健康度」只看 provider 那一类，别让系统原因把接口报成故障。
+    sqlite.exec("ALTER TABLE generation_task ADD COLUMN failure_source TEXT");
+    // 已经落库的重启收口记录补上标记，否则升级后横幅会一直挂着「图像接口异常」。
+    sqlite
+      .prepare("UPDATE generation_task SET failure_source = 'system' WHERE status = 'failed' AND message LIKE ?")
+      .run("服务重启时%");
+  }
 }
 
 function seedRechargePackages() {

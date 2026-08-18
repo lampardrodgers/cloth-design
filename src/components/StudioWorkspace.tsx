@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { generationModes, ratioOptions, roleLabels } from "../data/catalog";
+import { usePasteImages } from "../lib/clipboardImages";
 import { estimateCredits } from "../lib/costing";
 import { useStoredState } from "../lib/storedState";
 import type {
@@ -174,15 +175,19 @@ export function StudioWorkspace({
     .filter(Boolean)
     .join(" · ");
 
-  const acceptFiles = (files: FileList) => {
+  /** preferredId：粘贴时鼠标正停在哪张素材卡上，就换掉那一张，否则填第一个空位。 */
+  const acceptFiles = (files: FileList | File[], preferredId = "") => {
     const images = Array.from(files).filter((file) => file.type.startsWith("image/"));
     if (!images.length) return;
     let next = [...references];
+    let preferred = preferredId;
     images.forEach((file, index) => {
       const previewUrl = URL.createObjectURL(file);
       const note = file.name.replace(/\.[^.]+$/, "");
-      const target = next.find((reference) => !reference.previewUrl);
+      const target = next.find((reference) => reference.id === preferred) ?? next.find((reference) => !reference.previewUrl);
+      preferred = "";
       if (target) {
+        if (target.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(target.previewUrl);
         next = next.map((reference) =>
           reference.id === target.id ? { ...reference, previewUrl, fileName: file.name, file, note } : reference,
         );
@@ -203,6 +208,9 @@ export function StudioWorkspace({
     });
     onReferencesChange(next);
   };
+
+  // 截图完 ⌘/Ctrl + V 就能进参考素材，不用先存成文件再上传。
+  usePasteImages((files) => acceptFiles(files, hoveredReferenceId));
 
   /**
    * 把成片放进参考素材。优先填当前模式还空着的槽位——直接往后追加的话，

@@ -51,6 +51,7 @@ import "tldraw/tldraw.css";
 import { ratioOptions } from "../data/catalog";
 import { CANVAS_PERSISTENCE_KEY } from "../lib/canvasStore";
 import { reportClientError } from "../lib/clientErrors";
+import { clipboardHasText, clipboardImageFiles } from "../lib/clipboardImages";
 import {
   attachmentUsageHints,
   attachmentUsageLabels,
@@ -394,6 +395,8 @@ interface CanvasApi {
   results: GeneratedResult[];
   onGenerate: (input: CanvasGenerateInput) => Promise<GeneratedResult[]>;
   onNotice: (message: string) => void;
+  /** 把画布上的一张图送进简易模式的参考图（附件条）。 */
+  onSendToSimple: (image: { url: string; name: string; annotated?: boolean }) => void;
 }
 
 const CanvasApiContext = createContext<CanvasApi | null>(null);
@@ -429,6 +432,10 @@ function imageShapeSource(editor: Editor, shape: TLImageShape) {
 
 function shapeUsage(shape: TLShape): AttachmentUsage {
   return shape.meta?.aiUsage === "merge" ? "merge" : "reference";
+}
+
+function shapeAnnotated(shape: TLShape) {
+  return shape.meta?.aiAnnotated === true;
 }
 
 /**
@@ -489,7 +496,7 @@ function loadImageSize(src: string) {
 /** 把一张图落到画布上：建 asset + image shape，返回新形状 id。给了 box 就按 box 等比放进去。 */
 async function placeImage(
   editor: Editor,
-  image: { url: string; name: string; resultId?: string },
+  image: { url: string; name: string; resultId?: string; usage?: AttachmentUsage; annotated?: boolean },
   box: { x: number; y: number; w: number; h: number } | null,
   longEdge = 460,
 ) {
@@ -532,7 +539,13 @@ async function placeImage(
     x: placement.x,
     y: placement.y,
     props: { assetId, w: placement.w, h: placement.h },
-    meta: { aiUsage: "reference", aiResultId: image.resultId ?? null, aiName: image.name },
+    meta: {
+      aiUsage: image.usage ?? "reference",
+      aiResultId: image.resultId ?? null,
+      aiName: image.name,
+      // 拍平进来的标注图：提示词里要额外交代「箭头是修改指令，不是画面内容」。
+      aiAnnotated: image.annotated === true,
+    },
   });
   return shapeId;
 }
@@ -546,11 +559,15 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
-function clipboardImageFiles(event: React.ClipboardEvent) {
-  return Array.from(event.clipboardData?.items ?? [])
-    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-    .map((item) => item.getAsFile())
-    .filter((file): file is File => Boolean(file));
+/**
+ * 把一组形状拍平成一张 PNG。
+ * 「原图 + 压在它上面的标注」拍平后就是一张普通图片，既能当改图需求书，也能直接当参考图。
+ */
+async function flattenShapesToDataUrl(editor: Editor, ids: TLShapeId[]) {
+  const box = Box.Common(ids.map((id) => editor.getShapePageBounds(id)).filter((bounds): bounds is Box => Boolean(bounds)));
+  const pixelRatio = Math.max(2, EXPORT_MIN_EDGE / Math.max(1, Math.min(box.width, box.height)));
+  const exported = await editor.toImageDataUrl(ids, { format: "png", background: true, darkMode: false, padding: 8, pixelRatio });
+  return exported.url;
 }
 
 function createFrame(editor: Editor, at: { x: number; y: number } | null, ratioId = DEFAULT_RATIO_ID) {
@@ -586,7 +603,11 @@ function unlinkRef(editor: Editor, frameId: TLShapeId, id: TLShapeId) {
 }
 
 /** 上传/粘贴的参考图落在画框左侧一列，既能看见也能继续用。 */
-async function placeRefBesideFrame(editor: Editor, frame: AiFrameShape, image: { url: string; name: string }) {
+async function placeRefBesideFrame(
+  editor: Editor,
+  frame: AiFrameShape,
+  image: { url: string; name: string; usage?: AttachmentUsage; annotated?: boolean },
+) {
   const natural = await loadImageSize(image.url);
   const scale = REF_THUMB_EDGE / Math.max(natural.w, natural.h);
   const w = Math.round(natural.w * scale);
@@ -899,16 +920,37 @@ function CanvasImageToolbarContent() {
         onManipulatingEnd={handleManipulatingEnd}
       />
       {!isInCropTool && actions ? (
-        <TldrawUiToolbarButton
-          type="icon"
-          className="canvas-annotation-edit"
-          title={marks ? `按标注改图 · 已找到 ${marks} 处标注` : "按标注改图 · 先用「标注」工具在图上标出要改哪里"}
-          disabled={actions.busy}
-          onClick={() => actions.editByAnnotation(imageShapeId)}
-        >
-          <TldrawUiButtonIcon icon="tool-highlight" small />
-          <span className="canvas-annotation-edit-label">{actions.busy ? "生成中…" : "按标注改图"}</span>
-        </TldrawUiToolbarButton>
+        <>
+          <TldrawUiToolbarButton
+            type="icon"
+            className="canvas-annotation-edit"
+            title={marks ? `按标注改图 · 已找到 ${marks} 处标注` : "按标注改图 · 先用「标注」工具在图上标出要改哪里"}
+            disabled={actions.busy}
+            onClick={() => actions.editByAnnotation(imageShapeId)}
+          >
+            <TldrawUiButtonIcon icon="tool-highlight" small />
+            <span className="canvas-annotation-edit-label">{actions.busy ? "生成中…" : "按标注改图"}</span>
+          </TldrawUiToolbarButton>
+          <TldrawUiToolbarButton
+            type="icon"
+            className="canvas-send-simple"
+            title="把这张图加到简易模式的参考图里"
+            onClick={() => actions.sendToSimple(imageShapeId, false)}
+          >
+            <TldrawUiButtonIcon icon="duplicate" small />
+            <span className="canvas-annotation-edit-label">加到简易参考</span>
+          </TldrawUiToolbarButton>
+          {marks ? (
+            <TldrawUiToolbarButton
+              type="icon"
+              className="canvas-send-simple"
+              title={`连同图上的 ${marks} 处标注一起拍平，加到简易模式的参考图里`}
+              onClick={() => actions.sendToSimple(imageShapeId, true)}
+            >
+              <span className="canvas-annotation-edit-label">带标注加到简易</span>
+            </TldrawUiToolbarButton>
+          ) : null}
+        </>
       ) : null}
     </>
   );
@@ -918,6 +960,8 @@ interface CanvasActions {
   busy: boolean;
   annotationCount: (imageId: TLShapeId) => number;
   editByAnnotation: (imageId: TLShapeId) => void;
+  /** 把这张图送到简易模式的参考图；withAnnotations 会连图上的标注一起拍平。 */
+  sendToSimple: (imageId: TLShapeId, withAnnotations: boolean) => void;
 }
 
 const CanvasActionsContext = createContext<CanvasActions | null>(null);
@@ -1044,10 +1088,16 @@ function CanvasGuide({ onClose }: { onClose?: () => void }) {
           <em>要新图</em>按 <kbd>A</kbd> 或点工具栏的「AI 画框」放一个框，在下方写描述 → 生成，成片原地替换画框。
         </li>
         <li>
-          <em>给参考</em>选中画框，在面板里上传 / 粘贴图片，或从画布、成片库里挑；右侧面板可改比例和尺寸。
+          <em>给参考</em>选中画框后按 <kbd>⌘/Ctrl</kbd> + <kbd>V</kbd> 直接粘贴图片，也可以在面板里上传或从画布、成片库里挑；右侧面板可改比例和尺寸。
         </li>
         <li>
           <em>改图</em>按 <kbd>C</kbd> 用「标注」在图上拉箭头写要改什么 → 选中这张图 → 「按标注改图」，新图出现在右边。
+        </li>
+        <li>
+          <em>拿标注当参考</em>标注过的图，在画框的「+ 参考图 → 画布上的图」里点「带标注」，原图和标注会拍平成一张参考图挂到画框上。
+        </li>
+        <li>
+          <em>给简易模式用</em>画布上先要有图（粘贴 / 拖进来 / 右上角「成片」里点一张放到画布）→ 单击选中它 → 图正上方浮出的工具条里点「加到简易参考」（标注过的还多一个「带标注加到简易」）。
         </li>
         <li>
           <em>画草图</em>用画笔勾构图再框选 → 「按草图生成」。
@@ -1073,6 +1123,8 @@ interface FramePanelRef {
   name: string;
   src: string;
   usage: AttachmentUsage;
+  /** 由「原图 + 标注」拍平而来，提示词里会额外说明标注不是画面内容。 */
+  annotated: boolean;
 }
 
 function CanvasOverlay({
@@ -1129,6 +1181,7 @@ function CanvasOverlay({
               name: String(shape.meta?.aiName ?? "画布图片"),
               src: imageShapeSource(editor, shape),
               usage: shapeUsage(shape),
+              annotated: shapeAnnotated(shape),
             }))
         : [];
       const linked = new Set(refs.map((ref) => ref.id));
@@ -1176,6 +1229,7 @@ function CanvasOverlay({
         name: String(shape.meta?.aiName ?? "画布图片"),
         previewUrl: imageShapeSource(editor, shape),
         usage: shapeUsage(shape),
+        annotated: shapeAnnotated(shape),
       }))
       .filter((item) => item.previewUrl);
 
@@ -1235,12 +1289,11 @@ function CanvasOverlay({
 
       setContentBusy(true);
       try {
-        const pixelRatio = Math.max(2, EXPORT_MIN_EDGE / Math.max(1, Math.min(box.width, box.height)));
-        const exported = await editor.toImageDataUrl(ids, { format: "png", background: true, darkMode: false, padding: 8, pixelRatio });
+        const flattened = await flattenShapesToDataUrl(editor, ids);
         const results = await api.onGenerate({
           prompt: note,
           attachments: [
-            { id: `canvas-${ids[0]}`, name: intent === "annotation" ? "annotated.png" : "sketch.png", previewUrl: exported.url, usage: "merge" },
+            { id: `canvas-${ids[0]}`, name: intent === "annotation" ? "annotated.png" : "sketch.png", previewUrl: flattened, usage: "merge" },
           ],
           ratioId,
           intent,
@@ -1263,7 +1316,100 @@ function CanvasOverlay({
     [api, contentBusy, editor],
   );
 
-  // 图片工具栏上的「按标注改图」通过 context 调回来。
+  /** 上传 / 粘贴进来的图片：落在画框左边，并直接成为这个画框的参考图。 */
+  const attachFilesToFrame = useCallback(
+    async (frameId: TLShapeId, files: File[]) => {
+      const frame = editor.getShape<AiFrameShape>(frameId);
+      if (!frame) return;
+      for (const file of files) {
+        try {
+          const url = await readFileAsDataUrl(file);
+          const latest = editor.getShape<AiFrameShape>(frameId) ?? frame;
+          const shapeId = await placeRefBesideFrame(editor, latest, { url, name: file.name });
+          linkRefs(editor, frameId, [shapeId]);
+        } catch (error) {
+          api.onNotice(error instanceof Error ? error.message : `${file.name} 读取失败`);
+        }
+      }
+      editor.select(frameId);
+    },
+    [api, editor],
+  );
+
+  /**
+   * 选中画框时 ⌘/Ctrl + V 直接把剪贴板里的图收成参考图，不用先点面板里的「+ 参考图」，
+   * 光标停在描述框里也照收。捕获阶段拦下来，tldraw 自己那套「粘贴成画布图片」就不会再跑一遍
+   * （没选画框时留给它处理）。
+   */
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const only = editor.getOnlySelectedShape();
+      if (!isAiFrame(only)) return;
+      const files = clipboardImageFiles(event.clipboardData);
+      if (!files.length) return;
+      // 图文都有时（从网页、Excel 复制）文字照常落进描述框，只把图收成参考图。
+      if (!clipboardHasText(event.clipboardData)) event.preventDefault();
+      event.stopPropagation();
+      void attachFilesToFrame(only.id, files);
+    };
+    document.addEventListener("paste", handlePaste, true);
+    return () => document.removeEventListener("paste", handlePaste, true);
+  }, [attachFilesToFrame, editor]);
+
+  /** 把「原图 + 图上的标注」拍平成一张图，作为参考图挂到画框上。 */
+  const linkAnnotatedImage = useCallback(
+    async (frameId: TLShapeId, imageId: TLShapeId) => {
+      const frame = editor.getShape<AiFrameShape>(frameId);
+      if (!frame) return;
+      const ids = collectAnnotationShapeIds(editor, imageId);
+      if (ids.length < 2) {
+        api.onNotice("这张图上还没有标注：按 C 用「标注」工具在图上拉箭头写要改什么。");
+        return;
+      }
+      try {
+        const url = await flattenShapesToDataUrl(editor, ids);
+        // 标注图是「要改的那张原图」，默认按入画处理，成片必须基于它改。
+        const shapeId = await placeRefBesideFrame(editor, frame, { url, name: "带标注的图.png", usage: "merge", annotated: true });
+        linkRefs(editor, frameId, [shapeId]);
+        editor.select(frameId);
+      } catch (error) {
+        api.onNotice(error instanceof Error ? error.message : "标注图拍平失败");
+      }
+    },
+    [api, editor],
+  );
+
+  /** 把画布上的一张图送进简易模式的参考图，可选连图上的标注一起拍平。 */
+  const sendImageToSimple = useCallback(
+    async (imageId: TLShapeId, withAnnotations: boolean) => {
+      const shape = editor.getShape(imageId);
+      if (!isImageShape(shape)) return;
+      const name = String(shape.meta?.aiName ?? "画布图片");
+      try {
+        if (!withAnnotations) {
+          const src = imageShapeSource(editor, shape);
+          if (!src) {
+            api.onNotice("这张图没有可用的源文件，没法送到简易模式。");
+            return;
+          }
+          api.onSendToSimple({ url: src, name });
+          return;
+        }
+        const ids = collectAnnotationShapeIds(editor, imageId);
+        if (ids.length < 2) {
+          api.onNotice("这张图上还没有标注：按 C 用「标注」工具在图上拉箭头写要改什么。");
+          return;
+        }
+        const url = await flattenShapesToDataUrl(editor, ids);
+        api.onSendToSimple({ url, name: "带标注的图.png", annotated: true });
+      } catch (error) {
+        api.onNotice(error instanceof Error ? error.message : "没能把这张图送到简易模式。");
+      }
+    },
+    [api, editor],
+  );
+
+  // 图片工具栏上的「按标注改图」「加到简易参考」通过 context 调回来。
   useEffect(() => {
     onActions({
       busy: contentBusy,
@@ -1276,8 +1422,9 @@ function CanvasOverlay({
         }
         void generateFromShapes(ids, "annotation", "");
       },
+      sendToSimple: (imageId, withAnnotations) => void sendImageToSimple(imageId, withAnnotations),
     });
-  }, [api, contentBusy, editor, generateFromShapes, onActions]);
+  }, [api, contentBusy, editor, generateFromShapes, onActions, sendImageToSimple]);
 
   return (
     <>
@@ -1297,21 +1444,8 @@ function CanvasOverlay({
           onUsageChange={setUsage}
           onUnlink={(id) => unlinkRef(editor, selection.frame!.id, id)}
           onLink={(ids) => linkRefs(editor, selection.frame!.id, ids)}
-          onUpload={async (files) => {
-            const frame = selection.frame!;
-            const ids: TLShapeId[] = [];
-            for (const file of files) {
-              try {
-                const url = await readFileAsDataUrl(file);
-                const latest = editor.getShape<AiFrameShape>(frame.id) ?? frame;
-                ids.push(await placeRefBesideFrame(editor, latest, { url, name: file.name }));
-                if (ids.length) linkRefs(editor, frame.id, ids.slice(-1));
-              } catch (error) {
-                api.onNotice(error instanceof Error ? error.message : `${file.name} 读取失败`);
-              }
-            }
-            editor.select(frame.id);
-          }}
+          onLinkAnnotated={(imageId) => void linkAnnotatedImage(selection.frame!.id, imageId)}
+          onUpload={(files) => attachFilesToFrame(selection.frame!.id, files)}
           onGenerate={() => void generateFrame(selection.frame!)}
         />
       ) : null}
@@ -1398,6 +1532,7 @@ interface FramePanelProps {
   onUsageChange: (id: TLShapeId, usage: AttachmentUsage) => void;
   onUnlink: (id: TLShapeId) => void;
   onLink: (ids: TLShapeId[]) => void;
+  onLinkAnnotated: (imageId: TLShapeId) => void;
   onUpload: (files: File[]) => Promise<void>;
   onGenerate: () => void;
 }
@@ -1420,6 +1555,7 @@ function FramePanel({
   onUsageChange,
   onUnlink,
   onLink,
+  onLinkAnnotated,
   onUpload,
   onGenerate,
 }: FramePanelProps) {
@@ -1430,6 +1566,20 @@ function FramePanel({
   const [height, setHeight] = useState(200);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // 画布上每张图压着几处标注。数一遍要遍历整页形状，所以只在打开挑图面板时数一次，
+  // 不放进随相机变化重算的 selection 里。
+  const [marksByImage, setMarksByImage] = useState<Record<string, number>>({});
+
+  const togglePicker = () => {
+    if (pickerOpen) {
+      setPickerOpen(false);
+      return;
+    }
+    setMarksByImage(
+      Object.fromEntries(available.map((image) => [image.id, collectAnnotationShapeIds(editor, image.id).length - 1])),
+    );
+    setPickerOpen(true);
+  };
 
   useEffect(() => {
     const element = panelRef.current;
@@ -1482,6 +1632,11 @@ function FramePanel({
         {refs.map((ref) => (
           <figure className={`canvas-ref-card canvas-ref-${ref.usage}`} key={ref.id}>
             {ref.src ? <img src={ref.src} alt={ref.name} /> : <span className="canvas-ref-missing">无源图</span>}
+            {ref.annotated ? (
+              <em className="canvas-ref-annotated" title="这张图带人工标注：按标注改，成片里不会留下箭头和文字">
+                带标注
+              </em>
+            ) : null}
             <div className="canvas-ref-usage" role="radiogroup" aria-label={`${ref.name} 的用途`}>
               {(Object.keys(attachmentUsageLabels) as AttachmentUsage[]).map((usage) => (
                 <button
@@ -1508,7 +1663,7 @@ function FramePanel({
             className={pickerOpen ? "canvas-ref-add active" : "canvas-ref-add"}
             aria-expanded={pickerOpen}
             title="上传、粘贴，或从画布 / 成片里挑参考图"
-            onClick={() => setPickerOpen((open) => !open)}
+            onClick={togglePicker}
           >
             <em aria-hidden="true">{uploading ? "…" : "+"}</em>
             <span>参考图</span>
@@ -1535,24 +1690,38 @@ function FramePanel({
             <button type="button" onClick={() => fileInputRef.current?.click()}>
               上传图片
             </button>
-            <small>也可以直接把图粘贴到描述框里</small>
+            <small>选中画框时按 ⌘/Ctrl + V 可直接粘贴图片</small>
           </div>
           {available.length ? (
             <div className="canvas-ref-picker-group">
               <span>画布上的图</span>
               <div className="canvas-picker-list">
                 {available.map((image) => (
-                  <button
-                    type="button"
-                    key={image.id}
-                    className="canvas-picker-thumb"
-                    title="加为引用图"
-                    onClick={() => {
-                      onLink([image.id]);
-                    }}
-                  >
-                    <img src={image.src} alt="" />
-                  </button>
+                  <div className="canvas-picker-item" key={image.id}>
+                    <button
+                      type="button"
+                      className="canvas-picker-thumb"
+                      title="加为引用图"
+                      onClick={() => {
+                        onLink([image.id]);
+                      }}
+                    >
+                      <img src={image.src} alt="" />
+                    </button>
+                    {marksByImage[image.id] ? (
+                      <button
+                        type="button"
+                        className="canvas-picker-annotated"
+                        title={`把这张图连同图上的 ${marksByImage[image.id]} 处标注拍平成一张参考图`}
+                        onClick={() => {
+                          onLinkAnnotated(image.id);
+                          setPickerOpen(false);
+                        }}
+                      >
+                        带标注
+                      </button>
+                    ) : null}
+                  </div>
                 ))}
               </div>
             </div>
@@ -1590,12 +1759,6 @@ function FramePanel({
         value={frame.props.prompt}
         placeholder="描述你想生成的图片，⌘ / Ctrl + Enter 直接生成"
         onChange={(event) => onPromptChange(event.target.value)}
-        onPaste={(event) => {
-          const files = clipboardImageFiles(event);
-          if (!files.length) return;
-          event.preventDefault();
-          void upload(files);
-        }}
         onKeyDown={(event) => {
           event.stopPropagation();
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -1760,9 +1923,19 @@ interface CanvasBoardProps {
   onGenerate: (input: CanvasGenerateInput) => Promise<GeneratedResult[]>;
   onPendingConsumed: (ids: string[]) => void;
   onNotice: (message: string) => void;
+  onSendToSimple: (image: { url: string; name: string; annotated?: boolean }) => void;
 }
 
-export function CanvasBoard({ costFor, credits, results, pendingImages, onGenerate, onPendingConsumed, onNotice }: CanvasBoardProps) {
+export function CanvasBoard({
+  costFor,
+  credits,
+  results,
+  pendingImages,
+  onGenerate,
+  onPendingConsumed,
+  onNotice,
+  onSendToSimple,
+}: CanvasBoardProps) {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [actions, setActions] = useState<CanvasActions | null>(null);
@@ -1783,8 +1956,11 @@ export function CanvasBoard({ costFor, credits, results, pendingImages, onGenera
     }),
     [helpOpen, libraryOpen],
   );
-  const [api, setApi] = useState<CanvasApi>(() => ({ costFor, credits, results, onGenerate, onNotice }));
-  useEffect(() => setApi({ costFor, credits, results, onGenerate, onNotice }), [costFor, credits, results, onGenerate, onNotice]);
+  const [api, setApi] = useState<CanvasApi>(() => ({ costFor, credits, results, onGenerate, onNotice, onSendToSimple }));
+  useEffect(
+    () => setApi({ costFor, credits, results, onGenerate, onNotice, onSendToSimple }),
+    [costFor, credits, results, onGenerate, onNotice, onSendToSimple],
+  );
 
   const components = useMemo<TLComponents>(
     () => ({

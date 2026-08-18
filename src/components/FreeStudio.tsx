@@ -12,6 +12,7 @@ import type {
   GeneratedResult,
   PendingCanvasImage,
   StudioSettings,
+  SubmissionRecord,
 } from "../types";
 import type { ApiConfig } from "../lib/api";
 import type { CanvasGenerateInput } from "./CanvasBoard";
@@ -36,6 +37,8 @@ export type FreeLayout = "simple" | "canvas";
 
 interface FreeStudioProps {
   results: GeneratedResult[];
+  /** 每次提交的现场存档，按 taskId 对上成片。 */
+  submissions: SubmissionRecord[];
   credits: number;
   creditPolicy: CreditPolicy;
   settings: StudioSettings;
@@ -57,6 +60,7 @@ const freeMode = generationModes.find((mode) => mode.id === "free") ?? generatio
  */
 export function FreeStudio({
   results,
+  submissions,
   credits,
   creditPolicy,
   settings,
@@ -73,7 +77,8 @@ export function FreeStudio({
   const [quantity, setQuantity] = useStoredState("clothdesign:free:quantity", 1);
   const [pendingImages, setPendingImages] = useState<PendingCanvasImage[]>([]);
   const [notice, setNotice] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  /** 手上有几张还在生成。简易模式不再因此锁住输入框，只用来显示进度。 */
+  const [pendingCount, setPendingCount] = useState(0);
 
   const costFor = useCallback(
     (referenceCount: number, count = 1) =>
@@ -104,17 +109,26 @@ export function FreeStudio({
     if (added.length) setAttachments((current) => [...current, ...added].slice(0, MAX_ATTACHMENTS));
   };
 
-  const handleSimpleGenerate = async () => {
-    if (submitting) return;
-    setSubmitting(true);
+  /**
+   * 简易模式提交：交出去就清空左边，接着写下一张，不用等这张出完。
+   * 描述和参考图都进了这次提交的存档（右边「提交详情」能查），所以清空不算丢东西；
+   * 万一请求当场就失败，而用户还没开始写下一张，就把刚才那份放回去。
+   */
+  const handleSimpleGenerate = () => {
+    const submitted = { prompt, attachments };
+    if (!submitted.prompt.trim()) return;
     setNotice("");
-    try {
-      await onGenerate({ prompt, attachments, ratioId, quantity });
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "生成失败");
-    } finally {
-      setSubmitting(false);
-    }
+    setPendingCount((count) => count + 1);
+    const running = onGenerate({ prompt: submitted.prompt, attachments: submitted.attachments, ratioId, quantity });
+    setPrompt("");
+    setAttachments([]);
+    running
+      .catch((error) => {
+        setNotice(error instanceof Error ? error.message : "生成失败");
+        setPrompt((current) => (current.trim() ? current : submitted.prompt));
+        setAttachments((current) => (current.length ? current : submitted.attachments));
+      })
+      .finally(() => setPendingCount((count) => Math.max(0, count - 1)));
   };
 
   const handleUseAsAttachment = (result: GeneratedResult) => {
@@ -127,6 +141,35 @@ export function FreeStudio({
     });
     setNotice(`已把「${result.title}」加入参考，可继续在描述里说明怎么改。`);
   };
+
+  /** 画布上的图 →（简易模式的）参考图。和「放到画布」正好互为一对。 */
+  const handleSendCanvasImageToSimple = useCallback(
+    (image: { url: string; name: string; annotated?: boolean }) => {
+      let added = false;
+      setAttachments((current) => {
+        if (current.length >= MAX_ATTACHMENTS) return current;
+        if (current.some((item) => item.previewUrl === image.url)) return current;
+        added = true;
+        return [
+          ...current,
+          {
+            id: `att-canvas-${Date.now().toString(36)}`,
+            name: image.name,
+            previewUrl: image.url,
+            usage: (image.annotated ? "merge" : "reference") as AttachmentUsage,
+            annotated: image.annotated,
+          },
+        ];
+      });
+      // setState 的回调是同步跑的，这里已经能知道结果了。
+      setNotice(
+        added
+          ? `已加到简易模式的参考图${image.annotated ? "（带标注，按入画使用）" : ""}，切到「简易」就能看到。`
+          : `简易模式的参考图最多 ${MAX_ATTACHMENTS} 张，或这张已经在里面了。`,
+      );
+    },
+    [setAttachments],
+  );
 
   const handleSendResultToCanvas = (result: GeneratedResult) => {
     setPendingImages((current) => [...current, { id: result.id, url: result.imageUrl, name: result.title }]);
@@ -158,7 +201,8 @@ export function FreeStudio({
             quantity={quantity}
             cost={simpleCost}
             credits={credits}
-            isGenerating={submitting}
+            pendingCount={pendingCount}
+            submissions={submissions}
             notice={notice}
             results={results}
             onPromptChange={(value) => {
@@ -225,6 +269,7 @@ export function FreeStudio({
                 onGenerate={handleCanvasGenerate}
                 onPendingConsumed={handlePendingConsumed}
                 onNotice={setNotice}
+                onSendToSimple={handleSendCanvasImageToSimple}
               />
             </Suspense>
           </ErrorBoundary>

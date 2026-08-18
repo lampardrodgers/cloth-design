@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -75,9 +76,7 @@ const fakeImagesApi = http.createServer(async (req) => {
 const fakeImagesPort = await listen(fakeImagesApi);
 
 const appPort = 22200 + Math.floor(Math.random() * 1000);
-const app = spawn(process.execPath, ["server/index.mjs"], {
-  cwd: process.cwd(),
-  env: {
+const appEnv = {
     ...process.env,
     HOST: "127.0.0.1",
     PORT: String(appPort),
@@ -96,8 +95,27 @@ const app = spawn(process.execPath, ["server/index.mjs"], {
     OPENAI_BASE_URL: `http://127.0.0.1:${fakeImagesPort}`,
     OPENAI_IMAGE_MODEL: "gpt-image-2",
     OPENAI_IMAGE_TIMEOUT_MS: "100",
-  },
-});
+};
+
+const dbPath = path.join(tmpDir, "app.db");
+const readTask = (id) => {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return db.prepare("SELECT id, status, message, credits FROM generation_task WHERE id = ?").get(id);
+  } finally {
+    db.close();
+  }
+};
+const latestTask = () => {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return db.prepare("SELECT id, status, message, credits, key_source FROM generation_task ORDER BY created_at DESC LIMIT 1").get();
+  } finally {
+    db.close();
+  }
+};
+
+let app = spawn(process.execPath, ["server/index.mjs"], { cwd: process.cwd(), env: { ...process.env, ...appEnv } });
 
 try {
   await waitForOutput(app, /ClothDesign AI running/);
@@ -153,6 +171,49 @@ try {
   response = await request(baseUrl, jar, "/api/me");
   await assertResponse(response, (item) => item.ok, true);
   assert.equal((await response.json()).account.credits, 300);
+
+  // 失败必须落到任务记录上，否则后台永远显示「运行中」，看着像还在跑。
+  const serverKeyTask = latestTask();
+  assert.equal(serverKeyTask.status, "failed", `扣了积分的任务失败后要标记失败：${JSON.stringify(serverKeyTask)}`);
+  assert.match(serverKeyTask.message, /超时/);
+  assert.match(serverKeyTask.message, /积分已退回/);
+
+  // 自备 Key 的账号 cost 恒为 0：以前退款和状态落库写在一起，这类任务失败后永远停在「运行中」。
+  response = await request(baseUrl, jar, "/api/me/api-key", {
+    method: "PUT",
+    ...jsonBody({ apiKey: "sk-user-own-key-000000000000000000" }),
+  });
+  await assertResponse(response, (item) => item.ok, true);
+
+  const ownKeyForm = new FormData();
+  ownKeyForm.append("payload", JSON.stringify(payload));
+  response = await request(baseUrl, jar, "/api/generate", {
+    method: "POST",
+    body: ownKeyForm,
+    signal: AbortSignal.timeout(1500),
+  });
+  assert.equal(response.status, 500);
+  const ownKeyTask = latestTask();
+  assert.equal(ownKeyTask.key_source, "user");
+  assert.equal(ownKeyTask.credits, 0);
+  assert.equal(ownKeyTask.status, "failed", `自备 Key 的任务失败后也要标记失败：${JSON.stringify(ownKeyTask)}`);
+  assert.match(ownKeyTask.message, /超时/);
+  assert.doesNotMatch(ownKeyTask.message, /积分/, "没扣积分就别说退款");
+
+  // 进程重启会把手上正在跑的请求一起带走：启动时要把残留的「运行中」收口成失败。
+  app.kill("SIGTERM");
+  await new Promise((resolve) => app.once("exit", resolve));
+  const stuckId = ownKeyTask.id;
+  const writable = new Database(dbPath);
+  writable.prepare("UPDATE generation_task SET status = 'running', message = '生成中' WHERE id = ?").run(stuckId);
+  writable.close();
+  assert.equal(readTask(stuckId).status, "running");
+
+  app = spawn(process.execPath, ["server/index.mjs"], { cwd: process.cwd(), env: { ...process.env, ...appEnv } });
+  await waitForOutput(app, /ClothDesign AI running/);
+  const revived = readTask(stuckId);
+  assert.equal(revived.status, "failed", "重启后残留的运行中任务要收口成失败");
+  assert.match(revived.message, /重启/);
 } finally {
   app.kill("SIGTERM");
   fakeImagesApi.closeAllConnections?.();

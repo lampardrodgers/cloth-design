@@ -1,4 +1,5 @@
 import { useRef, type DragEvent } from "react";
+import { usePasteImages } from "../lib/clipboardImages";
 import { attachmentUsageHints, attachmentUsageLabels, MAX_ATTACHMENTS } from "../lib/freeStudio";
 import type { AttachmentUsage, FreeAttachment } from "../types";
 
@@ -38,6 +39,9 @@ export function AttachmentStrip({
     if (disabled || full) return;
     pickFiles(event.dataTransfer.files);
   };
+
+  // 截图后直接 ⌘/Ctrl + V，不用先存成文件；一次最多补到 max 张。
+  usePasteImages((files) => onAddFiles(files.slice(0, Math.max(0, max - attachments.length))), !disabled && !full);
 
   return (
     <div
@@ -89,7 +93,7 @@ export function AttachmentStrip({
           type="button"
           className="attachment-add"
           disabled={disabled || full}
-          title={full ? `最多 ${max} 张` : "点击选择，或直接把图片拖进来"}
+          title={full ? `最多 ${max} 张` : "点击选择，或把图片拖进来 / 按 ⌘/Ctrl + V 粘贴"}
           onClick={() => inputRef.current?.click()}
         >
           <em>+</em>

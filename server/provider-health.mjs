@@ -128,11 +128,14 @@ export function classifyImageProviderHealth({ mode, providerReady, latest } = {}
 
 export function latestImageProviderEvent() {
   try {
+    // failure_source = 'system' 的失败是我们自己造成的（积分扣费失败、服务重启收口），
+    // 跟图像接口没关系，不能拿它把接口报成故障。
     const generationTask = sqlite
       .prepare(
         `SELECT 'generation' AS source, status, message, created_at AS createdAt, updated_at AS updatedAt
          FROM generation_task
          WHERE status IN ('running', 'success', 'failed')
+           AND (failure_source IS NULL OR failure_source <> 'system')
          ORDER BY updated_at DESC
          LIMIT 1`,
       )

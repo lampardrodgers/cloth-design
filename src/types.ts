@@ -63,6 +63,8 @@ export interface FreeAttachment {
   previewUrl: string;
   usage: AttachmentUsage;
   note?: string;
+  /** 「原图 + 人工标注」拍平成的图：提示词里要交代箭头是修改指令，不是画面内容。 */
+  annotated?: boolean;
   width?: number;
   height?: number;
   file?: File;
@@ -126,6 +128,29 @@ export interface GenerationTask {
   credits: number;
   createdAt: string;
   message: string;
+}
+
+/** 一次提交当时的现场：描述、参考图、参数。提交完输入框会清空，靠它回看。 */
+export interface SubmissionReference {
+  name: string;
+  usage: AttachmentUsage;
+  /** 缩略图（长边 128px）。存全尺寸会把 localStorage 撑爆，认出是哪张图足够。 */
+  thumbUrl: string;
+}
+
+export interface SubmissionRecord {
+  taskId: string;
+  /** 用户写的那句描述，不是拼装后的完整提示词。 */
+  prompt: string;
+  references: SubmissionReference[];
+  ratioLabel: string;
+  sizeLabel: string;
+  quantity: number;
+  quality: string;
+  outputFormat: string;
+  background: string;
+  inputFidelity: string;
+  createdAt: string;
 }
 
 export interface GeneratedResult {

@@ -4578,16 +4578,35 @@ a.stage-tool {
   gap: 6px;
 }
 
+/*
+ * 生成按钮钉在整行最右边：状态文案（就绪 / 生成中 / 失败原因）长短不一，
+ * 以前整块右对齐，文案一变按钮就跟着左右横跳。现在状态往左长，按钮不动。
+ */
 .simple-submit {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 33px;
+}
+
+/* 状态文案长了就在左边自己换行往下长，按钮钉在右上角原地不动。 */
+.simple-submit-status {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  margin-left: auto;
+  gap: 10px;
+  min-height: 33px;
 }
 
 .simple-submit .prompt-status {
   margin-left: 0;
+  text-align: left;
+}
+
+.simple-submit .btn-primary {
+  flex: none;
 }
 
 .simple-empty {
@@ -4717,6 +4736,8 @@ a.stage-tool {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  /* 和一张附件卡等高：加图、删图、提交后自动清空都不会让下面的比例 / 张数 / 生成按钮上下跳。 */
+  min-height: 141px;
 }
 
 .attachment-card {
@@ -4806,7 +4827,7 @@ a.stage-tool {
  /* 一张附件都没有时，这块只是个入口，不用占满一张卡片的高度。 */
 .attachment-strip-empty .attachment-add {
   width: 100%;
-  min-height: 84px;
+  min-height: 141px;
 }
 
 .attachment-add:hover:not(:disabled) {
@@ -4832,6 +4853,20 @@ a.stage-tool {
   position: absolute;
   inset: 0;
   font-family: var(--serif);
+}
+
+/*
+ * tldraw 默认把左上角那条菜单（≡ / Page 1 / 撤销…）焊死在容器角上，靠两条同色描边
+ * 和一个右下圆角跟画布融成一体。在它自己的整窗应用里没问题，但这里画布上面就是顶栏、
+ * 左边就是导航栏，贴上去正好压掉顶栏那条分隔线，看着像画布咬掉了一块。
+ * 让它和右上角的「成片 / 清空 / ?」一样浮起来，四周留出空隙。
+ */
+.canvas-shell .tlui-menu-zone {
+  margin: 8px 0 0 8px;
+  border: 0;
+  border-radius: var(--tl-radius-3);
+  background: var(--tl-color-panel);
+  box-shadow: var(--tl-shadow-2);
 }
 
 /* AI 画框：待生成的占位符，生成完成后被同位置的图片取代。 */
@@ -4967,14 +5002,16 @@ a.stage-tool {
 }
 
 /* 图片工具栏上的「按标注改图」 */
-.tlui-button.canvas-annotation-edit {
+.tlui-button.canvas-annotation-edit,
+.tlui-button.canvas-send-simple {
   width: auto;
   min-width: 100px;
   padding: 0 12px;
   gap: 6px;
 }
 
-.tlui-button.canvas-annotation-edit::after {
+.tlui-button.canvas-annotation-edit::after,
+.tlui-button.canvas-send-simple::after {
   inset: 4px;
 }
 
@@ -5424,6 +5461,43 @@ a.stage-tool {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* 画布上带标注的图：除了原图，还能把「原图 + 标注」拍平成一张参考图。 */
+.canvas-picker-item {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+}
+
+.canvas-picker-annotated {
+  padding: 1px 6px;
+  border: 1px solid #f0b6b6;
+  border-radius: 999px;
+  background: #fff5f5;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.6;
+  color: #c2410c;
+  cursor: pointer;
+}
+
+.canvas-picker-annotated:hover {
+  border-color: #d64545;
+  background: #ffe9e9;
+}
+
+.canvas-ref-annotated {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(214, 69, 69, 0.9);
+  font-size: 9.5px;
+  font-style: normal;
+  line-height: 15px;
+  color: #fff;
 }
 
 /* 草图选区下方的小条 */
@@ -6105,6 +6179,139 @@ a.stage-tool {
   font-size: 12.5px;
   line-height: 1.7;
   white-space: pre-wrap;
+}
+
+/* 提交详情：参考图缩略图 + 参数表 */
+.submission-refs {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.submission-ref-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.submission-ref {
+  width: 64px;
+  margin: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.submission-ref img,
+.submission-ref-missing {
+  display: block;
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  object-fit: cover;
+  background: var(--field);
+}
+
+.submission-ref-missing {
+  display: grid;
+  place-items: center;
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.submission-ref figcaption {
+  display: grid;
+  gap: 1px;
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.submission-ref figcaption em {
+  font-style: normal;
+  color: var(--gold);
+}
+
+.submission-params {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px;
+}
+
+.submission-params div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.submission-params dt {
+  color: var(--faint);
+}
+
+.submission-params dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.submission-empty {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* 已经提交、还在生成时的提示（左边已经清空，可以接着写下一张） */
+.simple-pending-chip {
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--gold);
+}
+
+.simple-stage-pending-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(240, 237, 231, 0.12);
+  font-size: 11.5px;
+  color: rgba(240, 237, 231, 0.72);
+}
+
+.simple-stage-pending-bar strong {
+  font-family: var(--display);
+  font-size: 12.5px;
+  color: var(--canvas-ink);
+}
+
+/* 任务面板里的提交现场 */
+.task-submission {
+  display: grid;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.task-submission-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.task-submission-refs img {
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  border: 1px solid var(--line-soft);
+  object-fit: cover;
 }
 
 .stage-prompt-actions {

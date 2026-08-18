@@ -1,5 +1,6 @@
 import { generationModes } from "../data/catalog";
-import type { GeneratedResult, GenerationTask, TaskStatus } from "../types";
+import { attachmentUsageLabels } from "../lib/freeStudio";
+import type { GeneratedResult, GenerationTask, SubmissionRecord, TaskStatus } from "../types";
 
 const statusLabel: Record<TaskStatus, string> = {
   running: "运行中",
@@ -24,11 +25,13 @@ function displayTaskMessage(message: string) {
 interface TaskRailProps {
   tasks: GenerationTask[];
   results?: GeneratedResult[];
+  /** 提交现场：任务还在跑、输入框已经清空时，靠它回答「这条任务提交的是什么」。 */
+  submissions?: SubmissionRecord[];
   onRetry: (task: GenerationTask) => void;
   onClose?: () => void;
 }
 
-export function TaskRail({ tasks, results = [], onRetry, onClose }: TaskRailProps) {
+export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClose }: TaskRailProps) {
   const running = tasks.filter((task) => task.status === "running").length;
   const success = tasks.filter((task) => task.status === "success").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
@@ -58,6 +61,7 @@ export function TaskRail({ tasks, results = [], onRetry, onClose }: TaskRailProp
         {tasks.map((task) => {
           const mode = generationModes.find((item) => item.id === task.mode);
           const preview = results.find((result) => result.taskId === task.id);
+          const submission = submissions.find((item) => item.taskId === task.id);
           return (
             <article className={`task-item task-${task.status}`} key={task.id}>
               <div className="task-preview">{preview ? <img src={preview.imageUrl} alt="" /> : null}</div>
@@ -70,6 +74,28 @@ export function TaskRail({ tasks, results = [], onRetry, onClose }: TaskRailProp
                 <div className="progress-track" aria-hidden="true">
                   <span style={{ width: `${task.progress}%` }} />
                 </div>
+                {submission ? (
+                  <div className="task-submission">
+                    <span>
+                      {submission.ratioLabel} · {submission.sizeLabel} · {submission.quantity} 张 ·{" "}
+                      {submission.references.length ? `${submission.references.length} 张参考图` : "无参考图"}
+                    </span>
+                    {submission.references.length ? (
+                      <div className="task-submission-refs">
+                        {submission.references.map((reference, index) =>
+                          reference.thumbUrl ? (
+                            <img
+                              key={`${reference.name}-${index}`}
+                              src={reference.thumbUrl}
+                              alt={reference.name}
+                              title={`${attachmentUsageLabels[reference.usage]} · ${reference.name}`}
+                            />
+                          ) : null,
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="task-foot">
                   <span>{task.createdAt}</span>
                   <span>{task.credits} 积分</span>
