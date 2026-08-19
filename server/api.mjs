@@ -11,6 +11,7 @@ import {
   saveImageProviderSettings,
 } from "./provider-config.mjs";
 import { testProviderConnectivity } from "./provider-connectivity.mjs";
+import { canUseShortVideo, shortVideoFeatureFor } from "./shortvideo.mjs";
 import { nowIso, sqlite } from "./db.mjs";
 import {
   DEBUG_UNLIMITED_CREDITS,
@@ -91,6 +92,8 @@ export function serializeAccount(user, profile) {
     // 1K/2K/4K 哪些能点：前端照这个渲染，服务端出图前还会再裁一次。
     ...resolutionPolicyFor(apiProviderId, safeProfile.max_resolution),
     serverKeyConfigured: Boolean(serverApiKey(apiProviderId)),
+    // 按账号开的功能开关：前端只在为 true 时渲染对应入口（短视频默认只有 admin）。
+    features: shortVideoFeatureFor(safeProfile),
   };
 }
 
@@ -104,8 +107,16 @@ function publicImageProviders() {
 /**
  * 后台看用量：按账号汇总任务数、成片数、积分消耗（扣除退款）和最近活跃时间。
  * 自备 Key 的任务单独计数——那部分没扣积分，但接口费用是他们自己的。
+ *
+ * `userIds` 传了就只统计这几个账号。后台用户列表分页之后，一页只有几十个人，
+ * 没必要为了这几行去把 generation_task / generated_result / credit_ledger 整表扫一遍。
  */
-export function usageByUser() {
+export function usageByUser(userIds) {
+  const scope = Array.isArray(userIds) ? userIds.filter(Boolean) : null;
+  if (scope && scope.length === 0) return new Map();
+  const filter = scope ? ` AND user_id IN (${scope.map(() => "?").join(", ")})` : "";
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const scoped = scope || [];
   const rows = sqlite
     .prepare(
       `SELECT user_id,
@@ -115,19 +126,23 @@ export function usageByUser() {
               SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS task_count_30d,
               MAX(created_at) AS last_task_at
        FROM generation_task
+       WHERE 1 = 1${filter}
        GROUP BY user_id`,
     )
-    .all(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
-  const images = sqlite.prepare("SELECT user_id, COUNT(*) AS image_count FROM generated_result GROUP BY user_id").all();
+    .all(monthAgo, ...scoped);
+  const images = sqlite
+    .prepare(`SELECT user_id, COUNT(*) AS image_count FROM generated_result WHERE 1 = 1${filter} GROUP BY user_id`)
+    .all(...scoped);
   const credits = sqlite
     .prepare(
       `SELECT user_id,
               SUM(CASE WHEN kind IN ('consume', 'refund') THEN -amount ELSE 0 END) AS credits_spent,
               SUM(CASE WHEN kind IN ('consume', 'refund') AND created_at >= ? THEN -amount ELSE 0 END) AS credits_spent_30d
        FROM credit_ledger
+       WHERE 1 = 1${filter}
        GROUP BY user_id`,
     )
-    .all(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
+    .all(monthAgo, ...scoped);
   const usage = new Map();
   const ensure = (userId) => {
     if (!usage.has(userId)) {
@@ -226,12 +241,21 @@ function serializeGeneratedResult(row) {
   };
 }
 
-/** 文件管理页用：该账号全部成片（最多 300 条），含过期的。 */
-function storageResultsForUser(userId) {
-  return sqlite
-    .prepare("SELECT * FROM generated_result WHERE user_id = ? ORDER BY created_at DESC LIMIT 300")
-    .all(userId)
-    .map(serializeGeneratedResult);
+/**
+ * 文件管理页用：该账号的成片（含过期的），按页给。
+ * 原来是一次性取 300 条整页渲染，出图上千之后首屏能卡好几秒——每条都带一个 <img>。
+ */
+function storageResultsPageForUser(userId, { page, pageSize }) {
+  return adminPage({
+    page,
+    pageSize,
+    count: () => sqlite.prepare("SELECT COUNT(*) AS count FROM generated_result WHERE user_id = ?").get(userId)?.count,
+    rows: (limit, offset) =>
+      sqlite
+        .prepare("SELECT * FROM generated_result WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?")
+        .all(userId, limit, offset),
+    map: (list) => list.map(serializeGeneratedResult),
+  });
 }
 
 function recentGeneratedResultsForUser(userId) {
@@ -241,18 +265,144 @@ function recentGeneratedResultsForUser(userId) {
     .map(serializeGeneratedResult);
 }
 
-function recentGeneratedResultsForAdmin() {
-  return sqlite
-    .prepare(
-      `SELECT r.*, u.email AS user_email, p.display_name AS user_name
-       FROM generated_result r
-       LEFT JOIN "user" u ON u.id = r.user_id
-       LEFT JOIN user_profile p ON p.user_id = r.user_id
-       ORDER BY r.created_at DESC
-       LIMIT 80`,
-    )
-    .all()
-    .map(serializeGeneratedResult);
+/**
+ * 后台列表统一分页。
+ * 之前 overview 是把订单/流水/生成记录各拉 80 条一次性塞进同一个响应里，前端再 slice 出 8~12 条渲染：
+ * 拉回来的大半是白拉的，而第 13 条往后永远看不到。数据涨到成百上千之后这套就彻底不能用了。
+ */
+const ADMIN_PAGE_SIZE = 20;
+// 文件管理是缩略图网格，一页给多一点更顺手。
+const STORAGE_PAGE_SIZE = 24;
+// 生成审计排成 3 列，一页正好 5 行。
+const ADMIN_RESULT_PAGE_SIZE = 15;
+const ADMIN_PAGE_SIZE_MAX = 100;
+
+function parsePaging(query, fallbackSize = ADMIN_PAGE_SIZE) {
+  const rawSize = Number.parseInt(query?.pageSize, 10);
+  const rawPage = Number.parseInt(query?.page, 10);
+  const pageSize = Math.min(Math.max(Number.isFinite(rawSize) ? rawSize : fallbackSize, 1), ADMIN_PAGE_SIZE_MAX);
+  const page = Math.max(Number.isFinite(rawPage) ? rawPage : 1, 1);
+  return { page, pageSize };
+}
+
+/**
+ * 取一页：先数总数，页码超出范围就夹回最后一页。
+ * 不夹的话，删掉几条之后停在原来的末页就是一片空白，看着像数据没了。
+ */
+function adminPage({ count, rows, page, pageSize, map = (list) => list }) {
+  const total = Number(count() || 0);
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const items = total === 0 ? [] : map(rows(pageSize, (safePage - 1) * pageSize));
+  return { items, total, page: safePage, pageSize, pageCount };
+}
+
+/** 只要游标，不要数据体——overview 里 items 已经单独给过了。 */
+function pageMeta({ total, page, pageSize, pageCount }) {
+  return { total, page, pageSize, pageCount };
+}
+
+// 用 Map 而不是普通对象：filter 是 query 里来的，普通对象查 "toString" / "constructor"
+// 会摸到原型上的东西，那玩意儿一旦被拼进 SQL 就是一条语法错误的语句。
+const USER_FILTERS = new Map([
+  ["all", ""],
+  ["pending", "p.approved = 0"],
+  ["locked", "p.status = 'locked'"],
+  ["unlimited", "p.unlimited = 1"],
+  ["own-key", "p.api_key_encrypted IS NOT NULL"],
+]);
+
+function adminUsersPage({ page, pageSize, keyword = "", filter = "all" }) {
+  const clauses = [];
+  const params = [];
+  const term = String(keyword || "").trim().slice(0, 80);
+  if (term) {
+    // LIKE 里的 % 和 _ 是通配符，用户搜的是字面量，转义掉。
+    const like = `%${term.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+    clauses.push(`(u.email LIKE ? ESCAPE '\\' OR p.display_name LIKE ? ESCAPE '\\')`);
+    params.push(like, like);
+  }
+  const filterClause = USER_FILTERS.get(String(filter)) ?? "";
+  if (filterClause) clauses.push(filterClause);
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const from = `FROM user_profile p LEFT JOIN "user" u ON u.id = p.user_id ${where}`;
+  return adminPage({
+    page,
+    pageSize,
+    count: () => sqlite.prepare(`SELECT COUNT(*) AS count ${from}`).get(...params)?.count,
+    rows: (limit, offset) =>
+      sqlite.prepare(`SELECT p.*, u.email, u.name ${from} ORDER BY p.created_at ASC LIMIT ? OFFSET ?`).all(...params, limit, offset),
+    // 用量只统计当页这几十个账号，别为了一页表格去扫三张全表。
+    map: (list) => {
+      const usage = usageByUser(list.map((row) => row.user_id));
+      return list.map((row) => serializeAdminUser(row, usage.get(row.user_id)));
+    },
+  });
+}
+
+function adminOrdersPage({ page, pageSize }) {
+  return adminPage({
+    page,
+    pageSize,
+    count: () => sqlite.prepare("SELECT COUNT(*) AS count FROM payment_order").get()?.count,
+    rows: (limit, offset) =>
+      sqlite.prepare("SELECT * FROM payment_order ORDER BY created_at DESC LIMIT ? OFFSET ?").all(limit, offset),
+    map: (list) => list.map(serializeOrder),
+  });
+}
+
+function serializePaymentEvent(row) {
+  return {
+    id: row.id,
+    provider: row.provider,
+    eventKey: row.event_key,
+    orderId: row.order_id,
+    transactionId: row.transaction_id,
+    processed: Boolean(row.processed),
+    createdAt: row.created_at,
+  };
+}
+
+function adminPaymentEventsPage({ page, pageSize }) {
+  return adminPage({
+    page,
+    pageSize,
+    count: () => sqlite.prepare("SELECT COUNT(*) AS count FROM payment_event").get()?.count,
+    rows: (limit, offset) =>
+      sqlite.prepare("SELECT * FROM payment_event ORDER BY created_at DESC LIMIT ? OFFSET ?").all(limit, offset),
+    map: (list) => list.map(serializePaymentEvent),
+  });
+}
+
+function adminLedgerPage({ page, pageSize }) {
+  return adminPage({
+    page,
+    pageSize,
+    count: () => sqlite.prepare("SELECT COUNT(*) AS count FROM credit_ledger").get()?.count,
+    rows: (limit, offset) =>
+      sqlite.prepare("SELECT * FROM credit_ledger ORDER BY created_at DESC LIMIT ? OFFSET ?").all(limit, offset),
+    map: (list) => list.map(serializeLedger),
+  });
+}
+
+function adminGenerationResultsPage({ page, pageSize }) {
+  return adminPage({
+    page,
+    pageSize,
+    count: () => sqlite.prepare("SELECT COUNT(*) AS count FROM generated_result").get()?.count,
+    rows: (limit, offset) =>
+      sqlite
+        .prepare(
+          `SELECT r.*, u.email AS user_email, p.display_name AS user_name
+           FROM generated_result r
+           LEFT JOIN "user" u ON u.id = r.user_id
+           LEFT JOIN user_profile p ON p.user_id = r.user_id
+           ORDER BY r.created_at DESC
+           LIMIT ? OFFSET ?`,
+        )
+        .all(limit, offset),
+    map: (list) => list.map(serializeGeneratedResult),
+  });
 }
 
 function generatedImageReferenceCount(imageUrl) {
@@ -351,7 +501,7 @@ export function adminSummary() {
   };
 }
 
-function serializeAdminUser(row, usage = usageByUser().get(row.user_id)) {
+function serializeAdminUser(row, usage = usageByUser([row.user_id]).get(row.user_id)) {
   return {
     id: row.user_id,
     email: row.email,
@@ -368,6 +518,9 @@ function serializeAdminUser(row, usage = usageByUser().get(row.user_id)) {
     apiKeyHint: row.api_key_hint || null,
     apiProviderId: isValidProviderId(row.api_provider_id) ? row.api_provider_id : "default",
     ...resolutionPolicyFor(row.api_provider_id, row.max_resolution),
+    // 短视频：admin 天然可用；别的账号看后台有没有单独打开。
+    shortVideoEnabled: Number(row.shortvideo_enabled ?? 0) === 1,
+    canUseShortVideo: canUseShortVideo(row),
     createdAt: row.created_at,
     usage: usage || {
       taskCount: 0,
@@ -549,7 +702,12 @@ export function registerBusinessRoutes(app) {
   app.get("/api/me/storage", async (req, res) => {
     const account = await requireAccount(req, res);
     if (!account) return;
-    res.json({ overview: storageOverviewForUser(account.user.id), results: storageResultsForUser(account.user.id) });
+    const results = storageResultsPageForUser(account.user.id, parsePaging(req.query, STORAGE_PAGE_SIZE));
+    res.json({
+      overview: storageOverviewForUser(account.user.id),
+      results: results.items,
+      resultsPagination: pageMeta(results),
+    });
   });
 
   app.put("/api/me/storage/webdav", async (req, res) => {
@@ -619,7 +777,13 @@ export function registerBusinessRoutes(app) {
       const account = await requireAccount(req, res);
       if (!account) return;
       const summary = await archivePendingResults(account.user.id);
-      res.json({ summary, overview: storageOverviewForUser(account.user.id), results: storageResultsForUser(account.user.id) });
+      const results = storageResultsPageForUser(account.user.id, parsePaging(req.query, STORAGE_PAGE_SIZE));
+      res.json({
+        summary,
+        overview: storageOverviewForUser(account.user.id),
+        results: results.items,
+        resultsPagination: pageMeta(results),
+      });
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : "批量归档失败。" });
     }
@@ -771,44 +935,72 @@ export function registerBusinessRoutes(app) {
     const account = await requireAdmin(req, res);
     if (!account) return;
     markExpiredOrdersClosed();
-    const usage = usageByUser();
-    const users = sqlite
-      .prepare(
-        `SELECT p.*, u.email, u.name
-         FROM user_profile p
-         LEFT JOIN "user" u ON u.id = p.user_id
-         ORDER BY p.created_at ASC`,
-      )
-      .all()
-      .map((row) => serializeAdminUser(row, usage.get(row.user_id)));
-    const orders = sqlite.prepare("SELECT * FROM payment_order ORDER BY created_at DESC LIMIT 80").all().map(serializeOrder);
-    const paymentEvents = sqlite
-      .prepare("SELECT * FROM payment_event ORDER BY created_at DESC LIMIT 80")
-      .all()
-      .map((row) => ({
-        id: row.id,
-        provider: row.provider,
-        eventKey: row.event_key,
-        orderId: row.order_id,
-        transactionId: row.transaction_id,
-        processed: Boolean(row.processed),
-        createdAt: row.created_at,
-      }));
-    const ledger = sqlite.prepare("SELECT * FROM credit_ledger ORDER BY created_at DESC LIMIT 80").all().map(serializeLedger);
+    // 首屏只给每个列表的第一页 + 总数，后面的页由各自的分页接口按需拉。
+    const paging = parsePaging(req.query);
+    const users = adminUsersPage(paging);
+    const orders = adminOrdersPage(paging);
+    const paymentEvents = adminPaymentEventsPage(paging);
+    const ledger = adminLedgerPage(paging);
+    const generationResults = adminGenerationResultsPage(parsePaging(req.query, ADMIN_RESULT_PAGE_SIZE));
     res.json({
       summary: adminSummary(),
       imageProvider: imageProviderSettings(),
       imageProviders: publicImageProviders(),
-      users,
+      users: users.items,
       packages: getAllPackages(),
-      orders,
-      paymentEvents,
-      ledger,
-      generationResults: recentGeneratedResultsForAdmin(),
+      orders: orders.items,
+      paymentEvents: paymentEvents.items,
+      ledger: ledger.items,
+      generationResults: generationResults.items,
+      // 每个列表的分页游标，前端据此画页码；items 已经在上面单独给了，这里不重复带。
+      pagination: {
+        users: pageMeta(users),
+        orders: pageMeta(orders),
+        paymentEvents: pageMeta(paymentEvents),
+        ledger: pageMeta(ledger),
+        generationResults: pageMeta(generationResults),
+      },
       paymentCapabilities: paymentCapabilities(),
       paymentConfig: paymentConfigStatus(),
       storage: await storageAdminOverview(),
     });
+  });
+
+  app.get("/api/admin/users", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    res.json(
+      adminUsersPage({
+        ...parsePaging(req.query),
+        keyword: req.query?.q,
+        filter: typeof req.query?.filter === "string" ? req.query.filter : "all",
+      }),
+    );
+  });
+
+  app.get("/api/admin/orders", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    markExpiredOrdersClosed();
+    res.json(adminOrdersPage(parsePaging(req.query)));
+  });
+
+  app.get("/api/admin/payment-events", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    res.json(adminPaymentEventsPage(parsePaging(req.query)));
+  });
+
+  app.get("/api/admin/ledger", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    res.json(adminLedgerPage(parsePaging(req.query)));
+  });
+
+  app.get("/api/admin/generation-results", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    res.json(adminGenerationResultsPage(parsePaging(req.query, ADMIN_RESULT_PAGE_SIZE)));
   });
 
   app.patch("/api/admin/users/:id", async (req, res) => {

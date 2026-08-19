@@ -168,6 +168,14 @@ function createBusinessTables() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC);
+
+    -- 后台列表是跨账号按时间倒序翻页的，用不上上面那些 (user_id, created_at) 复合索引，
+    -- 单独给全局时间序建一份，否则每翻一页都要全表扫 + 排序。
+    CREATE INDEX IF NOT EXISTS idx_payment_order_created ON payment_order(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_payment_event_created ON payment_event(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_credit_ledger_created ON credit_ledger(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_generated_result_created ON generated_result(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_user_profile_created ON user_profile(created_at);
   `);
 
   const generatedResultColumns = new Set(
@@ -233,6 +241,10 @@ function createBusinessTables() {
   if (!profileColumns.has("max_resolution")) {
     // 后台按账号压的分辨率上限。空 = 跟随线路本身能力（Packy 只有 1K，APIMart 到 4K）。
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN max_resolution TEXT");
+  }
+  if (!profileColumns.has("shortvideo_enabled")) {
+    // 短视频模块默认只有 admin 能用；后台可以按账号单独打开（见 server/shortvideo.mjs）。
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN shortvideo_enabled INTEGER NOT NULL DEFAULT 0 CHECK (shortvideo_enabled IN (0, 1))");
   }
 
   // 后台只认 owner（部署时建的 admin 账号）。早期用下拉框提成 admin 的账号一律降回普通用户。

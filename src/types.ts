@@ -1,4 +1,4 @@
-export type ViewKey = "studio" | "free" | "workflows" | "account" | "storage";
+export type ViewKey = "studio" | "free" | "workflows" | "account" | "storage" | "shortvideo";
 
 export type ModeKey =
   | "text"
@@ -232,6 +232,16 @@ export interface UserAccount {
   serverKeyConfigured?: boolean;
   /** 后台用量汇总（只在管理员总览里出现）。 */
   usage?: AccountUsage;
+  /** 按账号开的功能开关；前端只在为 true 时渲染对应入口。 */
+  features?: AccountFeatures;
+  /** 后台总览里才有：短视频是不是单独给这个账号打开了（admin 天然可用，不看这个）。 */
+  shortVideoEnabled?: boolean;
+  canUseShortVideo?: boolean;
+}
+
+export interface AccountFeatures {
+  /** 短视频模块：默认只有 admin；后台可按账号打开。 */
+  shortVideo: boolean;
 }
 
 export interface ImageProviderOption {
@@ -519,4 +529,188 @@ export interface WorkflowDashboard {
       }>;
     };
   };
+}
+
+/* ── 短视频（MoneyPrinterTurbo 引擎） ─────────────────────────────────────── */
+
+export type ShortVideoStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export interface ShortVideoOption {
+  id: string;
+  label: string;
+  hint?: string;
+}
+
+export interface ShortVideoAspectOption extends ShortVideoOption {
+  width: number;
+  height: number;
+}
+
+export interface ShortVideoVoiceOption extends ShortVideoOption {
+  locale: string;
+}
+
+export interface ShortVideoOptions {
+  aspects: ShortVideoAspectOption[];
+  languages: ShortVideoOption[];
+  voices: ShortVideoVoiceOption[];
+  fonts: ShortVideoOption[];
+  subtitlePositions: ShortVideoOption[];
+  concatModes: ShortVideoOption[];
+  transitions: ShortVideoOption[];
+  sources: ShortVideoOption[];
+  bgm: ShortVideoOption[];
+  platforms: ShortVideoOption[];
+  stages: Record<string, string>;
+  limits: {
+    maxActivePerUser: number;
+    maxScriptChars: number;
+    maxCount: number;
+    clipDuration: [number, number];
+    clipSpeed: [number, number];
+    paragraphs: [number, number];
+    customPosition: [number, number];
+    materialMaxBytes: number;
+    musicMaxBytes: number;
+    maxScriptPromptChars: number;
+  };
+}
+
+export interface ShortVideoMetadata {
+  title: string;
+  caption: string;
+  hashtags: string[];
+}
+
+export interface ShortVideoEngineStatus {
+  configured: boolean;
+  online: boolean;
+  url: string;
+  checkedAt: string;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+export interface ShortVideoLlmStatus {
+  configured: boolean;
+  demo: boolean;
+  model: string;
+  source: "shortvideo" | "image-provider";
+}
+
+export interface ShortVideoFile {
+  name: string;
+  size: number;
+}
+
+/** 创建任务的请求体；服务端会再规范化一遍。 */
+export interface ShortVideoRequest {
+  subject: string;
+  script: string;
+  terms: string[];
+  language: string;
+  aspect: string;
+  clipDuration: number;
+  /** 片段倍速 0.5–2，素材偏拖沓时提一点节奏。 */
+  clipSpeed: number;
+  /** 素材按文案顺序匹配（会强制顺序拼接）。 */
+  matchScript: boolean;
+  /** 让 AI 写几段。 */
+  paragraphs: number;
+  /** 写文案时的额外要求，只影响本站这边的模型。 */
+  scriptPrompt: string;
+  concatMode: string;
+  transition: string;
+  count: number;
+  source: string;
+  materials: string[];
+  voice: string;
+  voiceRate: number;
+  voiceVolume: number;
+  bgm: { type: string; file: string; volume: number };
+  subtitle: {
+    enabled: boolean;
+    position: string;
+    /** 位置选「自定义高度」时的距顶百分比。 */
+    customPosition: number;
+    font: string;
+    size: number;
+    color: string;
+    strokeColor: string;
+    strokeWidth: number;
+    /** 字幕底色：亮素材上白字看不清时打开。 */
+    background: { enabled: boolean; color: string; rounded: boolean };
+  };
+}
+
+export interface ShortVideoTask {
+  id: string;
+  status: ShortVideoStatus;
+  progress: number;
+  stage: string;
+  stageLabel: string;
+  subject: string;
+  script: string;
+  terms: string[];
+  params: Partial<ShortVideoRequest>;
+  result: {
+    videos: Array<{ name: string; bytes: number; url: string }>;
+    subtitle: string | null;
+    audioDuration: number | null;
+    warnings: string[] | null;
+  };
+  error: string | null;
+  failureSource: "engine" | "system" | null;
+  credits: number;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+}
+
+/* 后台：短视频接口配置 */
+
+export interface ShortVideoAdminSettings {
+  llmProviderId: string;
+  llmBaseUrl: string;
+  llmModel: string;
+  llmApiKeyConfigured: boolean;
+  llmApiKeyHint: string;
+  llmApiKeySource: "admin" | "env" | "provider";
+  maxActivePerUser: number;
+  providers: Array<{ id: string; name: string }>;
+  sources: Record<string, string>;
+  updatedAt: string | null;
+}
+
+export interface ShortVideoEngineConfigField {
+  id: string;
+  label: string;
+  group: "material" | "voice" | "engine";
+  kind: "secret" | "secretList" | "enum" | "int" | "text" | "bool";
+  hint: string;
+  docs: string;
+  options: string[] | null;
+  present: boolean;
+  configured: boolean;
+  /** 明文项（枚举 / 数字 / 普通文本）才有值；Key 一律空串。 */
+  value: string | number | boolean;
+  /** secret：脱敏提示；secretList：个数。 */
+  hint2?: string;
+  count?: number;
+}
+
+export interface ShortVideoEngineConfig {
+  editable: boolean;
+  restartAvailable: boolean;
+  path: string;
+  fields: ShortVideoEngineConfigField[];
+  error: string | null;
+}
+
+export interface ShortVideoAdminOverview {
+  engine: ShortVideoEngineStatus;
+  llm: ShortVideoLlmStatus;
+  settings: ShortVideoAdminSettings;
+  engineConfig: ShortVideoEngineConfig;
+  activeTasks: number;
 }

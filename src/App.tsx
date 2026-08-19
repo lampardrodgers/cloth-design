@@ -41,6 +41,7 @@ import {
   type ApiConfig,
   type StorageResponse,
   type WebdavSettingsInput,
+  setUserShortVideoAccess,
 } from "./lib/api";
 import { folderPermission, forgetLocalFolder, loadSavedFolder, localFolderSupported, pickLocalFolder, saveImageToFolder } from "./lib/localFolder";
 import { outputSizeForRatio } from "./lib/outputSize";
@@ -55,7 +56,7 @@ import {
   buildSubmissionRecord,
   MAX_SUBMISSION_RECORDS,
 } from "./lib/freeStudio";
-import { useStoredState } from "./lib/storedState";
+import { useCappedStoredState, useStoredState } from "./lib/storedState";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -85,6 +86,7 @@ import { FreeStudio, type FreeGenerationInput, type FreeLayout } from "./compone
 import { ReferencePanel } from "./components/ReferencePanel";
 import { StoragePanel, type LocalFolderState } from "./components/StoragePanel";
 import { isAdminRole } from "./lib/accounts";
+import { ShortVideoStudio } from "./components/ShortVideoStudio";
 import { StudioWorkspace } from "./components/StudioWorkspace";
 import { TaskRail } from "./components/TaskRail";
 import { WorkflowCenter } from "./components/WorkflowCenter";
@@ -170,6 +172,13 @@ function normalizeModeReferences(references: ReferenceImage[], requiredRefs: Ref
   }));
 }
 
+/**
+ * 任务和成片在浏览器本地留多少条。
+ * 完整历史在服务端（文件管理页按页翻），本地这份只是「最近用过的」——
+ * localStorage 只有 5MB 上下，不封顶的话出图上千之后写入就会开始失败。
+ */
+const LOCAL_HISTORY_LIMIT = 200;
+
 function mergeResults(existing: GeneratedResult[], incoming: GeneratedResult[] = []) {
   const seen = new Set<string>();
   return [...incoming, ...existing].filter((item) => {
@@ -193,8 +202,8 @@ function App() {
   const [generationSubmitting, setGenerationSubmitting] = useState(false);
   const generationLockRef = useRef(false);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
-  const [tasks, setTasks] = useStoredState<GenerationTask[]>("clothdesign:tasks", initialTasks);
-  const [results, setResults] = useStoredState<GeneratedResult[]>("clothdesign:results", []);
+  const [tasks, setTasks] = useCappedStoredState<GenerationTask>("clothdesign:tasks", initialTasks, LOCAL_HISTORY_LIMIT);
+  const [results, setResults] = useCappedStoredState<GeneratedResult>("clothdesign:results", [], LOCAL_HISTORY_LIMIT);
   // 每次提交的现场（描述 / 参考图缩略图 / 参数）。简易模式提交完就清空输入框，靠这份存档回看。
   const [submissions, setSubmissions] = useStoredState<SubmissionRecord[]>("clothdesign:submissions", []);
 
@@ -231,6 +240,8 @@ function App() {
   // 文件管理：服务器那边的概况/文件列表从接口取；本地文件夹只存在这台浏览器里。
   const [storageData, setStorageData] = useState<StorageResponse | null>(null);
   const [storageLoading, setStorageLoading] = useState(false);
+  // 当前停在成片列表的第几页。放 ref 里：刷新/归档要用到它，但它变了不需要重渲染。
+  const storagePageRef = useRef(1);
   const [localFolderPolicy, setLocalFolderPolicy] = useStoredState<LocalFolderPolicy>("clothdesign:localFolder", { autoSave: true });
   const [localFolderHandle, setLocalFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [localFolderPermission, setLocalFolderPermission] = useState<LocalFolderState["permission"]>(null);
@@ -831,10 +842,25 @@ function App() {
     if (error) setAuthError(error);
   };
 
-  const loadStorage = async () => {
+  /** 把成片列表所有页翻一遍。只给「全部存到本地」用，别在渲染路径上调。 */
+  const fetchAllStorageResults = async () => {
+    const collected: GeneratedResult[] = [];
+    let page = 1;
+    let pageCount = 1;
+    do {
+      const data = await fetchStorage({ page, pageSize: 100 });
+      collected.push(...data.results);
+      pageCount = data.resultsPagination?.pageCount ?? 1;
+      page += 1;
+    } while (page <= pageCount);
+    return collected;
+  };
+
+  const loadStorage = async (page = storagePageRef.current) => {
     setStorageLoading(true);
     try {
-      const data = await fetchStorage();
+      const data = await fetchStorage({ page });
+      storagePageRef.current = data.resultsPagination?.page ?? page;
       setStorageData(data);
       // 服务端是文件状态的权威：过期 / 已推云盘要同步回创作台的列表
       const byId = new Map(data.results.map((item) => [item.id, item]));
@@ -872,8 +898,9 @@ function App() {
 
   const handleArchiveAll = async (): Promise<string | void> => {
     try {
-      const data = await archiveAllGenerationResults();
-      setStorageData({ overview: data.overview, results: data.results });
+      // 归档完留在当前这一页，别把人甩回第一页。
+      const data = await archiveAllGenerationResults({ page: storagePageRef.current });
+      setStorageData(data);
       const byId = new Map(data.results.map((item) => [item.id, item]));
       setResults((items) => items.map((item) => (byId.has(item.id) ? { ...item, ...byId.get(item.id)! } : item)));
       if (data.summary.failed > 0) return `推了 ${data.summary.archived} 张，${data.summary.failed} 张失败：${data.summary.errors[0] || "未知原因"}`;
@@ -953,7 +980,8 @@ function App() {
   };
 
   const handleSaveAllLocally = async (): Promise<string | void> => {
-    const source = storageData?.results ?? results;
+    // 「全部存到本地」是整个账号的口径，不是当前这一页——先把所有页翻一遍。
+    const source = storageData ? await fetchAllStorageResults() : results;
     const targets = source.filter((item) => item.storageStatus !== "expired");
     let failed = 0;
     let firstError = "";
@@ -1106,11 +1134,19 @@ function App() {
       return <WorkflowCenter generatedResults={results} apiConfig={apiConfig} />;
     }
 
+    // 短视频只对开了权限的账号（默认 admin）渲染；权限被收回时视图跟着消失，服务端每个接口也各自把关。
+    if (view === "shortvideo") {
+      if (!currentUser.features?.shortVideo) return null;
+      return <ShortVideoStudio />;
+    }
+
     return (
       <main className="single-view panel-scroll">
         <StoragePanel
           overview={storageData?.overview ?? null}
           results={storageData?.results ?? results}
+          pagination={storageData?.resultsPagination}
+          onPageChange={(page) => void loadStorage(page)}
           loading={storageLoading}
           onRefresh={() => void loadStorage()}
           onSaveWebdav={handleSaveWebdav}
@@ -1129,7 +1165,11 @@ function App() {
     );
   };
 
-  const activeNavigationItem = navigation.find((item) => item.id === view) ?? navigation[0];
+  // 短视频不在公共导航表里（按账号开关渲染），顶栏的当前位置单独给它一份文案。
+  const activeNavigationItem =
+    view === "shortvideo"
+      ? { id: "shortvideo" as const, label: "视频", displayLabel: "短视频", description: "文案 · 配音 · 成片" }
+      : (navigation.find((item) => item.id === view) ?? navigation[0]);
 
   if (authLoading) {
     return (
@@ -1161,8 +1201,8 @@ function App() {
       <div className="admin-shell">
         <header className="admin-topbar">
           <div className="brand">
-            <span className="brand-mark" aria-hidden="true" />
-            <strong>ClothDesign Admin</strong>
+            <img className="brand-mark" src="/favicon.svg" alt="" aria-hidden="true" />
+            <strong>ImageDesign Admin</strong>
           </div>
           <button className="btn btn-secondary" onClick={() => handleSetAdminPath("/")}>
             返回客户页
@@ -1171,7 +1211,7 @@ function App() {
         <main className="admin-page panel-scroll">
           <header className="admin-page-head">
             <div>
-              <span>ClothDesign Admin</span>
+              <span>ImageDesign Admin</span>
               <h1>后台控制台</h1>
             </div>
           </header>
@@ -1231,6 +1271,21 @@ function App() {
             onUsersChange={(items) => setAdminOverview((current) => (current ? { ...current, users: items } : current))}
             onUserPatch={async (id, patch) => {
               try {
+                // 短视频开关走单独的端点，不混进 PATCH /api/admin/users/:id。
+                if (typeof patch.shortVideoEnabled === "boolean") {
+                  const result = await setUserShortVideoAccess(id, patch.shortVideoEnabled);
+                  setAdminOverview((current) =>
+                    current
+                      ? {
+                          ...current,
+                          users: current.users.map((item) =>
+                            item.id === id ? { ...item, shortVideoEnabled: result.shortVideoEnabled, canUseShortVideo: result.canUseShortVideo } : item,
+                          ),
+                        }
+                      : current,
+                  );
+                  return;
+                }
                 const { user } = await updateAdminUser(id, patch);
                 setAdminOverview((current) =>
                   current ? { ...current, users: current.users.map((item) => (item.id === id ? user : item)) } : current,
@@ -1271,6 +1326,7 @@ function App() {
             ledger={adminOverview?.ledger}
             paymentEvents={adminOverview?.paymentEvents}
             generationResults={adminOverview?.generationResults}
+            pagination={adminOverview?.pagination}
             paymentConfig={adminOverview?.paymentConfig ?? paymentConfig}
             creditPolicy={creditPolicy}
             onCreditPolicyChange={setCreditPolicy}
@@ -1294,6 +1350,8 @@ function App() {
   }
 
   const isAdminUser = isAdminRole(currentUser.role);
+  // 短视频入口：服务端按账号下发开关（默认只有 admin 为 true），别的账号连入口都不渲染。
+  const canUseShortVideo = currentUser.features?.shortVideo === true;
 
   return (
     <>
@@ -1301,10 +1359,10 @@ function App() {
         <header className="topbar">
           <div className="topbar-brand-group">
             <div className="brand">
-              <span className="brand-mark" aria-hidden="true" />
+              <img className="brand-mark" src="/favicon.svg" alt="" aria-hidden="true" />
               <span className="brand-copy">
-                <strong>ClothDesign AI</strong>
-                <small>服装视觉工作台</small>
+                <strong>ImageDesign AI</strong>
+                <small>图片视觉工作台</small>
               </span>
             </div>
             <span className="topbar-divider" aria-hidden="true" />
@@ -1405,6 +1463,25 @@ function App() {
                   </span>
                 </button>
               ))}
+              {canUseShortVideo ? (
+                <button
+                  className={view === "shortvideo" ? "active" : ""}
+                  onClick={() => {
+                    setView("shortvideo");
+                    setTaskMenuOpen(false);
+                  }}
+                  aria-label="短视频"
+                  aria-current={view === "shortvideo" ? "page" : undefined}
+                  title={railCollapsed ? "短视频" : "视频"}
+                >
+                  <span className="rail-icon" aria-hidden="true" />
+                  <span className="rail-short" aria-hidden="true">视频</span>
+                  <span className="rail-copy">
+                    <strong>短视频</strong>
+                    <small>文案 · 配音 · 成片</small>
+                  </span>
+                </button>
+              ) : null}
               {isAdminUser ? (
                 <button
                   className={path.startsWith("/admin") ? "active" : ""}

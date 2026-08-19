@@ -15,6 +15,7 @@ export const userProfile = sqliteTable("user_profile", {
   apiKeyUpdatedAt: text("api_key_updated_at"),
   apiProviderId: text("api_provider_id").notNull(),
   maxResolution: text("max_resolution"),
+  shortvideoEnabled: integer("shortvideo_enabled", { mode: "boolean" }).notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { generationModes } from "../data/catalog";
 import { attachmentUsageLabels } from "../lib/freeStudio";
 import type { GeneratedResult, GenerationTask, SubmissionRecord, TaskStatus } from "../types";
@@ -31,10 +32,27 @@ interface TaskRailProps {
   onClose?: () => void;
 }
 
+/** 任务栏一次画多少条，点「显示更多」再往下加一批。 */
+const TASK_PAGE_SIZE = 20;
+
 export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClose }: TaskRailProps) {
   const running = tasks.filter((task) => task.status === "running").length;
   const success = tasks.filter((task) => task.status === "success").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
+
+  // 任务攒到上百条时全画出来会明显卡：每条都带一张预览图，滚下去也看不到。
+  const [visible, setVisible] = useState(TASK_PAGE_SIZE);
+  const shown = tasks.slice(0, visible);
+  const rest = tasks.length - shown.length;
+
+  // 按 taskId 建索引：原来每条任务都要在 results / submissions 里各 find 一遍，
+  // 两边都上百条的时候就是几万次比较，每次渲染都白跑一遍。
+  const previewByTask = useMemo(() => {
+    const map = new Map<string, GeneratedResult>();
+    for (const result of results) if (!map.has(result.taskId)) map.set(result.taskId, result);
+    return map;
+  }, [results]);
+  const submissionByTask = useMemo(() => new Map(submissions.map((item) => [item.taskId, item])), [submissions]);
 
   return (
     <section className="task-section">
@@ -58,13 +76,13 @@ export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClo
             <span>生成后这里显示实时进度</span>
           </div>
         ) : null}
-        {tasks.map((task) => {
+        {shown.map((task) => {
           const mode = generationModes.find((item) => item.id === task.mode);
-          const preview = results.find((result) => result.taskId === task.id);
-          const submission = submissions.find((item) => item.taskId === task.id);
+          const preview = previewByTask.get(task.id);
+          const submission = submissionByTask.get(task.id);
           return (
             <article className={`task-item task-${task.status}`} key={task.id}>
-              <div className="task-preview">{preview ? <img src={preview.imageUrl} alt="" /> : null}</div>
+              <div className="task-preview">{preview ? <img src={preview.imageUrl} alt="" loading="lazy" decoding="async" /> : null}</div>
               <div className="task-body">
                 <div className="task-title">
                   <strong>{mode?.shortTitle ?? task.mode}</strong>
@@ -108,6 +126,11 @@ export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClo
             </article>
           );
         })}
+        {rest > 0 ? (
+          <button type="button" className="btn btn-secondary task-more" onClick={() => setVisible((count) => count + TASK_PAGE_SIZE)}>
+            还有 {rest} 条 · 显示更多
+          </button>
+        ) : null}
       </div>
     </section>
   );

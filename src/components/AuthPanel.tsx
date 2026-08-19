@@ -65,10 +65,10 @@ export function AuthPanel({ selfSignupAllowed = true, onAuthenticated }: AuthPan
       <div className="auth-layout">
         <section className="auth-intro" aria-labelledby="auth-product-title">
           <div className="auth-brand">
-            <span className="auth-brand-icon" aria-hidden="true" />
+            <img className="auth-brand-icon" src="/favicon.svg" alt="" aria-hidden="true" />
             <div>
-              <span className="auth-eyebrow">服装视觉工作台</span>
-              <h1 id="auth-product-title">ClothDesign AI</h1>
+              <span className="auth-eyebrow">图片视觉工作台</span>
+              <h1 id="auth-product-title">ImageDesign AI</h1>
             </div>
           </div>
 

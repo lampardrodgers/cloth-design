@@ -1,5 +1,30 @@
 # Changelog
 
+## V0.7.0 - 2026-08-19
+
+- 后台「生成审计」改成 3 列 × 5 行的卡片网格（一页 15 张）。原来一行只放一条，右边三分之二整片空着，一屏看不到几张。
+- 后台「积分流水」默认收起并挪到页面最底部，点标题才展开——这块平时不看，却占着首屏最中间的位置。`Section` 随之支持 `collapsible`（带 `aria-expanded`，收起时标题旁显示「共 N 条」）。
+- 后台列表和成片列表全部改成服务端分页。原来 `/api/admin/overview` 一次把用户全表 + 订单 / 支付事件 / 积分流水 / 生成审计各 80 条塞在同一个响应里，前端再 `slice(0, 8)` / `slice(0, 12)` 渲染：拉回来的大半是白拉的，而第 13 条往后永远看不到，账号和成片涨到成百上千之后这个响应本身也扛不住。现在 overview 只带每个列表的第一页 + 总数 / 总页数，翻页走各自的 `GET /api/admin/users | orders | payment-events | ledger | generation-results`（`page` / `pageSize`，默认 20、上限 100，页码越界夹回最后一页而不是给一张空白页）。
+- 用户列表新增搜索和状态筛选（账号名 / 显示名，待开通 / 已锁定 / 无限额度 / 自备 Key）：账号多了以后靠翻页找人不现实。搜索打到服务端，不是只筛当前页；`LIKE` 里的 `%` 和 `_` 按字面量转义，搜 `a_b` 不会把 `axb` 也带出来。
+- 后台用量统计只按当页那几十个账号算。以前每次渲染用户表都要把 `generation_task` / `generated_result` / `credit_ledger` 三张表整个 GROUP BY 一遍，连改一个用户资料都会触发一次全表扫。
+- 补上后台要用的全局时间序索引（`payment_order` / `payment_event` / `credit_ledger` / `generated_result` 的 `created_at DESC`、`user_profile` 的 `created_at`）——原来只有 `(user_id, created_at)` 复合索引，跨账号按时间倒序翻页用不上。
+- 文件管理的成片列表改成一页 24 张（`GET /api/me/storage?page=`），原来一次拉 300 条整页渲染、每条挂一个 `<img>`。「全部推到云盘 / 全部存到本地」仍然是整个账号的口径：前者用概览里的全量计数，后者会把所有页翻一遍，不会只处理当前这一页。
+- 短视频任务列表也分页（原来只给最近 30 条，再往前的看不到）。轮询刷的是当前停留的那一页；「同时最多跑几条」的判断改用服务端给的账号级在跑数，翻到第二页不会把并发上限判错。
+- 修 localStorage 会被撑爆而且是静默失败的问题：`clothdesign:tasks` / `clothdesign:results` 以前不封顶地往里堆，而配额只有 5MB 上下，写入失败在 `useStoredState` 里被 `catch {}` 吞掉——表现出来是「刷新之后任务莫名其妙不动了」，从现象根本猜不到是配额问题。现在两者各留最近 200 条（完整历史在服务端），写不进去会先砍掉一半再试并上报一条前端异常。
+- 生成任务栏不再一次画上百条：先画 20 条，点「显示更多」再加一批；预览图和提交现场改成按 taskId 建索引查找，原来每条任务都要在成片和提交记录里各 `find` 一遍，两边都上百条时每次渲染都是几万次比较。后台生成审计的缩略图加 `loading="lazy"`。
+- 新增 `tests/server-admin-paging.mjs`（真服务器 + 138 个账号 / 137 条订单流水成片：overview 只给一页、翻页不重不漏、越界夹回、`pageSize` 上限、搜索与筛选、`LIKE` 转义、文件管理分页、非管理员 403）和 `tests/client-admin-paging.mjs`（页码窗口是常数级、五个列表都接到分页、不许再用 `slice` 截断代替分页、本地留存上限与配额上报）。
+
+- 新增「短视频」模块（默认仅 admin 可见 / 可用）：一句主题 → AI 写文案 → 抽关键词 → 找素材（Pexels / Pixabay / 本地上传）→ Edge TTS 配音 → 字幕 → 合成 9:16 / 16:9 / 1:1 短视频。渲染交给 [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) 的 FastAPI 引擎（只监听本机回环地址），账号、权限、任务表（`shortvideo_task`）、成片落盘、轮询、界面全部在本站；样式沿用整站的纸色 / 金色 token 和 `.simple-card / .chip / .field` 那一套。设计与 API 见 `docs/shortvideo-module.md`。
+- 短视频 API：`GET /api/shortvideo/overview`（引擎状态 + 选项目录 + 素材 / 音乐 + 最近任务）、`POST /engine/test`、`POST /script`、`POST /terms`、`POST/GET/DELETE /tasks`、`GET /tasks/:id/files/:name`（带登录、支持 Range）、`GET/POST /materials`、`GET /musics`。文案 / 关键词由本站自己调 OpenAI 兼容 chat 接口生成再交给引擎，引擎侧不用配模型 Key；服务端先规范化 + 校验参数（越界 400、并发上限 429、引擎未接入 503），引擎报完成后立刻把 `final-*.mp4` 和字幕拉回 `SHORTVIDEO_ASSET_DIR`，引擎重启丢任务态也不影响已落盘的成片。
+- 权限：`user_profile.shortvideo_enabled`（默认 0）+ 服务端 `canUseShortVideo`（admin 天然可用），账号信息新增 `features.shortVideo`，前端只在为 true 时渲染左栏入口和视图；后台「用户与用量」表新增「短视频」列，`PUT /api/admin/users/:id/shortvideo` 按账号开关。第一版不扣积分。
+- 新增环境变量 `SHORTVIDEO_ENGINE_URL / SHORTVIDEO_ENGINE_API_KEY / SHORTVIDEO_ENGINE_TIMEOUT_MS / SHORTVIDEO_ASSET_DIR / SHORTVIDEO_POLL_INTERVAL_MS / SHORTVIDEO_MAX_ACTIVE_PER_USER / SHORTVIDEO_LLM_PROVIDER / SHORTVIDEO_LLM_BASE_URL / SHORTVIDEO_LLM_API_KEY / SHORTVIDEO_LLM_MODEL`（见 `.env.example`）。
+- 后台新增「短视频接口」配置区：以前这些只能 ssh 改 `.env` 和引擎的 `config.toml`，界面上根本找不到。现在上半段改本站（文案模型的线路 / 模型名 / 单独 Key / 每人并发 / 渲染线程，存 `app_config`，保存即生效，Key 加密落库只回脱敏提示，还能当场「测一下」），下半段直接读写引擎的 `config.toml`（Pexels / Pixabay / Coverr Key、字幕方案 edge/whisper、引擎并发与队列上限、Azure 与硅基流动的 TTS Key、Whisper 模型和设备），按「节 + 行」定点替换、保留原文件注释，写前自动备份；引擎只在启动时读配置，所以配套一个「重启引擎」按钮（有任务在跑时会拦一下，可强制）。对应 `SHORTVIDEO_ENGINE_CONFIG` / `SHORTVIDEO_ENGINE_RESTART_CMD` / `SHORTVIDEO_RENDER_THREADS`。
+- 补齐上游 MoneyPrinterTurbo 里以前漏掉或写死的参数：片段倍速（0.5–2×）、素材跟着文案走（`match_materials_to_script`，会强制顺序拼接）、文案段落数（以前写死 1，现在 1–10）、写文案的额外要求、字幕自定义高度（`subtitle_position=custom` + 距顶百分比，竖屏躲开平台按钮）、字幕底色与圆角、渲染线程数（以前写死 2）、Coverr 素材源、第 9 个字体 UTM Kabel KT。
+- 短视频新增「发布文案」：按平台（抖音 / 小红书 / B 站 / TikTok / YouTube Shorts / Instagram Reels）生成标题、简介和话题标签，可一键复制；用本站自己的模型，引擎侧不用配 Key。
+- 短视频支持自己上传背景音乐（转发到引擎的 `/musics`，mp3 / m4a / aac / wav / flac / ogg / opus / wma，≤30 MB，引擎会用 ffmpeg 完整解码校验并改成不可变文件名）。
+- 短视频界面照实说明两处引擎行为：一次出多条时引擎会强制随机拼接（这时「顺序拼接」不生效）、上传的图片会被转成带缓慢推近的片段。
+- 新增 `tests/server-shortvideo.mjs`（真实 Express + 假 MPT 引擎 + 假 chat 接口：权限门禁、文案 / 关键词、创建 → 轮询 → 回传成片 → Range 播放、参数校验、并发上限、引擎失败 / 引擎丢任务、素材上传、删除、后台开关）和 `tests/client-shortvideo.mjs`（入口只在 `features.shortVideo` 分支里、视图守卫、后台开关与配置页、新参数控件、样式只用现有 token）。测试覆盖到引擎配置的定点改写（注释不丢）、Key 不回明文、非管理员 403、发布文案与音乐上传。
+
 ## V0.6.0 - 2026-08-18
 
 - 图像接口由单一 URL Base 升级为多供应商并行：保留原 Packy / OpenAI 兼容接口，新增 APIMart（`https://api.apimart.ai/v1`、`gpt-image-2`）；两套地址、模型和共享 Key 独立配置，后台可分别查看、修改和测试。

@@ -8,7 +8,8 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { ChevronDown, Minus, Plus } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
+import { pageWindow } from "../lib/paging";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: "primary" | "secondary" | "ghost" | "danger";
@@ -29,19 +30,42 @@ export function Section({
   action,
   children,
   className = "",
+  collapsible = false,
+  defaultOpen = true,
+  /** 折叠状态下标题旁边的一行小字，比如「共 137 条」。 */
+  summary,
 }: {
   title: string;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
+  /** 平时用不到、点开才看的版块（比如积分流水）收起来，别占着首屏。 */
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+  summary?: ReactNode;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  if (!collapsible) {
+    return (
+      <section className={`section ${className}`}>
+        <div className="section-head">
+          <h2>{title}</h2>
+          {action}
+        </div>
+        {children}
+      </section>
+    );
+  }
   return (
-    <section className={`section ${className}`}>
-      <div className="section-head">
+    <section className={`section section-collapsible ${open ? "" : "collapsed"} ${className}`}>
+      <button type="button" className="section-head section-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
         <h2>{title}</h2>
-        {action}
-      </div>
-      {children}
+        {summary ? <small className="section-summary">{summary}</small> : null}
+        <span className="section-chevron" aria-hidden="true">
+          <ChevronDown size={16} />
+        </span>
+      </button>
+      {open ? children : null}
     </section>
   );
 }
@@ -63,6 +87,77 @@ export function Metric({
       <span>{label}</span>
       <strong>{value}</strong>
       {hint ? <small className="metric-hint">{hint}</small> : null}
+    </div>
+  );
+}
+
+/**
+ * 列表页码条。
+ * 只有一页时不画按钮，但总数还是要说一声——「就这么多」和「只显示了这么多」是两回事，
+ * 后台里这个区别很重要。
+ */
+export function Pager({
+  page,
+  pageCount,
+  total,
+  loading = false,
+  unit = "条",
+  onChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  loading?: boolean;
+  /** 计数单位：条 / 张 / 个。 */
+  unit?: string;
+  onChange: (page: number) => void;
+}) {
+  const safeCount = Math.max(1, pageCount);
+  const jump = (next: number) => {
+    if (loading || next < 1 || next > safeCount || next === page) return;
+    onChange(next);
+  };
+  return (
+    <div className="pager" role="navigation" aria-label="分页">
+      <span className="pager-count">
+        共 {total} {unit}
+        {safeCount > 1 ? ` · 第 ${page}/${safeCount} 页` : ""}
+        {loading ? " · 加载中…" : ""}
+      </span>
+      {safeCount > 1 ? (
+        <div className="pager-controls">
+          <button type="button" className="pager-step" disabled={loading || page <= 1} aria-label="上一页" onClick={() => jump(page - 1)}>
+            <ChevronLeft size={15} />
+          </button>
+          {pageWindow(page, safeCount).map((value, index) =>
+            value === 0 ? (
+              <span key={`gap-${index}`} className="pager-gap" aria-hidden="true">
+                …
+              </span>
+            ) : (
+              <button
+                key={value}
+                type="button"
+                className={value === page ? "pager-page current" : "pager-page"}
+                aria-current={value === page ? "page" : undefined}
+                disabled={loading}
+                onClick={() => jump(value)}
+              >
+                {value}
+              </button>
+            ),
+          )}
+          <button
+            type="button"
+            className="pager-step"
+            disabled={loading || page >= safeCount}
+            aria-label="下一页"
+            onClick={() => jump(page + 1)}
+          >
+            <ChevronRight size={15} />
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

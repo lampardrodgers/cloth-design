@@ -134,8 +134,8 @@ async function ensureAuthenticated() {
 
 await ensureAuthenticated();
 
-assert((await page.title()) === "ClothDesign AI", "page title mismatch");
-assert(await page.getByText("ClothDesign AI").isVisible(), "app shell did not render");
+assert((await page.title()) === "ImageDesign AI", "page title mismatch");
+assert(await page.getByText("ImageDesign AI").isVisible(), "app shell did not render");
 assert((await textOf(page.locator(".engine-status"))).includes(providerLabel), "provider status label mismatch");
 // 登录后默认落在「自由创作」，创作台在「生成」里
 await page.locator(".rail button[title='生成']").click();

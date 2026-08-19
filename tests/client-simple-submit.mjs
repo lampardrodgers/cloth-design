@@ -67,7 +67,7 @@ try {
   await page.locator("#auth-email").fill("simple-submit@example.test");
   await page.locator("input[autocomplete='new-password']").fill("clothdesign123");
   await page.getByRole("button", { name: "创建账号" }).click();
-  await page.getByText("ClothDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByText("ImageDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
 
   // 先充点积分，否则生成按钮是灰的
   await page.locator(".rail-nav button[aria-label='账户与积分']").click();

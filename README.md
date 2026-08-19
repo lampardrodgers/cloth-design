@@ -136,6 +136,21 @@ APIMart 的 `gpt-image-2` 使用异步任务协议：服务端提交 `/images/ge
 
 后台「存储策略」一节能看到服务器上文件数 / 占用、暂存中 / 已推云盘 / 已清理数量，以及上一次巡检的结果，也可以「立即巡检一次」。
 
+## 短视频模块（MoneyPrinterTurbo 引擎，默认仅 admin）
+
+左栏「短视频」：一句主题 → AI 写文案 → 抽关键词 → 找素材（Pexels / Pixabay / 本地上传）→ Edge TTS 配音 → 字幕 → 合成竖屏 / 横屏 / 方形短视频。
+渲染交给 [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) 的 FastAPI 引擎（只监听本机回环地址），账号、权限、任务表、成片文件、轮询、界面都在本站；文案 / 关键词由本站自己调 OpenAI 兼容的 chat 接口，引擎侧不用配任何模型 Key。设计与 API 见 [docs/shortvideo-module.md](docs/shortvideo-module.md)。
+
+- **谁能用**：默认只有 admin（`owner`）能看到入口；后台「用户与用量」表里每个账号有一个「短视频」开关，打开后该账号左栏才出现入口。服务端每个 `/api/shortvideo/*` 接口都单独把关，别人直接打接口一律 403。第一版不扣积分。
+- **在哪配**：后台 → 「短视频接口」一页全在那儿：上半段是本站（文案模型走哪条线路 / 模型名 / 单独的 Key / 每人同时几条 / 渲染线程），存数据库、保存即生效；下半段直接改引擎的 `config.toml`（素材库 Key、字幕方案、引擎并发、Azure / 硅基流动的 TTS Key、Whisper 模型），保存后点「重启引擎」生效。要开这半段，本站 `.env` 得指到引擎配置：`SHORTVIDEO_ENGINE_CONFIG=/opt/apps/moneyprinterturbo/config.toml` + `SHORTVIDEO_ENGINE_RESTART_CMD=systemctl restart mpt-api`。
+- **接引擎**：`.env` 里配 `SHORTVIDEO_ENGINE_URL=http://127.0.0.1:18080`（引擎 `config.toml` 里 `listen_host="127.0.0.1"`、`listen_port=18080`、`subtitle_provider="edge"`；如果设了 `[app].api_key`，本站对应填 `SHORTVIDEO_ENGINE_API_KEY`）。没配就是「引擎未接入」，创建任务 503。
+- **文案模型**：`SHORTVIDEO_LLM_PROVIDER=default|apimart` 复用哪条图像线路的地址和共享 Key（Packy 的图像 Key 只列出 `gpt-image-2`、不能聊天，所以线上指到 `apimart`），或者用 `SHORTVIDEO_LLM_BASE_URL / SHORTVIDEO_LLM_API_KEY` 单独指定；模型 `SHORTVIDEO_LLM_MODEL`（默认 `gpt-4o-mini`）。`OPENAI_DEMO_MODE=true` 时用示例文案。
+- **在线素材**要 Pexels / Pixabay / Coverr 的免费 Key，在后台那一页填即可；没配之前只能选「本地素材」（页面里直接上传 mp4 / mov / jpg / png，图片会被引擎转成带缓慢推近的片段）。
+- **成片放哪**：本站 `SHORTVIDEO_ASSET_DIR`（默认 `./data/shortvideo/<taskId>/`），引擎报完成后立刻拉回来，播放 / 下载走 `/api/shortvideo/tasks/:id/files/:name`（带登录、支持 Range）。引擎重启丢了任务态也不影响已经落盘的成片。
+- **能调什么**：画幅 9:16 / 16:9 / 1:1、单段时长、片段倍速、拼接与转场、一次几条、素材来源、素材跟着文案走、文案段落数与额外写作要求、22 个 Edge 音色 + 语速音量、背景音乐（随机 / 指定 / 自己上传）、字幕开关与位置（含自定义高度）/ 字体 / 字号 / 颜色 / 描边 / 底色圆角。成片旁边可以一键生成对应平台的标题、简介和话题标签（抖音 / 小红书 / B 站 / TikTok / YouTube / Instagram）。
+- **上游还有、这里暂时没接**：跨平台自动发布（要接第三方账号授权）、AI 生成配乐（Sonilo / ElevenLabs，按条计费）、LoomLoom 付费素材生成、ElevenLabs 等动态音色列表、Whisper 字幕（后台能开，但 2 核机器上会很吃力）、上传自己的配音（需要配套 Whisper 出字幕）。
+- **VPS 上装引擎**：`git clone` 到 `/opt/apps/moneyprinterturbo`，用 uv 装 Python 3.11 + `uv sync --frozen`，`apt install ffmpeg`，systemd 单元 `mpt-api`（`ExecStart=… python main.py`），不装 whisper 模型（字幕用配音时间轴，2 核 3G 够用）。
+
 ## 账号与支付配置
 
 默认使用：
@@ -160,7 +175,7 @@ npm run build
 npm run smoke
 ```
 
-`npm run test:server` 覆盖支付、图片落盘、图片清理、成片 3 天暂存与 WebDAV 归档（对着一个假 WebDAV 服务）、MP4 动效预览和工作流质量门。`npm run smoke` 默认验证 `http://127.0.0.1:8888/`，覆盖登录、支付宝模拟充值入账、前台隐藏系统提示词、生成扣费、连续操作、顶部任务弹层、WebDAV 状态、独立后台模型映射、支付配置、支付订单/事件和移动端布局。
+`npm run test:server` 覆盖支付、图片落盘、图片清理、成片 3 天暂存与 WebDAV 归档（对着一个假 WebDAV 服务）、MP4 动效预览、工作流质量门和短视频模块（对着一个假 MoneyPrinterTurbo 引擎和假 chat 接口：权限门禁、创建 → 轮询 → 回传成片、Range 播放、参数校验、并发上限、后台开关）。`npm run smoke` 默认验证 `http://127.0.0.1:8888/`，覆盖登录、支付宝模拟充值入账、前台隐藏系统提示词、生成扣费、连续操作、顶部任务弹层、WebDAV 状态、独立后台模型映射、支付配置、支付订单/事件和移动端布局。
 
 生产环境默认禁止模拟支付接口。若只是验证构建产物且没有真实商户密钥，可临时设置：
 

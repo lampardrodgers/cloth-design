@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { isAdminRole } from "../lib/accounts";
-import { DatabaseZap, KeyRound, Plug, Settings2, ShieldCheck, UserPlus, WalletCards } from "lucide-react";
+import { DatabaseZap, KeyRound, Plug, Search, Settings2, ShieldCheck, UserPlus, WalletCards } from "lucide-react";
 import { generationModes } from "../data/catalog";
 import { imageQualityLabel, imageQualitySummary } from "../lib/imageQuality";
 import { isResolutionAllowed, resolutionOrder, resolutionShortLabels } from "../lib/resolution";
@@ -18,8 +18,17 @@ import type {
   SystemPromptMap,
   UserAccount,
 } from "../types";
-import type { AdminSummary, ImageProviderSettings, StorageAdminOverview } from "../lib/api";
-import { Metric, Section } from "./ui";
+import {
+  fetchAdminGenerationResultsPage,
+  fetchAdminLedgerPage,
+  fetchAdminOrdersPage,
+  fetchAdminPaymentEventsPage,
+  fetchAdminUsersPage,
+} from "../lib/api";
+import type { AdminOverviewResponse, AdminPaymentEvent, AdminSummary, ImageProviderSettings, StorageAdminOverview } from "../lib/api";
+import { usePagedList } from "../lib/paging";
+import { Metric, Pager, Section } from "./ui";
+import { AdminShortVideo } from "./AdminShortVideo";
 
 function formatBytes(bytes: number) {
   if (!bytes) return "0 B";
@@ -53,15 +62,9 @@ interface AdminPanelProps {
   orders?: PaymentOrder[];
   ledger?: CreditLedgerEntry[];
   generationResults?: GeneratedResult[];
-  paymentEvents?: Array<{
-    id: string;
-    provider: string;
-    eventKey: string;
-    orderId?: string | null;
-    transactionId?: string | null;
-    processed: boolean;
-    createdAt: string;
-  }>;
+  paymentEvents?: AdminPaymentEvent[];
+  /** overview 带回来的各列表总数/页数；上面那几个数组只是第一页。 */
+  pagination?: AdminOverviewResponse["pagination"];
   paymentConfig?: PaymentConfigStatus;
   creditPolicy: CreditPolicy;
   onCreditPolicyChange: (policy: CreditPolicy) => void;
@@ -94,6 +97,7 @@ export function AdminPanel({
   ledger = [],
   generationResults = [],
   paymentEvents = [],
+  pagination,
   paymentConfig,
   creditPolicy,
   onCreditPolicyChange,
@@ -171,6 +175,45 @@ export function AdminPanel({
     }
   };
 
+  /*
+   * 后台列表全部走服务端分页：overview 只带回每个列表的第一页，翻页/搜索再按需拉。
+   * 之前是一次性拉 80 条塞进 overview、前端再 slice 出 8~12 条渲染，
+   * 拉回来的大半白拉，而第 13 条往后根本看不到——数据一多就彻底不能用。
+   */
+  const usersList = usePagedList<UserAccount>({
+    load: fetchAdminUsersPage,
+    seedItems: users,
+    seedInfo: pagination?.users,
+    onSeedPatch: onUsersChange,
+  });
+  const ordersList = usePagedList<PaymentOrder>({
+    load: fetchAdminOrdersPage,
+    seedItems: orders,
+    seedInfo: pagination?.orders,
+  });
+  const eventsList = usePagedList<AdminPaymentEvent>({
+    load: fetchAdminPaymentEventsPage,
+    seedItems: paymentEvents,
+    seedInfo: pagination?.paymentEvents,
+  });
+  const ledgerList = usePagedList<CreditLedgerEntry>({
+    load: fetchAdminLedgerPage,
+    seedItems: ledger,
+    seedInfo: pagination?.ledger,
+  });
+  const resultsList = usePagedList<GeneratedResult>({
+    load: fetchAdminGenerationResultsPage,
+    seedItems: generationResults,
+    seedInfo: pagination?.generationResults,
+  });
+
+  // 搜索框单独存一份草稿，敲字时不要每个键都发请求（回车或点放大镜才查）。
+  const [userSearch, setUserSearch] = useState("");
+  const submitUserSearch = (event: FormEvent) => {
+    event.preventDefault();
+    usersList.go({ q: userSearch.trim() });
+  };
+
   const [draft, setDraft] = useState({ username: "", password: "", name: "", apiKey: "", apiProviderId: "default", unlimited: false, credits: 0 });
   const [creating, setCreating] = useState(false);
   const [createNotice, setCreateNotice] = useState("");
@@ -186,6 +229,8 @@ export function AdminPanel({
       else {
         setCreateNotice(`已创建账号「${draft.username}」，把账号名和这个密码发给对方就能登录。`);
         setDraft({ username: "", password: "", name: "", apiKey: "", apiProviderId: "default", unlimited: false, credits: 0 });
+        // 停在第一页时外面会重拉 overview；翻到别的页就得自己刷一下，不然总数还是旧的。
+        usersList.refresh();
       }
     } finally {
       setCreating(false);
@@ -208,6 +253,7 @@ export function AdminPanel({
     );
     if (next === null) return;
     const error = await onSetApiKey(user.id, next.trim(), user.apiProviderId || "default");
+    if (!error) usersList.refresh();
     setCreateNotice(error || (next.trim() ? `已给「${user.username ?? user.name}」配好 Key。` : `已清除「${user.username ?? user.name}」的 Key。`));
   };
 
@@ -216,7 +262,7 @@ export function AdminPanel({
     imageProviders.find((provider) => provider.id === (providerId || "default"))?.maxResolution ?? "fourK";
 
   const updateUser = (id: string, patch: Partial<UserAccount>) => {
-    onUsersChange(users.map((user) => (user.id === id ? { ...user, ...patch } : user)));
+    usersList.patchItems((list) => list.map((user) => (user.id === id ? { ...user, ...patch } : user)));
     // 服务端可能拒绝（例如取消最后一个管理员），失败要说出来并把界面改回去
     void Promise.resolve(onUserPatch?.(id, patch)).then((error) => {
       if (typeof error === "string" && error) setCreateNotice(error);
@@ -285,6 +331,8 @@ export function AdminPanel({
           {providerNotice ? <p className="admin-create-notice">{providerNotice}</p> : null}
         </Section>
       ) : null}
+
+      <AdminShortVideo />
 
       <Section title="模型路由（仅本机备忘）" action={<Settings2 size={17} />}>
         <p className="admin-note">
@@ -494,19 +542,50 @@ export function AdminPanel({
         ) : null}
         {createNotice ? <p className="admin-create-notice">{createNotice}</p> : null}
 
+        <form className="admin-list-tools" onSubmit={submitUserSearch} role="search">
+          <label className="admin-search">
+            <Search size={15} aria-hidden="true" />
+            <input
+              type="search"
+              value={userSearch}
+              placeholder="搜账号名或显示名"
+              aria-label="搜索账号"
+              onChange={(event) => {
+                setUserSearch(event.target.value);
+                // 清空搜索框就立刻回到全部，不用再按一次回车。
+                if (!event.target.value.trim() && usersList.query.q) usersList.go({ q: "" });
+              }}
+            />
+          </label>
+          <select
+            aria-label="按状态筛选"
+            value={usersList.query.filter ?? "all"}
+            onChange={(event) => usersList.go({ filter: event.target.value })}
+          >
+            <option value="all">全部账号</option>
+            <option value="pending">待开通</option>
+            <option value="locked">已锁定</option>
+            <option value="unlimited">无限额度</option>
+            <option value="own-key">自备 Key</option>
+          </select>
+          <button type="submit" className="btn btn-secondary" disabled={usersList.loading}>查找</button>
+        </form>
+        {usersList.error ? <p className="admin-create-notice">{usersList.error}</p> : null}
+
         <div className="user-table admin-table">
           <div className="table-row table-head" role="row">
             <span>用户</span>
             <span>角色</span>
             <span>开通</span>
             <span>无限</span>
+            <span>短视频</span>
             <span>余额</span>
             <span>用量</span>
             <span>线路 / Key</span>
             <span>状态</span>
             <span>操作</span>
           </div>
-          {users.map((user) => {
+          {usersList.items.map((user) => {
             const usage = user.usage;
             const approved = user.approved !== false;
             const lastActive = usage?.lastActiveAt ? new Date(usage.lastActiveAt) : null;
@@ -554,6 +633,20 @@ export function AdminPanel({
                     {/* 显示状态而不是动作：写「开」会让人分不清是已开还是点了才开 */}
                     {user.unlimited ? "∞ 已开" : "关"}
                   </button>
+                </span>
+                <span>
+                  {isAdminRole(user.role) ? (
+                    <small className="admin-tag admin-tag-ok" title="管理员天然能用短视频">可用</small>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`btn ${user.shortVideoEnabled ? "btn-primary" : "btn-secondary"} admin-approve`}
+                      title={user.shortVideoEnabled ? "收回短视频：这个账号左栏的「短视频」入口会消失" : "给这个账号打开短视频模块（默认只有管理员能用）"}
+                      onClick={() => updateUser(user.id, { shortVideoEnabled: !user.shortVideoEnabled })}
+                    >
+                      {user.shortVideoEnabled ? "已开" : "关"}
+                    </button>
+                  )}
                 </span>
                 {/* 只读值就别做成输入框，看着能改其实不能 */}
                 <span className={`admin-balance ${user.unlimited ? "admin-balance-unlimited" : ""}`}>
@@ -618,7 +711,20 @@ export function AdminPanel({
               </div>
             );
           })}
+          {usersList.items.length === 0 ? (
+            <p className="muted-text admin-list-empty">
+              {usersList.query.q || (usersList.query.filter ?? "all") !== "all" ? "没有匹配的账号。" : "还没有账号。"}
+            </p>
+          ) : null}
         </div>
+        <Pager
+          page={usersList.page}
+          pageCount={usersList.pageCount}
+          total={usersList.total}
+          loading={usersList.loading}
+          unit="个账号"
+          onChange={(page) => usersList.go({ page })}
+        />
       </Section>
 
       <section className="admin-two">
@@ -639,49 +745,52 @@ export function AdminPanel({
 
         <Section title="支付订单">
           <div className="billing-admin-list">
-            {orders.slice(0, 8).map((order) => (
+            {ordersList.items.map((order) => (
               <article key={order.id}>
                 <strong>{order.provider} · {order.status}</strong>
                 <span>{order.subject}</span>
                 <span>￥{(order.amountCents / 100).toFixed(2)} · {order.credits} 积分</span>
               </article>
             ))}
-            {orders.length === 0 ? <span className="muted-text">暂无订单</span> : null}
+            {ordersList.total === 0 ? <span className="muted-text">暂无订单</span> : null}
           </div>
+          <Pager
+            page={ordersList.page}
+            pageCount={ordersList.pageCount}
+            total={ordersList.total}
+            loading={ordersList.loading}
+            unit="笔"
+            onChange={(page) => ordersList.go({ page })}
+          />
         </Section>
 
         <Section title="支付事件">
           <div className="billing-admin-list">
-            {paymentEvents.slice(0, 8).map((event) => (
+            {eventsList.items.map((event) => (
               <article key={event.id}>
                 <strong>{event.provider} · {event.processed ? "已入账" : "未入账"}</strong>
                 <span>{event.orderId || event.eventKey}</span>
                 <span>{event.transactionId || event.createdAt}</span>
               </article>
             ))}
-            {paymentEvents.length === 0 ? <span className="muted-text">暂无支付通知</span> : null}
+            {eventsList.total === 0 ? <span className="muted-text">暂无支付通知</span> : null}
           </div>
+          <Pager
+            page={eventsList.page}
+            pageCount={eventsList.pageCount}
+            total={eventsList.total}
+            loading={eventsList.loading}
+            onChange={(page) => eventsList.go({ page })}
+          />
         </Section>
       </section>
 
-      <Section title="积分流水">
-        <div className="billing-admin-list ledger-grid">
-          {ledger.slice(0, 12).map((item) => (
-            <article key={item.id}>
-              <strong>{item.kind} · {item.amount > 0 ? "+" : ""}{item.amount}</strong>
-              <span>{item.reason}</span>
-              <span>余额 {item.balanceAfter}</span>
-            </article>
-          ))}
-          {ledger.length === 0 ? <span className="muted-text">暂无流水</span> : null}
-        </div>
-      </Section>
-
-      <Section title="最近生成审计">
+      <Section title="生成审计">
         <div className="billing-admin-list generation-history-list">
-          {generationResults.slice(0, 12).map((result) => (
+          {resultsList.items.map((result) => (
             <article key={result.id}>
-              <img src={result.imageUrl} alt={result.title} />
+              {/* 一页十五张缩略图（3 列 × 5 行），全部懒加载：滚不到的那些不占带宽也不占解码 */}
+              <img src={result.imageUrl} alt={result.title} loading="lazy" decoding="async" />
               <div>
                 <strong>{imageQualityLabel(result.qualityGate)} · {result.title}</strong>
                 <span>{result.userName || result.userEmail || result.userId} · {result.mode} · {result.ratioLabel}</span>
@@ -689,8 +798,16 @@ export function AdminPanel({
               </div>
             </article>
           ))}
-          {generationResults.length === 0 ? <span className="muted-text">暂无生成记录</span> : null}
+          {resultsList.total === 0 ? <span className="muted-text">暂无生成记录</span> : null}
         </div>
+        <Pager
+          page={resultsList.page}
+          pageCount={resultsList.pageCount}
+          total={resultsList.total}
+          loading={resultsList.loading}
+          unit="张"
+          onChange={(page) => resultsList.go({ page })}
+        />
       </Section>
 
       <section className="admin-two">
@@ -751,6 +868,27 @@ export function AdminPanel({
             </label>
           ))}
         </div>
+      </Section>
+
+      {/* 积分流水平时不看，收起来放在最底下，点开才拉展开的那几页。 */}
+      <Section title="积分流水" collapsible defaultOpen={false} summary={`共 ${ledgerList.total} 条`}>
+        <div className="billing-admin-list ledger-grid">
+          {ledgerList.items.map((item) => (
+            <article key={item.id}>
+              <strong>{item.kind} · {item.amount > 0 ? "+" : ""}{item.amount}</strong>
+              <span>{item.reason}</span>
+              <span>余额 {item.balanceAfter}</span>
+            </article>
+          ))}
+          {ledgerList.total === 0 ? <span className="muted-text">暂无流水</span> : null}
+        </div>
+        <Pager
+          page={ledgerList.page}
+          pageCount={ledgerList.pageCount}
+          total={ledgerList.total}
+          loading={ledgerList.loading}
+          onChange={(page) => ledgerList.go({ page })}
+        />
       </Section>
     </div>
   );

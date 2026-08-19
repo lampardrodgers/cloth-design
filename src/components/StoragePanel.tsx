@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
-import type { WebdavSettingsInput } from "../lib/api";
+import type { PageInfo, WebdavSettingsInput } from "../lib/api";
+import { Pager } from "./ui";
 import { formatResultTime } from "../lib/resultFiles";
 import type { GeneratedResult, StorageOverview, StorageStatus } from "../types";
 
@@ -17,7 +18,10 @@ export interface LocalFolderState {
 
 interface StoragePanelProps {
   overview: StorageOverview | null;
+  /** 当前这一页的成片；总数看 pagination / overview。 */
   results: GeneratedResult[];
+  pagination?: PageInfo;
+  onPageChange?: (page: number) => void;
   loading: boolean;
   onRefresh: () => void;
   onSaveWebdav: (input: WebdavSettingsInput) => Promise<string | void>;
@@ -64,6 +68,8 @@ function formatDateTime(iso?: string | null) {
 export function StoragePanel({
   overview,
   results,
+  pagination,
+  onPageChange,
   loading,
   onRefresh,
   onSaveWebdav,
@@ -175,8 +181,9 @@ export function StoragePanel({
   const archivedCount = overview?.archived ?? results.filter((item) => item.storageStatus === "webdav").length;
   const expiredCount = overview?.expired ?? results.filter((item) => item.storageStatus === "expired").length;
   const expiredBackedUp = overview?.expiredBackedUp ?? 0;
-  const pendingArchiveCount = results.filter((item) => item.storageStatus === "cloud-temp" || item.storageStatus === "local-cache").length;
-  const savableCount = results.filter((item) => item.storageStatus !== "expired").length;
+  // 这两个数是「全部成片」的口径，不能按当前这一页算——按钮上写的是账号里一共有多少张要处理。
+  const pendingArchiveCount = activeCount;
+  const savableCount = activeCount + archivedCount;
 
   const folderReady = localFolder.supported && Boolean(localFolder.name) && localFolder.permission === "granted";
 
@@ -388,7 +395,7 @@ export function StoragePanel({
         <div className="editorial-section-head">
           <span className="rail-kicker">成片文件</span>
           <small>
-            {results.length} 个 ·{" "}
+            {pagination?.total ?? results.length} 个 ·{" "}
             <button type="button" className="text-button" onClick={onRefresh} disabled={loading}>
               {loading ? "刷新中…" : "刷新"}
             </button>
@@ -485,6 +492,16 @@ export function StoragePanel({
             </table>
           </div>
         )}
+        {pagination && onPageChange ? (
+          <Pager
+            page={pagination.page}
+            pageCount={pagination.pageCount}
+            total={pagination.total}
+            loading={loading}
+            unit="张"
+            onChange={onPageChange}
+          />
+        ) : null}
       </section>
 
       <section className="editorial-section">

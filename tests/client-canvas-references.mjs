@@ -92,7 +92,7 @@ try {
   await page.locator("#auth-email").fill("canvas-references@example.test");
   await page.locator("input[autocomplete='new-password']").fill("clothdesign123");
   await page.getByRole("button", { name: "创建账号" }).click();
-  await page.getByText("ClothDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByText("ImageDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
 
   await page.getByRole("button", { name: "画布", exact: true }).click();
   await page.locator(".tl-container").waitFor({ state: "visible", timeout: 60000 });

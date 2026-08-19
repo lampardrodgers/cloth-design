@@ -18,6 +18,16 @@ import type {
   WorkflowDashboard,
   WorkflowJob,
   WorkflowType,
+  ShortVideoEngineStatus,
+  ShortVideoFile,
+  ShortVideoLlmStatus,
+  ShortVideoOptions,
+  ShortVideoRequest,
+  ShortVideoTask,
+  ShortVideoAdminOverview,
+  ShortVideoAdminSettings,
+  ShortVideoEngineConfig,
+  ShortVideoMetadata,
 } from "../types";
 
 export interface ApiConfig {
@@ -62,9 +72,22 @@ export interface StorageAdminOverview {
   } | null;
 }
 
+/** 分页列表的统一形状：服务端把总数和总页数一起给，前端不用自己猜还有没有下一页。 */
+export interface PageInfo {
+  total: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+}
+
+export interface PagedList<T> extends PageInfo {
+  items: T[];
+}
+
 export interface StorageResponse {
   overview: StorageOverview;
   results: GeneratedResult[];
+  resultsPagination?: PageInfo;
 }
 
 export interface GenerateApiResult {
@@ -145,9 +168,37 @@ export interface AdminOverviewResponse {
   }>;
   ledger: CreditLedgerEntry[];
   generationResults: GeneratedResult[];
+  /** 上面几个数组只是各自的第一页；这里给每个列表的总数和页数，翻页走下面的分页接口。 */
+  pagination?: {
+    users: PageInfo;
+    orders: PageInfo;
+    paymentEvents: PageInfo;
+    ledger: PageInfo;
+    generationResults: PageInfo;
+  };
   paymentCapabilities: PaymentCapabilities;
   paymentConfig: PaymentConfigStatus;
   storage?: StorageAdminOverview;
+}
+
+export type AdminPaymentEvent = AdminOverviewResponse["paymentEvents"][number];
+
+export interface AdminListQuery {
+  page?: number;
+  pageSize?: number;
+  /** 只有用户列表用得上：按账号名 / 显示名搜。 */
+  q?: string;
+  filter?: string;
+}
+
+function pageQuery(query: AdminListQuery = {}) {
+  const params = new URLSearchParams();
+  if (query.page) params.set("page", String(query.page));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  if (query.q) params.set("q", query.q);
+  if (query.filter && query.filter !== "all") params.set("filter", query.filter);
+  const text = params.toString();
+  return text ? `?${text}` : "";
 }
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -362,6 +413,19 @@ export async function fetchAdminOverview(): Promise<AdminOverviewResponse> {
   return parseJson<AdminOverviewResponse>(response);
 }
 
+async function fetchAdminPage<T>(path: string, query: AdminListQuery): Promise<PagedList<T>> {
+  const response = await fetch(`${path}${pageQuery(query)}`, { credentials: "include" });
+  return parseJson<PagedList<T>>(response);
+}
+
+export const fetchAdminUsersPage = (query: AdminListQuery = {}) => fetchAdminPage<UserAccount>("/api/admin/users", query);
+export const fetchAdminOrdersPage = (query: AdminListQuery = {}) => fetchAdminPage<PaymentOrder>("/api/admin/orders", query);
+export const fetchAdminPaymentEventsPage = (query: AdminListQuery = {}) =>
+  fetchAdminPage<AdminPaymentEvent>("/api/admin/payment-events", query);
+export const fetchAdminLedgerPage = (query: AdminListQuery = {}) => fetchAdminPage<CreditLedgerEntry>("/api/admin/ledger", query);
+export const fetchAdminGenerationResultsPage = (query: AdminListQuery = {}) =>
+  fetchAdminPage<GeneratedResult>("/api/admin/generation-results", query);
+
 export async function deleteGenerationResult(id: string) {
   const response = await fetch(`/api/generation-results/${encodeURIComponent(id)}`, {
     method: "DELETE",
@@ -370,8 +434,8 @@ export async function deleteGenerationResult(id: string) {
   return parseJson<{ deleted: boolean; id: string; file?: { deleted?: boolean; fileName?: string; reason?: string } | null }>(response);
 }
 
-export async function fetchStorage() {
-  const response = await fetch("/api/me/storage", { credentials: "include" });
+export async function fetchStorage(query: AdminListQuery = {}) {
+  const response = await fetch(`/api/me/storage${pageQuery(query)}`, { credentials: "include" });
   return parseJson<StorageResponse>(response);
 }
 
@@ -414,8 +478,9 @@ export async function archiveGenerationResult(id: string) {
   return parseJson<{ result: GeneratedResult }>(response);
 }
 
-export async function archiveAllGenerationResults() {
-  const response = await fetch("/api/me/storage/archive-all", { method: "POST", credentials: "include" });
+export async function archiveAllGenerationResults(query: AdminListQuery = {}) {
+  // 归档完顺手把当前这一页重新取回来，别把用户甩回第一页。
+  const response = await fetch(`/api/me/storage/archive-all${pageQuery(query)}`, { method: "POST", credentials: "include" });
   return parseJson<StorageResponse & { summary: { attempted: number; archived: number; failed: number; errors: string[] } }>(response);
 }
 
@@ -597,4 +662,161 @@ export async function requestGeneration({
     body: form,
   });
   return parseJson<GenerateApiResponse>(response);
+}
+
+/* ── 短视频 ──────────────────────────────────────────────────────────────── */
+
+export interface ShortVideoOverview {
+  engine: ShortVideoEngineStatus;
+  llm: ShortVideoLlmStatus;
+  options: ShortVideoOptions;
+  musics: ShortVideoFile[];
+  materials: ShortVideoFile[];
+  tasks: ShortVideoTask[];
+  tasksPagination?: PageInfo;
+  /** 整个账号在跑的任务数（不是当前这一页的），并发上限按它判断。 */
+  activeCount?: number;
+}
+
+export async function fetchShortVideoOverview() {
+  const response = await fetch("/api/shortvideo/overview", { credentials: "include" });
+  return parseJson<ShortVideoOverview>(response);
+}
+
+export async function testShortVideoEngine() {
+  const response = await fetch("/api/shortvideo/engine/test", { method: "POST", credentials: "include" });
+  return parseJson<{ engine: ShortVideoEngineStatus }>(response);
+}
+
+export async function generateShortVideoScript(input: { subject: string; language: string; paragraphs?: number; prompt?: string }) {
+  const response = await fetch("/api/shortvideo/script", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ script: string }>(response);
+}
+
+export async function generateShortVideoTerms(input: { subject: string; script: string; amount?: number }) {
+  const response = await fetch("/api/shortvideo/terms", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ terms: string[] }>(response);
+}
+
+export async function fetchShortVideoTasks(query: { page?: number; pageSize?: number } = {}) {
+  const response = await fetch(`/api/shortvideo/tasks${pageQuery(query)}`, { credentials: "include" });
+  return parseJson<{ tasks: ShortVideoTask[]; pagination?: PageInfo; activeCount?: number }>(response);
+}
+
+export async function fetchShortVideoTask(id: string) {
+  const response = await fetch(`/api/shortvideo/tasks/${encodeURIComponent(id)}`, { credentials: "include" });
+  return parseJson<{ task: ShortVideoTask }>(response);
+}
+
+export async function createShortVideoTask(input: ShortVideoRequest) {
+  const response = await fetch("/api/shortvideo/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ task: ShortVideoTask }>(response);
+}
+
+export async function deleteShortVideoTask(id: string) {
+  const response = await fetch(`/api/shortvideo/tasks/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include" });
+  return parseJson<{ ok: boolean }>(response);
+}
+
+export async function uploadShortVideoMaterial(file: File) {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const response = await fetch("/api/shortvideo/materials", { method: "POST", credentials: "include", body: form });
+  return parseJson<{ file: string; originalName: string; size: number }>(response);
+}
+
+export async function generateShortVideoMetadata(input: { subject: string; script: string; platform: string; language?: string }) {
+  const response = await fetch("/api/shortvideo/metadata", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ metadata: ShortVideoMetadata; platform: string }>(response);
+}
+
+export async function uploadShortVideoMusic(file: File) {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const response = await fetch("/api/shortvideo/musics", { method: "POST", credentials: "include", body: form });
+  return parseJson<{ file: string; originalName: string; size: number }>(response);
+}
+
+export async function fetchShortVideoMaterials() {
+  const response = await fetch("/api/shortvideo/materials", { credentials: "include" });
+  return parseJson<{ files: ShortVideoFile[] }>(response);
+}
+
+/** 后台：按账号打开 / 关闭短视频。 */
+export async function setUserShortVideoAccess(userId: string, enabled: boolean) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/shortvideo`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ enabled }),
+  });
+  return parseJson<{ shortVideoEnabled: boolean; canUseShortVideo: boolean }>(response);
+}
+
+/* 后台：短视频接口配置 */
+
+export async function fetchShortVideoAdmin() {
+  const response = await fetch("/api/admin/shortvideo", { credentials: "include" });
+  return parseJson<ShortVideoAdminOverview>(response);
+}
+
+export async function saveShortVideoSettings(input: {
+  llmProviderId?: string;
+  llmBaseUrl?: string;
+  llmModel?: string;
+  llmApiKey?: string;
+  maxActivePerUser?: number | string;
+}) {
+  const response = await fetch("/api/admin/shortvideo/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ settings: ShortVideoAdminSettings }>(response);
+}
+
+export async function testShortVideoLlm() {
+  const response = await fetch("/api/admin/shortvideo/llm/test", { method: "POST", credentials: "include" });
+  return parseJson<{ result: { ok: boolean; message: string; model: string } }>(response);
+}
+
+export async function saveShortVideoEngineConfig(patch: Record<string, string | number>) {
+  const response = await fetch("/api/admin/shortvideo/engine-config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(patch),
+  });
+  return parseJson<{ changed: string[]; needsRestart: boolean; restartAvailable: boolean; engineConfig: ShortVideoEngineConfig }>(response);
+}
+
+export async function restartShortVideoEngine(force = false) {
+  const response = await fetch("/api/admin/shortvideo/engine/restart", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ force }),
+  });
+  return parseJson<{ engine: ShortVideoAdminOverview["engine"] }>(response);
 }
