@@ -546,6 +546,7 @@ function App() {
       progress: 8,
       credits: cost,
       createdAt: nowLabel(),
+      startedAt: Date.now(),
       message: settings.streamPreview ? "生成中，已开启 partial preview" : "生成中",
     };
 
@@ -602,6 +603,7 @@ function App() {
                 id: serverTaskId,
                 status: "success",
                 progress: 100,
+                finishedAt: Date.now(),
                 message:
                   response.mode === "demo"
                     ? `${response.message} 结果已进入演示存储。`
@@ -621,6 +623,7 @@ function App() {
                 status: "failed",
                 progress: 100,
                 credits: 0,
+                finishedAt: Date.now(),
                 message: error instanceof Error ? error.message : "生成失败",
               }
             : task,
@@ -678,6 +681,7 @@ function App() {
         progress: 12,
         credits: 0,
         createdAt: nowLabel(),
+        startedAt: Date.now(),
         message: intent === "free" ? "自由创作生成中" : `${intentLabels[intent]}中`,
       },
       ...items,
@@ -751,6 +755,7 @@ function App() {
                 status: "success",
                 progress: 100,
                 credits: response.credits ?? 0,
+                finishedAt: Date.now(),
                 message: response.message,
               }
             : task,
@@ -763,7 +768,9 @@ function App() {
       const message = error instanceof Error ? error.message : "生成失败";
       setTasks((items) =>
         items.map((task) =>
-          task.id === taskId ? { ...task, status: "failed", progress: 100, credits: 0, message } : task,
+          task.id === taskId
+            ? { ...task, status: "failed", progress: 100, credits: 0, finishedAt: Date.now(), message }
+            : task,
         ),
       );
       throw error;

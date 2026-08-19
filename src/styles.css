@@ -4859,21 +4859,6 @@ a.stage-tool {
   border-color: var(--line-soft);
 }
 
-.field-note {
-  max-width: 240px;
-  font-size: 10.5px;
-  line-height: 1.5;
-  color: var(--faint);
-}
-
-/* 「这条线路最高 1K」这类说明单独占一行，别把上面那排控件挤歪。 */
-.simple-controls-note {
-  margin: -4px 0 0;
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--faint);
-}
-
 /*
  * 生成按钮钉在整行最右边：状态文案（就绪 / 生成中 / 失败原因）长短不一，
  * 以前整块右对齐，文案一变按钮就跟着左右横跳。现在状态往左长，按钮不动。
@@ -6572,6 +6557,12 @@ a.stage-tool {
   color: var(--gold);
 }
 
+.simple-pending-loader {
+  flex: none;
+  color: var(--gold-line);
+  animation: spin 0.9s linear infinite;
+}
+
 .simple-stage-pending-bar {
   display: flex;
   align-items: center;
@@ -6586,6 +6577,10 @@ a.stage-tool {
   font-family: var(--display);
   font-size: 12.5px;
   color: var(--canvas-ink);
+}
+
+.simple-stage-pending-bar .simple-pending-loader {
+  color: var(--gold-line);
 }
 
 /* 任务面板里的提交现场 */
@@ -6697,12 +6692,32 @@ a.stage-tool {
   color: var(--canvas-ink);
 }
 
+.simple-stage-pending {
+  grid-template-rows: auto;
+  grid-auto-rows: auto;
+  align-content: center;
+  justify-items: center;
+  padding-inline: clamp(24px, 7vw, 110px);
+}
+
 .simple-stage-pending small,
 .simple-stage-empty small {
   max-width: 320px;
   font-size: 11.5px;
   line-height: 1.7;
   color: rgba(240, 237, 231, 0.62);
+}
+
+.simple-stage-pending small {
+  display: -webkit-box;
+  max-width: 520px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.simple-empty-icon {
+  color: rgba(240, 237, 231, 0.46);
 }
 
 .simple-stage-pending .stage-progress {
@@ -6761,6 +6776,18 @@ a.stage-tool {
   cursor: not-allowed;
 }
 
+.simple-stage-actions .simple-clear-preview {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(240, 237, 231, 0.18);
+}
+
+.simple-stage-pending-foot {
+  min-height: 48px;
+}
+
 .simple-stage .stage-prompt {
   right: 14px;
   top: 14px;
@@ -6769,6 +6796,117 @@ a.stage-tool {
 .simple-result-card.active {
   border-color: var(--gold);
   background: var(--gold-tint);
+}
+
+.simple-result-card-pending {
+  border-color: var(--gold-line);
+  border-style: dashed;
+  background: var(--gold-tint);
+}
+
+.simple-result-card-pending.active {
+  border-style: solid;
+  box-shadow: inset 0 0 0 1px var(--gold);
+}
+
+.simple-result-thumb-pending {
+  position: relative;
+  display: grid;
+  width: 100%;
+  place-content: center;
+  justify-items: center;
+  gap: 5px;
+  color: rgba(240, 237, 231, 0.78);
+  cursor: pointer;
+}
+
+.simple-result-thumb-pending:hover,
+.simple-result-thumb-pending:focus-visible {
+  color: var(--paper);
+}
+
+.simple-result-thumb-pending strong {
+  font-family: var(--display);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.simple-result-thumb-pending small {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: rgba(240, 237, 231, 0.5);
+}
+
+.simple-result-thumb-pending .stage-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.simple-result-pending-status {
+  min-height: 19px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--gold-deep);
+}
+
+.simple-completion-notice {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 80;
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: min(470px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid var(--gold-line);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow-pop);
+  color: var(--gold-deep);
+}
+
+.simple-completion-notice > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.simple-completion-notice strong {
+  font-family: var(--display);
+  font-size: 13px;
+}
+
+.simple-completion-notice span {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.simple-completion-notice .btn {
+  min-height: 32px;
+  padding: 0 11px;
+}
+
+@media (max-width: 680px) {
+  .simple-completion-notice {
+    right: 16px;
+    bottom: 16px;
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .simple-completion-notice .btn {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .simple-completion-notice .icon-button {
+    grid-column: 3;
+    grid-row: 1;
+  }
 }
 
 @media (max-width: 1180px) {

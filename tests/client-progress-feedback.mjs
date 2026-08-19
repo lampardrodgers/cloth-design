@@ -83,9 +83,14 @@ assert(gallery.includes("stage-working"), "studio stage must show a working indi
 assert(gallery.includes("result-thumb-pending"), "studio filmstrip must show a pending slot");
 assert(studio.includes("seenNewestRef"), "studio must jump to the newest result when it lands");
 
-// 简易模式：结果区要先出现占位卡
+// 简易模式：右侧和底部都要先出现占位；用户人工改选后不能被新图抢走
 assert(simple.includes("simple-stage-pending"), "simple mode must show the pending state in the preview stage");
-assert(simple.includes("seenNewestRef"), "simple mode must jump to the newest result when it lands");
+assert(simple.includes("simple-result-card-pending"), "simple mode must add pending slots to the result grid");
+assert(simple.includes("overriddenPendingIdsRef"), "simple mode must remember manual selection while generation is running");
+assert(simple.includes("clothdesign:free:simple-preview-state"), "cleared preview state must survive navigation and remounts");
+assert(simple.includes("handleSelectPending"), "pending result slots must be selectable after browsing history");
+assert(simple.includes("simple-completion-notice"), "manual selection must produce a completion notice instead of an auto switch");
+assert(simple.includes("handleClearPreview"), "the preview stage must be clearable without deleting the result");
 
 // 画布：画框和「按标注改图 / 按草图生成」都要在结果位置先显示生成中
 assert(canvas.includes('status: "running"'), "canvas must mark frames as running");
@@ -107,6 +112,8 @@ for (const selector of [
   ".provider-banner",
   ".placeholder-tag",
   ".simple-stage-pending",
+  ".simple-result-card-pending",
+  ".simple-completion-notice",
   ".stage-working",
   ".result-thumb-pending",
   ".ai-frame-spinner",

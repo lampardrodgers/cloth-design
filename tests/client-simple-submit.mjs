@@ -100,6 +100,11 @@ try {
     document.body.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
   });
   await page.locator(".attachment-card").first().waitFor({ state: "visible", timeout: 10000 });
+  const delayGeneration = async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+    await route.continue();
+  };
+  await page.route("**/api/generate", delayGeneration);
   await page.locator(".simple-submit button.btn-primary").click();
 
   /* ── 1. 提交后左边立刻清空，可以接着写 ──────────────────────────────────── */
@@ -110,6 +115,9 @@ try {
   assert((await page.locator(".simple-pending-chip").count()) >= 1, "要显示还有几张在生成");
   assert.match(await page.locator(".simple-submit .prompt-status").innerText(), /可以接着写下一张/);
   assert.match(await page.locator(".simple-pending-chip").innerText(), /1 张生成中/);
+  await page.locator(".simple-stage-pending").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator(".simple-stage-image").count(), 0, "生成开始后右侧不该继续保留旧图");
+  assert.equal(await page.locator(".simple-result-card-pending").count(), 1, "底部成片区要立即出现生成中的占位卡");
 
   /* ── 2. 任务面板里能查到这次提交的参考图和参数 ──────────────────────────── */
 
@@ -124,6 +132,7 @@ try {
   /* ── 3. 成片到手后，「提交详情」里有描述 / 参考图 / 参数 ─────────────────── */
 
   await page.locator(".simple-stage-image img").first().waitFor({ state: "visible", timeout: 180000 });
+  await page.unroute("**/api/generate", delayGeneration);
   await page.getByRole("button", { name: "提交详情" }).click();
   const detail = page.locator(".stage-prompt");
   await detail.waitFor({ state: "visible", timeout: 10000 });
@@ -138,7 +147,62 @@ try {
   await detail.getByRole("button", { name: "用这段重做" }).click();
   assert.match(await promptBox.inputValue(), /米白色羊毛大衣挂在木质衣架上/);
 
-  /* ── 4. 提交当场失败要把刚才那份放回来 ──────────────────────────────────── */
+  /* ── 4. 清空预览、自动切新图、人工改选后不抢画面 ────────────────────────── */
+
+  await page.getByRole("button", { name: "清空预览" }).click();
+  await page.locator(".simple-stage-empty").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator(".simple-stage-image").count(), 0, "清空预览只收起右侧展示，不该继续露出旧图");
+  assert((await page.locator(".simple-result-card:not(.simple-result-card-pending)").count()) >= 1, "清空预览不能删除历史成片");
+
+  // 清空状态不能只活在当前组件里：切去别的模块再回来仍应保持空白。
+  await page.locator(".rail-nav button[aria-label='账户与积分']").click();
+  await page.locator(".account-layout").waitFor({ state: "visible", timeout: 10000 });
+  await page.locator(".rail-nav button[aria-label='自由创作']").click();
+  await page.getByRole("button", { name: "简易", exact: true }).click();
+  await page.locator(".simple-stage-empty").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator(".simple-stage-image").count(), 0, "跨模块返回后不能擅自恢复上一次图片");
+
+  // 生成中先点历史图，再点回底部生成卡：应重新显示该任务，并在完成后自动切到新图。
+  await page.route("**/api/generate", delayGeneration);
+  await promptBox.fill("第二张自动展示的新图");
+  await page.locator(".simple-submit button.btn-primary").click();
+  await page.locator(".simple-stage-pending").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator(".simple-stage-image").count(), 0, "新任务开始后要用生成状态替换之前的预览");
+  await page.locator(".simple-result-card:not(.simple-result-card-pending)").first().locator(".simple-result-thumb").click();
+  await page.locator(".simple-stage-image").waitFor({ state: "visible", timeout: 10000 });
+  const pendingThumb = page.locator(".simple-result-card-pending .simple-result-thumb-pending").first();
+  await pendingThumb.click();
+  await page.locator(".simple-stage-pending").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await pendingThumb.getAttribute("aria-pressed"), "true", "重新点击生成卡后要恢复为当前预览目标");
+  await page.locator(".simple-stage-image img").waitFor({ state: "visible", timeout: 180000 });
+  assert.equal(await page.locator(".simple-completion-notice").count(), 0, "重新选回生成卡后，完成时应自动展示而不是只弹提醒");
+  assert.equal(
+    await page.locator(".simple-result-card:not(.simple-result-card-pending)").first().locator(".simple-result-thumb").getAttribute("aria-pressed"),
+    "true",
+    "没有人工改选时，最新成片要自动成为右侧当前图",
+  );
+  await page.unroute("**/api/generate", delayGeneration);
+
+  // 生成途中点了历史图：完成后保留手动选择，只弹出提示。
+  await page.route("**/api/generate", delayGeneration);
+  await promptBox.fill("第三张完成后只提醒的新图");
+  await page.locator(".simple-submit button.btn-primary").click();
+  await page.locator(".simple-stage-pending").waitFor({ state: "visible", timeout: 10000 });
+  const historicalCards = page.locator(".simple-result-card:not(.simple-result-card-pending)");
+  await historicalCards.last().locator(".simple-result-thumb").click();
+  const manuallySelectedTitle = await page.locator(".simple-stage-meta strong").innerText();
+  await page.locator(".simple-completion-notice").waitFor({ state: "visible", timeout: 180000 });
+  assert.match(await page.locator(".simple-completion-notice").innerText(), /新图像已完成生成/);
+  assert.equal(await page.locator(".simple-stage-meta strong").innerText(), manuallySelectedTitle, "新图完成时不能覆盖用户手动点开的历史图");
+  await page.getByRole("button", { name: "查看新图" }).click();
+  assert.equal(
+    await page.locator(".simple-result-card:not(.simple-result-card-pending)").first().locator(".simple-result-thumb").getAttribute("aria-pressed"),
+    "true",
+    "用户点查看新图后才切到最新成片",
+  );
+  await page.unroute("**/api/generate", delayGeneration);
+
+  /* ── 5. 提交当场失败要把刚才那份放回来 ──────────────────────────────────── */
 
   await page.route("**/api/generate", (route) =>
     route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "图像引擎暂时不可用" }) }),

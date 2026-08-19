@@ -1,10 +1,10 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { generationModes } from "../data/catalog";
+import { generationModes, ratioOptions } from "../data/catalog";
 import { estimateCredits } from "../lib/costing";
 import { resetCanvasStore } from "../lib/canvasStore";
 import { filesToAttachments, MAX_ATTACHMENTS } from "../lib/freeStudio";
 import { lazyWithReload } from "../lib/lazyChunk";
-import { clampResolution } from "../lib/resolution";
+import { clampResolution, resolutionShortLabels } from "../lib/resolution";
 import { useStoredState } from "../lib/storedState";
 import type {
   AttachmentUsage,
@@ -21,7 +21,11 @@ import type { ApiConfig } from "../lib/api";
 import type { CanvasGenerateInput } from "./CanvasBoard";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ProviderBanner } from "./ProviderBanner";
-import { SimpleComposer } from "./SimpleComposer";
+import {
+  SimpleComposer,
+  type SimpleGenerationCompletion,
+  type SimplePendingJob,
+} from "./SimpleComposer";
 
 // tldraw 有 1.7MB，只在真正切到画布时才拉，别拖慢创作台和简易模式。
 // 版本更新后老页面手里的文件名会失效，lazyWithReload 负责自动刷一次而不是整页白屏。
@@ -90,8 +94,9 @@ export function FreeStudio({
   }, [capability.maxResolution, setResolution]);
   const [pendingImages, setPendingImages] = useState<PendingCanvasImage[]>([]);
   const [notice, setNotice] = useState("");
-  /** 手上有几张还在生成。简易模式不再因此锁住输入框，只用来显示进度。 */
-  const [pendingCount, setPendingCount] = useState(0);
+  /** 简易模式每次提交都留一个可见任务卡，直到对应成片真正回来。 */
+  const [pendingJobs, setPendingJobs] = useState<SimplePendingJob[]>([]);
+  const [completionQueue, setCompletionQueue] = useState<SimpleGenerationCompletion[]>([]);
 
   const costFor = useCallback(
     (referenceCount: number, count = 1) =>
@@ -130,18 +135,33 @@ export function FreeStudio({
   const handleSimpleGenerate = () => {
     const submitted = { prompt, attachments };
     if (!submitted.prompt.trim()) return;
+    const selectedRatio = ratioOptions.find((item) => item.id === ratioId) ?? ratioOptions[0];
+    const pendingJob: SimplePendingJob = {
+      id: `simple-pending-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      prompt: submitted.prompt.trim(),
+      quantity,
+      ratioLabel: selectedRatio.label,
+      resolutionLabel: resolutionShortLabels[resolution],
+      createdAt: new Date().toISOString(),
+    };
     setNotice("");
-    setPendingCount((count) => count + 1);
+    setPendingJobs((jobs) => [pendingJob, ...jobs]);
     const running = onGenerate({ prompt: submitted.prompt, attachments: submitted.attachments, ratioId, resolution, quantity });
     setPrompt("");
     setAttachments([]);
     running
+      .then((newResults) => {
+        setCompletionQueue((items) => [
+          ...items,
+          { jobId: pendingJob.id, resultIds: newResults.map((result) => result.id) },
+        ]);
+      })
       .catch((error) => {
         setNotice(error instanceof Error ? error.message : "生成失败");
         setPrompt((current) => (current.trim() ? current : submitted.prompt));
         setAttachments((current) => (current.length ? current : submitted.attachments));
       })
-      .finally(() => setPendingCount((count) => Math.max(0, count - 1)));
+      .finally(() => setPendingJobs((jobs) => jobs.filter((job) => job.id !== pendingJob.id)));
   };
 
   const handleUseAsAttachment = (result: GeneratedResult) => {
@@ -216,7 +236,8 @@ export function FreeStudio({
             quantity={quantity}
             cost={simpleCost}
             credits={credits}
-            pendingCount={pendingCount}
+            pendingJobs={pendingJobs}
+            completionQueue={completionQueue}
             submissions={submissions}
             notice={notice}
             results={results}
@@ -242,6 +263,9 @@ export function FreeStudio({
             onSendToCanvas={handleSendResultToCanvas}
             onDeleteResult={onDeleteResult}
             onOpenAccount={onOpenAccount}
+            onCompletionHandled={(jobId) =>
+              setCompletionQueue((items) => items.filter((completion) => completion.jobId !== jobId))
+            }
           />
         </div>
       ) : (

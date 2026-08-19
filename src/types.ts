@@ -128,6 +128,9 @@ export interface GenerationTask {
   progress: number;
   credits: number;
   createdAt: string;
+  /** 开始/结束的毫秒时间戳。createdAt 只是「14:32」这样的显示文案，算不出跑了多久。 */
+  startedAt?: number;
+  finishedAt?: number;
   message: string;
 }
 

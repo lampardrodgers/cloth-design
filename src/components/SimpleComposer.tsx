@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
+import { CheckCircle2, ImageOff, LoaderCircle, X } from "lucide-react";
 import { freeResolutionOptions } from "../data/catalog";
 import { isPlaceholderImage } from "../lib/providerMode";
+import { taskDurationLabel } from "../lib/duration";
 import { attachmentUsageLabels } from "../lib/freeStudio";
-import { isResolutionAllowed, resolutionLimitNote, resolutionOptionTitle } from "../lib/resolution";
+import { isResolutionAllowed, resolutionOptionTitle } from "../lib/resolution";
 import { formatResultTime, resultFileName } from "../lib/resultFiles";
+import { useStoredState } from "../lib/storedState";
+import { useNow } from "../lib/useNow";
 import type {
   AttachmentUsage,
   FreeAttachment,
@@ -17,6 +21,26 @@ import { PromptChipBar, usePromptChips } from "./PromptChips";
 import { RatioPicker } from "./RatioPicker";
 import { NumberStepper } from "./ui";
 
+export interface SimplePendingJob {
+  id: string;
+  prompt: string;
+  quantity: number;
+  ratioLabel: string;
+  resolutionLabel: string;
+  createdAt: string;
+}
+
+export interface SimpleGenerationCompletion {
+  jobId: string;
+  resultIds: string[];
+}
+
+interface SimplePreviewState {
+  mode: "image" | "pending" | "empty";
+  pendingJobId?: string;
+  pendingIndex?: number;
+}
+
 interface SimpleComposerProps {
   prompt: string;
   attachments: FreeAttachment[];
@@ -27,8 +51,10 @@ interface SimpleComposerProps {
   quantity: number;
   cost: number;
   credits: number;
-  /** 手上还有几张在生成。提交后左边就清空了，这个数只用来显示进度。 */
-  pendingCount: number;
+  /** 当前仍在生成的提交：右侧预览和底部成片区共用这份进度。 */
+  pendingJobs: SimplePendingJob[];
+  /** 已完成但尚未处理的成片批次，用于决定自动切图还是只弹出完成提示。 */
+  completionQueue: SimpleGenerationCompletion[];
   /** 每次提交的现场存档（描述 / 参考图 / 参数），按 taskId 对上成片。 */
   submissions: SubmissionRecord[];
   notice?: string;
@@ -47,6 +73,7 @@ interface SimpleComposerProps {
   onSendToCanvas: (result: GeneratedResult) => void;
   onDeleteResult: (id: string) => void;
   onOpenAccount: () => void;
+  onCompletionHandled: (jobId: string) => void;
 }
 
 /** 简易模式：左边写描述，右边看成片，历史成片摆在下面。 */
@@ -59,7 +86,8 @@ export function SimpleComposer({
   quantity,
   cost,
   credits,
-  pendingCount,
+  pendingJobs,
+  completionQueue,
   submissions,
   notice,
   results,
@@ -76,19 +104,50 @@ export function SimpleComposer({
   onSendToCanvas,
   onDeleteResult,
   onOpenAccount,
+  onCompletionHandled,
 }: SimpleComposerProps) {
-  const [selectedId, setSelectedId] = useState("");
+  const initialSelectedId = results[0]?.id ?? "";
+  // 预览选择写进本地状态：切去账户、功能或画布再回来，也要尊重用户刚才的「清空预览」。
+  const [selectedId, setSelectedId] = useStoredState("clothdesign:free:simple-selected-result", initialSelectedId);
+  const [previewState, setPreviewState] = useStoredState<SimplePreviewState>(
+    "clothdesign:free:simple-preview-state",
+    { mode: initialSelectedId ? "image" : "empty" },
+  );
+  const previewMode = previewState.mode;
   const [zoomOpen, setZoomOpen] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
   const [dropActive, setDropActive] = useState(false);
+  const [completionNotice, setCompletionNotice] = useState<{ resultIds: string[]; count: number } | null>(null);
+  // 从画布切回来时组件会重挂载；已有任务不是「新提交」，不能擅自覆盖持久化的人工选择。
+  const knownPendingIdsRef = useRef(new Set(pendingJobs.map((job) => job.id)));
+  const overriddenPendingIdsRef = useRef(new Set<string>());
+  const seenCompletionRef = useRef("");
 
-  const resolutionNote = resolutionLimitNote(capability);
   const hasEnoughCredits = cost <= credits;
+  const pendingCount = pendingJobs.reduce((total, job) => total + job.quantity, 0);
   const isGenerating = pendingCount > 0;
+  // 生成中的卡片自己数秒，让人知道这次已经等了多久，而不是只看一条来回滚的进度条。
+  const now = useNow(isGenerating);
+  const selectedPendingJob =
+    previewMode === "pending"
+      ? pendingJobs.find((job) => job.id === previewState.pendingJobId)
+      : undefined;
+  const selectedPendingIndex = Math.min(
+    Math.max(previewState.pendingIndex ?? 0, 0),
+    Math.max((selectedPendingJob?.quantity ?? 1) - 1, 0),
+  );
+  const latestPendingDuration = taskDurationLabel({ startedAt: selectedPendingJob?.createdAt, running: true, now });
   // 提交后描述会被清空，按钮自然就灰了，所以不用再拿「正在生成」锁住整块表单——
   // 用户可以马上写下一张排队生成。
   const canGenerate = prompt.trim().length > 0 && hasEnoughCredits;
-  const selected = results.find((result) => result.id === selectedId) ?? results[0];
+  const selected = previewMode === "image" ? results.find((result) => result.id === selectedId) : undefined;
+  const pendingSlots = useMemo(
+    () =>
+      pendingJobs.flatMap((job) =>
+        Array.from({ length: job.quantity }, (_, index) => ({ job, index, key: `${job.id}-${index}` })),
+      ),
+    [pendingJobs],
+  );
   // 提交现场按 taskId 对上；旧成片没有存档，退回到成片自己记的那句描述。
   const submission = selected ? submissions.find((item) => item.taskId === selected.taskId) : undefined;
   const submittedPrompt = submission?.prompt ?? selected?.prompt ?? "";
@@ -106,22 +165,52 @@ export function SimpleComposer({
   );
   const chips = usePromptChips({ value: prompt, onChange: onPromptChange, gallery: galleryChips });
 
-  // 新成片一落地就切到右边的大图，否则根本看不出这次到底生成了没有。
-  const newestId = results[0]?.id ?? "";
-  const seenNewestRef = useRef(newestId);
+  // 新提交一开始就把旧图收起来，右侧和底部同时进入明确的「生成中」状态。
   useEffect(() => {
-    if (!results.length) {
-      setSelectedId("");
-      seenNewestRef.current = "";
-      return;
+    const newlyStarted = pendingJobs.filter((job) => !knownPendingIdsRef.current.has(job.id));
+    pendingJobs.forEach((job) => knownPendingIdsRef.current.add(job.id));
+    if (!newlyStarted.length) return;
+    setPreviewState({ mode: "pending", pendingJobId: newlyStarted[0].id, pendingIndex: 0 });
+    setCompletionNotice(null);
+    setPromptOpen(false);
+    setZoomOpen(false);
+  }, [pendingJobs, setPreviewState]);
+
+  // 生成失败、页面刷新或任务记录失效时，没有新图可切，就恢复生成前的选择；之前清空则继续空白。
+  useEffect(() => {
+    if (previewMode !== "pending" || !previewState.pendingJobId) return;
+    const stillPending = pendingJobs.some((job) => job.id === previewState.pendingJobId);
+    const completionWaiting = completionQueue.some((completion) => completion.jobId === previewState.pendingJobId);
+    if (stillPending || completionWaiting) return;
+    setPreviewState({ mode: selectedId && results.some((result) => result.id === selectedId) ? "image" : "empty" });
+  }, [completionQueue, pendingJobs, previewMode, previewState.pendingJobId, results, selectedId, setPreviewState]);
+
+  // 新图完成：没有人工改选就自动展示；生成途中点过旧图或清空过预览，则只弹提示，不抢走当前画面。
+  useEffect(() => {
+    const nextCompletion = completionQueue.find((completion) => seenCompletionRef.current !== completion.jobId);
+    if (!nextCompletion) return;
+    const availableResultIds = nextCompletion.resultIds.filter((id) => results.some((result) => result.id === id));
+    if (!availableResultIds.length) return;
+    seenCompletionRef.current = nextCompletion.jobId;
+    const isSelectedPendingJob =
+      previewState.mode === "pending" && previewState.pendingJobId === nextCompletion.jobId;
+    const overridden = overriddenPendingIdsRef.current.has(nextCompletion.jobId) || !isSelectedPendingJob;
+    overriddenPendingIdsRef.current.delete(nextCompletion.jobId);
+    if (overridden) {
+      setCompletionNotice({ resultIds: availableResultIds, count: availableResultIds.length });
+    } else {
+      setSelectedId(availableResultIds[Math.min(previewState.pendingIndex ?? 0, availableResultIds.length - 1)]);
+      setPreviewState({ mode: "image" });
+      setCompletionNotice(null);
     }
-    if (newestId !== seenNewestRef.current) {
-      seenNewestRef.current = newestId;
-      setSelectedId(newestId);
-      return;
-    }
-    if (!selectedId || !results.some((result) => result.id === selectedId)) setSelectedId(results[0].id);
-  }, [newestId, results, selectedId]);
+    onCompletionHandled(nextCompletion.jobId);
+  }, [completionQueue, onCompletionHandled, previewState, results, setPreviewState, setSelectedId]);
+
+  useEffect(() => {
+    if (previewMode !== "image" || !selectedId || results.some((result) => result.id === selectedId)) return;
+    setSelectedId("");
+    setPreviewState({ mode: "empty" });
+  }, [previewMode, results, selectedId, setPreviewState, setSelectedId]);
 
   useEffect(() => setPromptOpen(false), [selectedId]);
 
@@ -147,6 +236,43 @@ export function SimpleComposer({
     setDropActive(false);
     const images = Array.from(event.dataTransfer.files ?? []).filter((file) => file.type.startsWith("image/"));
     if (images.length) onAddFiles(images);
+  };
+
+  const markCurrentGenerationAsOverridden = () => {
+    pendingJobs.forEach((job) => overriddenPendingIdsRef.current.add(job.id));
+  };
+
+  const handleSelectResult = (id: string) => {
+    markCurrentGenerationAsOverridden();
+    setSelectedId(id);
+    setPreviewState({ mode: "image" });
+    setCompletionNotice(null);
+  };
+
+  const handleSelectPending = (jobId: string, index: number) => {
+    // 用户重新点回生成卡，表示这次又是他想看的目标；完成后应自动切图，不再只弹提醒。
+    overriddenPendingIdsRef.current.delete(jobId);
+    setPreviewState({ mode: "pending", pendingJobId: jobId, pendingIndex: index });
+    setCompletionNotice(null);
+    setPromptOpen(false);
+    setZoomOpen(false);
+  };
+
+  const handleClearPreview = () => {
+    markCurrentGenerationAsOverridden();
+    setSelectedId("");
+    setPreviewState({ mode: "empty" });
+    setPromptOpen(false);
+    setZoomOpen(false);
+    setCompletionNotice(null);
+  };
+
+  const handleViewCompletedResult = () => {
+    const nextId = completionNotice?.resultIds.find((id) => results.some((result) => result.id === id));
+    if (!nextId) return;
+    setSelectedId(nextId);
+    setPreviewState({ mode: "image" });
+    setCompletionNotice(null);
   };
 
   // 张数只在右边那颗「N 张生成中」上说一次，状态位不重复。
@@ -245,9 +371,6 @@ export function SimpleComposer({
             </div>
           </div>
 
-          {/* 说明单独占一行：塞进分辨率那一列会把「张数」挤歪。 */}
-          {resolutionNote ? <p className="simple-controls-note">{resolutionNote}</p> : null}
-
           {/* 状态在左、按钮钉右：状态文案和「N 张生成中」长短变化都不会推着生成按钮乱跑。 */}
           <div className="simple-submit">
             <div className="simple-submit-status">
@@ -268,22 +391,42 @@ export function SimpleComposer({
         </section>
 
         <section className="simple-stage" aria-label="当前成片">
-          {isGenerating && selected ? (
-            <div className="simple-stage-pending-bar" aria-live="polite">
-              <span className="simple-pending-mark" aria-hidden="true">◇</span>
-              <strong>{pendingCount} 张生成中…</strong>
-              <small>出图后自动切到这里，右下角「任务」能看进度</small>
-            </div>
-          ) : null}
-          {isGenerating && !selected ? (
-            <div className="simple-stage-body simple-stage-pending" aria-live="polite">
-              <span className="simple-pending-mark" aria-hidden="true">◇</span>
-              <strong>{pendingCount} 张生成中…</strong>
-              <small>已提交给图像引擎，左边可以接着写下一张</small>
-              <div className="stage-progress" aria-hidden="true"><i /></div>
-            </div>
+          {previewMode === "pending" && selectedPendingJob ? (
+            <>
+              <div className="simple-stage-body simple-stage-pending" aria-live="polite">
+                <LoaderCircle className="simple-pending-loader" size={32} strokeWidth={1.5} aria-hidden="true" />
+                <strong>正在生成第 {selectedPendingIndex + 1} 张图片</strong>
+                <small>
+                  {selectedPendingJob.prompt || "已提交给图像引擎"}
+                  <br />左边可以继续写下一张，完成后会自动显示在这里
+                </small>
+                <div className="stage-progress" aria-hidden="true"><i /></div>
+              </div>
+              <footer className="simple-stage-foot simple-stage-pending-foot">
+                <div className="simple-stage-meta">
+                  <strong>生成中</strong>
+                  <small>
+                    {selectedPendingJob.ratioLabel} · {selectedPendingJob.resolutionLabel} · 第 {selectedPendingIndex + 1} / {selectedPendingJob.quantity} 张
+                    {latestPendingDuration ? ` · ${latestPendingDuration}` : ""}
+                  </small>
+                </div>
+                <div className="simple-stage-actions">
+                  <button type="button" className="text-button simple-clear-preview" onClick={handleClearPreview}>
+                    <ImageOff size={13} aria-hidden="true" />
+                    清空预览
+                  </button>
+                </div>
+              </footer>
+            </>
           ) : selected ? (
             <>
+              {isGenerating ? (
+                <div className="simple-stage-pending-bar" aria-live="polite">
+                  <LoaderCircle className="simple-pending-loader" size={15} aria-hidden="true" />
+                  <strong>还有 {pendingCount} 张生成中</strong>
+                  <small>已保留你正在查看的图片</small>
+                </div>
+              ) : null}
               <div className="simple-stage-body simple-stage-image">
                 <button type="button" className="simple-stage-plate" onClick={() => setZoomOpen(true)} title="点开放大">
                   <img src={selected.imageUrl} alt={selected.title} />
@@ -390,12 +533,16 @@ export function SimpleComposer({
                   <button type="button" className="text-button danger" onClick={() => onDeleteResult(selected.id)}>
                     删除
                   </button>
+                  <button type="button" className="text-button simple-clear-preview" onClick={handleClearPreview}>
+                    <ImageOff size={13} aria-hidden="true" />
+                    清空预览
+                  </button>
                 </div>
               </footer>
             </>
           ) : (
             <div className="simple-stage-body simple-stage-empty">
-              <span className="simple-pending-mark" aria-hidden="true">◇</span>
+              <ImageOff className="simple-empty-icon" size={30} strokeWidth={1.35} aria-hidden="true" />
               <strong>成片会出现在这里</strong>
               <small>写一句描述就能出第一张图。上传的图片可以设成「参考」借鉴风格，或设成「入画」让它出现在成片里。</small>
             </div>
@@ -406,18 +553,55 @@ export function SimpleComposer({
       <section className="simple-results" aria-label="历史成片">
         <header className="simple-card-head">
           <span className="rail-kicker">成片</span>
-          <small className="muted-text">{results.length ? `${results.length} 张 · 点一下在右侧查看` : "还没有成片"}</small>
+          <small className="muted-text">
+            {isGenerating
+              ? `${pendingCount} 张生成中 · 已有 ${results.length} 张成片`
+              : results.length
+                ? `${results.length} 张 · 点一下在右侧查看`
+                : "还没有成片"}
+          </small>
         </header>
 
-        {results.length ? (
+        {pendingSlots.length || results.length ? (
           <div className="simple-result-grid">
+            {pendingSlots.map(({ job, index, key }) => {
+              const elapsed = taskDurationLabel({ startedAt: job.createdAt, running: true, now });
+              const active =
+                previewState.mode === "pending" &&
+                previewState.pendingJobId === job.id &&
+                (previewState.pendingIndex ?? 0) === index;
+              return (
+                <figure className={`simple-result-card simple-result-card-pending ${active ? "active" : ""}`} key={key}>
+                  <button
+                    type="button"
+                    className="simple-result-thumb simple-result-thumb-pending"
+                    aria-label={`查看第 ${index + 1} 张图片的生成状态`}
+                    aria-pressed={active}
+                    onClick={() => handleSelectPending(job.id, index)}
+                  >
+                    <LoaderCircle className="simple-pending-loader" size={24} strokeWidth={1.5} aria-hidden="true" />
+                    <strong>生成中</strong>
+                    <small>{index + 1} / {job.quantity}</small>
+                    <div className="stage-progress" aria-hidden="true"><i /></div>
+                  </button>
+                  <figcaption>
+                    <strong title={job.prompt}>{job.prompt}</strong>
+                    <small>
+                      {job.ratioLabel} · {job.resolutionLabel} · {formatResultTime(job.createdAt)}
+                      {elapsed ? ` · ${elapsed}` : ""}
+                    </small>
+                  </figcaption>
+                  <div className="simple-result-pending-status">点一下可重新查看生成状态</div>
+                </figure>
+              );
+            })}
             {results.map((result) => (
               <figure className={`simple-result-card ${selected?.id === result.id ? "active" : ""}`} key={result.id}>
                 <button
                   type="button"
                   className="simple-result-thumb"
                   aria-pressed={selected?.id === result.id}
-                  onClick={() => setSelectedId(result.id)}
+                  onClick={() => handleSelectResult(result.id)}
                 >
                   <img src={result.imageUrl} alt={result.title} loading="lazy" />
                   {isPlaceholderImage(result.imageUrl) ? <em className="placeholder-tag">演示占位图</em> : null}
@@ -447,6 +631,27 @@ export function SimpleComposer({
           <p className="simple-empty">生成过的图都会留在这里，点一下就能在右侧大图查看，或者直接加入参考继续改。</p>
         )}
       </section>
+
+      {completionNotice ? (
+        <div className="simple-completion-notice" role="status" aria-live="polite">
+          <CheckCircle2 size={21} strokeWidth={1.7} aria-hidden="true" />
+          <div>
+            <strong>新图像已完成生成</strong>
+            <span>已保留你当前查看的内容，共完成 {completionNotice.count} 张。</span>
+          </div>
+          <button type="button" className="btn btn-secondary" onClick={handleViewCompletedResult}>
+            查看新图
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="关闭新图完成提示"
+            onClick={() => setCompletionNotice(null)}
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
 
       {zoomOpen && selected ? (
         <div className="simple-zoom" role="dialog" aria-label={selected.title} onClick={() => setZoomOpen(false)}>

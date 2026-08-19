@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { generationModes } from "../data/catalog";
+import { taskDurationLabel } from "../lib/duration";
 import { attachmentUsageLabels } from "../lib/freeStudio";
+import { useNow } from "../lib/useNow";
 import type { GeneratedResult, GenerationTask, SubmissionRecord, TaskStatus } from "../types";
 
 const statusLabel: Record<TaskStatus, string> = {
@@ -39,6 +41,8 @@ export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClo
   const running = tasks.filter((task) => task.status === "running").length;
   const success = tasks.filter((task) => task.status === "success").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
+  // 有任务在跑才开秒表，「已跑 12s」得自己往前走；全跑完了时长就定格，不用再重画。
+  const now = useNow(running > 0);
 
   // 任务攒到上百条时全画出来会明显卡：每条都带一张预览图，滚下去也看不到。
   const [visible, setVisible] = useState(TASK_PAGE_SIZE);
@@ -80,6 +84,12 @@ export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClo
           const mode = generationModes.find((item) => item.id === task.mode);
           const preview = previewByTask.get(task.id);
           const submission = submissionByTask.get(task.id);
+          const duration = taskDurationLabel({
+            startedAt: task.startedAt,
+            finishedAt: task.finishedAt,
+            running: task.status === "running",
+            now,
+          });
           return (
             <article className={`task-item task-${task.status}`} key={task.id}>
               <div className="task-preview">{preview ? <img src={preview.imageUrl} alt="" loading="lazy" decoding="async" /> : null}</div>
@@ -116,6 +126,7 @@ export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClo
                 ) : null}
                 <div className="task-foot">
                   <span>{task.createdAt}</span>
+                  {duration ? <span>{duration}</span> : null}
                   <span>{task.credits} 积分</span>
                 </div>
                 <small>{displayTaskMessage(task.message)}</small>

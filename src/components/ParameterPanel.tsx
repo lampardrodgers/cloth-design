@@ -1,6 +1,6 @@
 import { ratioOptions, resolutionOptions } from "../data/catalog";
 import { outputSizeForRatio, outputSizeMismatch } from "../lib/outputSize";
-import { isResolutionAllowed, resolutionLimitNote } from "../lib/resolution";
+import { isResolutionAllowed } from "../lib/resolution";
 import type {
   BackgroundMode,
   ModerationMode,
@@ -167,7 +167,6 @@ export function ParameterPanel({
               </option>
             ))}
           </select>
-          {resolutionLimitNote(capability) ? <small className="field-note">{resolutionLimitNote(capability)}</small> : null}
         </label>
 
         <label className="field">

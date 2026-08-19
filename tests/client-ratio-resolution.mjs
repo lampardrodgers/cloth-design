@@ -69,7 +69,7 @@ assert(simple.includes("<RatioPicker"), "简易模式的比例要用新的选择
 assert(!simple.includes('className="simple-select"'), "原生 select 的样式不该再留着");
 assert(simple.includes("isResolutionAllowed(option.id, capability.maxResolution)"), "超出上限的档位不能点");
 assert(simple.includes("disabled={!allowed}"), "超限档位要留在原地但禁用，藏起来会让人以为功能没了");
-assert(simple.includes("resolutionLimitNote"), "为什么点不了要写在界面上");
+assert(!simple.includes("resolutionLimitNote"), "分辨率说明不再在参数区单独占一行");
 assert(simple.includes("protocol={capability.protocol}"), "输出像素要按当前线路算");
 // 自由创作不预设题材：示例不能是衣服，否则一打开就像只能画服装。
 const placeholder = simple.match(/placeholder="([^"]+)"/)?.[1] ?? "";

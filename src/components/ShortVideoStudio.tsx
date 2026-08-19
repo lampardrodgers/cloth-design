@@ -15,7 +15,9 @@ import {
   type ShortVideoOverview,
 } from "../lib/api";
 import type { PageInfo } from "../lib/api";
+import { taskDurationLabel } from "../lib/duration";
 import { useStoredState } from "../lib/storedState";
+import { useNow } from "../lib/useNow";
 import type { ShortVideoAspectOption, ShortVideoFile, ShortVideoMetadata, ShortVideoRequest, ShortVideoTask } from "../types";
 import { Button, ChipGroup, NumberStepper, Pager } from "./ui";
 
@@ -178,6 +180,8 @@ export function ShortVideoStudio() {
 
   // 有任务在跑就每 3 秒刷一次；没有就歇着。刷的是当前停留的那一页。
   const hasActive = activeCount > 0;
+  // 渲染一次要好几分钟，光有进度条看不出跑了多久，这里每秒把「已跑」往前推一格。
+  const now = useNow(hasActive);
   useEffect(() => {
     if (!hasActive) return;
     const timer = window.setInterval(() => {
@@ -841,6 +845,12 @@ export function ShortVideoStudio() {
               const expanded = expandedTaskId === task.id || (task.status === "completed" && expandedTaskId === null && tasks[0]?.id === task.id);
               const aspect = task.params.aspect || "9:16";
               const [aw, ah] = aspect.split(":").map(Number);
+              const duration = taskDurationLabel({
+                startedAt: task.createdAt,
+                finishedAt: task.finishedAt,
+                running: isActive(task),
+                now,
+              });
               return (
                 <article key={task.id} className={`shortvideo-task ${task.status}`}>
                   <button type="button" className="shortvideo-task-head" onClick={() => setExpandedTaskId(expanded ? "" : task.id)} aria-expanded={expanded}>
@@ -848,6 +858,7 @@ export function ShortVideoStudio() {
                       <strong>{task.subject || "（无主题）"}</strong>
                       <small>
                         {formatTime(task.createdAt)} · {aspect} · {task.params.count ?? 1} 条
+                        {duration ? ` · ${duration}` : ""}
                         {task.result.audioDuration ? ` · 配音 ${task.result.audioDuration}s` : ""}
                       </small>
                     </span>

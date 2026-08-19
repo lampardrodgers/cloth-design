@@ -145,7 +145,7 @@ assert(simple.includes('<div className="simple-top">'), "简易模式要分成�
 assert(simple.includes('className="simple-stage"'), "当前成片要有独立的右侧展示区");
 assert(/simple-top[\s\S]{0,200}grid-template-columns:\s*minmax\(0, 420px\) minmax\(0, 1fr\)/.test(styles), "右侧大图要占据剩余宽度");
 assert(simple.indexOf('className="simple-top"') < simple.indexOf('className="simple-results"'), "历史成片排在下方");
-assert(simple.includes("onClick={() => setSelectedId(result.id)}"), "点历史成片要切换右侧大图");
+assert(simple.includes("onClick={() => handleSelectResult(result.id)}") && simple.includes("setSelectedId(id)"), "点历史成片要切换右侧大图");
 
 // 7. 工作区里那条标题栏只是把顶栏的话重说一遍，去掉；简易/画布切换搬到顶栏
 const freeStudio = await fs.readFile("src/components/FreeStudio.tsx", "utf8");
