@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { saveMyPreferences } from "./api";
 import { reportClientError } from "./clientErrors";
-import { readDurableState, registerDurableKey, writeDurableState } from "./durableState";
+import { flushDurableWrites, readDurableState, registerDurableKey, writeDurableState } from "./durableState";
 import { idbDeletePrefix } from "./idbStore";
 import {
   ACTIVE_STORAGE_ACCOUNT_KEY,
@@ -40,6 +40,8 @@ const PREFERENCE_SYNC_DELAY_MS = 1500;
 const PREFERENCE_RETRY_DELAYS_MS = [3000, 10000, 30000];
 /** 退出前的最后一次推送（final）：等不了几十秒的退避，失败就原地再试两次，再不行才暂存。 */
 const PREFERENCE_FINAL_RETRY_DELAYS_MS = [800, 1500];
+/** 上报前等 IndexedDB 兜底写入落定的上限。 */
+const DURABLE_WRITE_WAIT_MS = 2000;
 const pendingPreferencePatch = new Map<string, unknown>();
 
 /* ── 没推出去的偏好：按账号暂存在设备级的键里 ───────────────────────────────
@@ -98,14 +100,21 @@ function clearUnsyncedPreferences(accountId: string, patch: Record<string, unkno
   writeDurableState(UNSYNCED_PREFERENCES_KEY, all);
 }
 
-/** 取走这个账号暂存的偏好（取走即删；推不出去会再存回来）。 */
-export function takeUnsyncedPreferences(accountId: string): Record<string, unknown> | null {
-  const all = readUnsyncedPreferences();
-  const entry = all[accountId];
-  if (!entry) return null;
-  delete all[accountId];
-  writeDurableState(UNSYNCED_PREFERENCES_KEY, all);
-  return entry.patch;
+/**
+ * 看一眼这个账号暂存的偏好（只读不删）：登录时拿它落地并排队补推，但日志要留到服务端确认同值成功（clearUnsyncedPreferences）才划掉——
+ * 「读完就删、1.5 秒后才推」的那段时间里页面被杀掉，日志没了、服务端也没收到，下次登录就会被服务端的旧值盖掉。
+ */
+export function peekUnsyncedPreferences(accountId: string): Record<string, unknown> | null {
+  const entry = readUnsyncedPreferences()[accountId];
+  return entry ? { ...entry.patch } : null;
+}
+
+/** 上报用：这批没推出去的偏好到底落在哪了（localStorage / 只有 IndexedDB / 只剩内存）。 */
+async function describeStash(stashedToLocalStorage: boolean) {
+  if (stashedToLocalStorage) return "已暂存到本机等下次登录补推";
+  // IndexedDB 正常几十毫秒就落定；万一它卡住，别让这条在路上的同步（以及后面排队的）跟着卡死。
+  const landed = await Promise.race([flushDurableWrites(), sleep(DURABLE_WRITE_WAIT_MS).then(() => false)]);
+  return landed ? "本机 localStorage 写不进去，已落到 IndexedDB 等下次登录补推" : "本机 localStorage 和 IndexedDB 都写不进去，只留在内存里（刷新后会丢）";
 }
 
 async function sleep(ms: number) {
@@ -179,12 +188,13 @@ export async function flushPreferenceSync(options: { keepalive?: boolean; final?
     preferenceSyncAccount = account;
     const stashed = stashUnsyncedPreferences(account, Object.fromEntries(pendingPreferencePatch));
     if (options.final) {
-      // 退出前的最后一搏也没成：没推出去的已经全在暂存里，退出照常进行。
+      // 退出前的最后一搏也没成：没推出去的已经全在暂存里，退出照常进行。上报时把「到底落在哪」说清楚。
       pendingPreferencePatch.clear();
       preferenceSyncFailures = 0;
+      const where = await describeStash(stashed);
       reportClientError({
         scope: "preferences",
-        message: `退出前偏好同步失败，${stashed ? "已暂存到本机等下次登录补推" : "本机 localStorage 也写不进去（只留在内存 / IndexedDB 里）"}：${message}`,
+        message: `退出前偏好同步失败，${where}：${message}`,
         detail: { keys: Object.keys(patch), stashed },
       });
       return;
@@ -205,9 +215,10 @@ export async function flushPreferenceSync(options: { keepalive?: boolean; final?
       }
     }
     if (pendingPreferencePatch.size) schedulePreferenceSync(PREFERENCE_SYNC_DELAY_MS);
+    const where = await describeStash(stashed);
     reportClientError({
       scope: "preferences",
-      message: `偏好同步失败（已重试 ${PREFERENCE_RETRY_DELAYS_MS.length} 次，${stashed ? "已暂存等下次登录补推" : "本机 localStorage 也写不进去，只留在内存 / IndexedDB 里"}）：${message}`,
+      message: `偏好同步失败（已重试 ${PREFERENCE_RETRY_DELAYS_MS.length} 次，${where}）：${message}`,
       detail: { keys: Object.keys(dropped), stashed },
     });
   })().finally(() => {
@@ -249,8 +260,8 @@ if (typeof window !== "undefined") {
  */
 export function seedAccountPreferences(accountId: string, preferences: Record<string, unknown> | undefined) {
   const remote = preferences && typeof preferences === "object" ? preferences : {};
-  // 上次退出 / 掉线时没推出去的改动：以它为准落地并补推（服务端那份是更早的）。
-  const unsynced = takeUnsyncedPreferences(accountId);
+  // 上次退出 / 掉线时没推出去的改动：以它为准落地并补推（服务端那份是更早的）。日志本身留到推成功才划掉。
+  const unsynced = peekUnsyncedPreferences(accountId);
   for (const key of SYNCED_PREFERENCE_KEYS) {
     const storageKey = storedStateKeyForAccount(key, accountId);
     if (!storageKey) continue;

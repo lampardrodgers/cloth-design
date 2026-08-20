@@ -1156,8 +1156,12 @@ export function AdminPanel({
               <div className="billing-admin-list generation-history-list">
                 {resultsList.items.map((result) => (
                   <article key={result.id}>
-                    {/* 一页十五张缩略图（3 列 × 5 行），全部懒加载：滚不到的那些不占带宽也不占解码 */}
-                    <img src={result.imageUrl} alt={result.title} loading="lazy" decoding="async" />
+                    {/* 一页十五张缩略图（3 列 × 5 行），全部懒加载：滚不到的那些不占带宽也不占解码；服务器已清理的不去拉 404 */}
+                    {result.storageStatus === "expired" ? (
+                      <span className="generation-history-expired" title="服务器副本已清理">已清理</span>
+                    ) : (
+                      <img src={result.imageUrl} alt={result.title} loading="lazy" decoding="async" />
+                    )}
                     <div>
                       <strong>{imageQualityLabel(result.qualityGate)} · {result.title}</strong>
                       <span>{result.userName || result.userEmail || result.userId} · {result.mode} · {result.ratioLabel}</span>

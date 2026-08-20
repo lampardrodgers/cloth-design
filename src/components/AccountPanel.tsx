@@ -335,7 +335,11 @@ export function AccountPanel({
           <div className="billing-list generation-history-list">
             {generationResults.slice(0, 5).map((result) => (
               <article key={result.id}>
-                <img src={result.imageUrl} alt="" />
+                {result.storageStatus === "expired" ? (
+                  <span className="generation-history-expired" title="服务器副本已清理">已清理</span>
+                ) : (
+                  <img src={result.imageUrl} alt="" />
+                )}
                 <div>
                   <strong>{result.title}</strong>
                   <span>{result.ratioLabel} · {result.credits} 积分</span>

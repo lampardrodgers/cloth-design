@@ -2960,6 +2960,20 @@ a.stage-tool {
   border: 1px solid var(--line-soft);
 }
 
+/* 账户页「最近生成」/ 后台「生成审计」里服务器已清理的成片：占同样的位，不去拉一张 404。 */
+.generation-history-list .generation-history-expired {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 64px;
+  flex: none;
+  border: 1px solid var(--line-soft);
+  background: var(--mat);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
 @media (max-width: 1180px) {
   .billing-admin-list.generation-history-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));

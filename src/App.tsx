@@ -75,7 +75,7 @@ import {
 } from "./lib/storedState";
 import { storedStateKeyForAccount } from "./lib/storageNamespace";
 import { forgetDeletedResults, markDeletedResultsDone, pendingDeletedResultIds, recentlyDeletedResultIds, rememberDeletedResults } from "./lib/deletedResults";
-import { hydrateDurableState } from "./lib/durableState";
+import { flushDurableWrites, hydrateDurableState } from "./lib/durableState";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -228,6 +228,8 @@ function mergeResults(existing: GeneratedResult[], incoming: GeneratedResult[] =
 
 /** 退出前等偏好 / 删除同步的上限：服务器僵住也不能让「退出」点了没反应。 */
 const SIGN_OUT_SYNC_TIMEOUT_MS = 6000;
+/** 退出前等 IndexedDB 兜底写入落盘的上限（正常几十毫秒就完）。 */
+const DURABLE_FLUSH_TIMEOUT_MS = 1500;
 
 function App() {
   // 自由创作排在导航第一位，登录后也直接落在这里。视图由地址栏路径决定，切视图就是 pushState。
@@ -975,6 +977,8 @@ function App() {
     // 服务器僵住也不能让「退出」卡死：最多等这么久，没回来的请求在后台继续，结果照样进暂存 / 墓碑。
     const signOutSyncTimeout = new Promise<void>((resolve) => window.setTimeout(resolve, SIGN_OUT_SYNC_TIMEOUT_MS));
     await Promise.race([Promise.all([flushPreferenceSync({ final: true }).catch(() => undefined), commitPendingDeletesNow()]), signOutSyncTimeout]);
+    // 暂存 / 墓碑若是退到了 IndexedDB（localStorage 写不进去），等它落盘再退——退完马上关页也不丢。
+    await Promise.race([flushDurableWrites(), new Promise<void>((resolve) => window.setTimeout(resolve, DURABLE_FLUSH_TIMEOUT_MS))]);
     await Promise.all([signOut().catch(() => undefined), endDebugSession().catch(() => undefined)]);
     clearStoredStateAccount(signedOutAccountId);
     setStoredStateAccount(null);

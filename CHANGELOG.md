@@ -36,6 +36,12 @@
   - 画布：成片拉不下来（断网 / 超时，重试一次仍失败）改为报错「成片暂时拉取失败，请稍后重试；这张成片仍在成片库里」，不再把 `/generated-images/...` 地址写进画布资产——那种资产没赶上补转，三天后就是一张裂图。`migrateManagedAssets` 只负责升级前留下的老资产。
   - 创作台过期成片的剩余入口：舞台「放大」禁用、「下载」变禁用态（舞台 + 右栏列表）、缩略胶片标「已清理」不再拉失效图、放大层对过期成片不开；任务面板的预览图过期也不拉。
   - 测试：`tests/client-review-fixes.mjs` 真浏览器补：退出时 PUT 一直不回包 → 6 秒内照样退出、暂存里有这份改动、挂着的请求最终失败也不丢、重登补推；模拟 localStorage 对暂存键抛 QuotaExceededError → 退出时 localStorage 里没有、IndexedDB 里有副本 → 刷新 + 登录后从 IndexedDB 补水并补推、副本删掉；`/api/me` 全标过期 → 创作台放大禁用、无下载链接、胶片无 `<img>`；画布成片库点一张拉取被掐断两次 → 提示重试、画布上没有 `<img>`。
+- 第五轮 review 补漏（`durableState` 双存储的一致性）：
+  - 两边都带时间戳：localStorage 落的是 `{ $durable, at, value }` 信封（老格式裸值按 at=0 读），IndexedDB 副本是 `{ at, value }`；启动补水按时间戳比，副本更新才采用（写回 localStorage），本地更新或一样新就把副本删掉——残留的旧副本不会再盖掉新值（比如把用户后来决定保留的成片当 pending 墓碑补删掉、把旧偏好重新推上服务器）。`idbShadow` 只在 IndexedDB 确认删掉、且之后没再写过新副本时才清，删失败就留着下次写成功再删。
+  - IndexedDB 兜底写入不再 fire-and-forget：写失败上报（`IndexedDB 也写不进去，只留在内存里`）；`flushDurableWrites()` 能等到所有未落定的写 / 删，退出前会等它（上限 1.5 秒）再发 sign-out，退出后马上关页也不丢；偏好同步的上报按实际说清「落在 localStorage / 只有 IndexedDB / 只剩内存」。关页（pagehide）那一下仍是尽力而为——卸载中没有可以等的东西。
+  - 登录补推的偏好日志不再「读完就删」：`peekUnsyncedPreferences` 只读，日志留到服务端确认同值成功（`clearUnsyncedPreferences`）才划掉；读完、排队 1.5 秒内页面被杀也不会让下次登录被服务端旧值盖掉。
+  - 账户页「最近生成」和后台「生成审计」的过期成片显示「已清理」占位，不再去拉 404。
+  - 测试：`tests/client-review-fixes.mjs` 真浏览器补：注入比本地旧的 IndexedDB 副本 → 刷新后不补推、不写回、副本被删；注入更新的副本 → 采用、补推、清掉；localStorage 和 IndexedDB 同时写不进去 → 上报两条（IndexedDB 写失败 / 只剩内存）、同一会话内重新登录从内存补推；`/api/me` 全标过期 → 账户页最近生成无 `<img>`。
 
 ## V0.8.2 - 2026-08-20
 
