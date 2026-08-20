@@ -14,6 +14,14 @@ import { testProviderConnectivity } from "./provider-connectivity.mjs";
 import { canUseShortVideo, shortVideoFeatureFor } from "./shortvideo.mjs";
 import { nowIso, sqlite } from "./db.mjs";
 import {
+  creditPolicySettings,
+  mergeUserPreferences,
+  readUserPreferences,
+  saveCreditPolicy,
+  saveSystemPrompts,
+  systemPromptOverrides,
+} from "./app-settings.mjs";
+import {
   DEBUG_UNLIMITED_CREDITS,
   DEBUG_USER_ID,
   debugCookieHeader,
@@ -619,7 +627,24 @@ export function registerBusinessRoutes(app) {
       debugUnlimited: isDebugUserId(account.user.id),
       paymentCapabilities: paymentCapabilities(),
       paymentConfig: paymentConfigStatus(),
+      // 后台改过、对所有人生效的规则：报价和服务端扣费用同一份；提示词模板也不再只在管理员本机。
+      creditPolicy: creditPolicySettings(),
+      systemPrompts: systemPromptOverrides(),
+      // 这个账号在别的设备上留下的偏好（提示词库 / 设置 / 草稿），登录即拉回来。
+      preferences: readUserPreferences(account.user.id),
     });
+  });
+
+  /** 账号偏好合并写入：键为 null 表示删除。客户端防抖写，这里只认 clothdesign: 前缀的键。 */
+  app.put("/api/me/preferences", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    const result = mergeUserPreferences(account.user.id, req.body?.preferences);
+    if (result.error) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ preferences: result.value });
   });
 
   // 自备图像接口 Key：只存加密后的，回传脱敏提示。
@@ -1262,6 +1287,38 @@ export function registerBusinessRoutes(app) {
       },
     });
     res.json({ imageProvider: { ...result.settings, ...keyStatus } });
+  });
+
+  /** 积分规则：后台改一次，所有人的报价和服务端扣费都按新规则来。 */
+  app.put("/api/admin/credit-policy", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const result = saveCreditPolicy(req.body?.creditPolicy ?? req.body ?? {});
+    if (result.error) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    insertAudit({ actorUserId: account.user.id, action: "credit_policy.update", targetType: "app_config", targetId: "credit_policy", detail: result.value });
+    res.json({ creditPolicy: result.value });
+  });
+
+  /** 系统提示词模板：按模式覆盖内置模板；传 null 恢复默认。 */
+  app.put("/api/admin/system-prompts", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const result = saveSystemPrompts(req.body?.systemPrompts ?? {});
+    if (result.error) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    insertAudit({
+      actorUserId: account.user.id,
+      action: "system_prompts.update",
+      targetType: "app_config",
+      targetId: "system_prompts",
+      detail: { modes: Object.keys(req.body?.systemPrompts ?? {}) },
+    });
+    res.json({ systemPrompts: result.value });
   });
 
   app.delete("/api/admin/image-provider", async (req, res) => {

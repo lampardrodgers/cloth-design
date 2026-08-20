@@ -8819,3 +8819,153 @@ a.stage-tool {
 .admin-seedance-access li small {
   color: var(--muted);
 }
+
+/* ============================================================================
+ * 保活视图 / 软删除撤销 / 批量进度 / 后台行内小表单 / 账户改密
+ * ========================================================================== */
+
+/* 简易模式下画布是 display:none 保活，不卸载；.free-body-canvas 自己的 display:flex 得让位给 hidden。 */
+.free-body-canvas[hidden] {
+  display: none;
+}
+
+/* 功能中心第一次进去之后就保活在 DOM 里；不在它那一页时整块隐藏。 */
+.view-keepalive {
+  display: contents;
+}
+
+.view-keepalive[hidden] {
+  display: none;
+}
+
+.global-notice.undo-notice {
+  border-color: var(--good);
+}
+
+.undo-button {
+  padding: 4px 12px;
+  border: 1px solid var(--gold);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--gold);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.undo-button:hover {
+  background: var(--gold);
+  color: var(--ink);
+}
+
+.storage-batch-progress {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.storage-batch-progress .progress-track {
+  height: 6px;
+}
+
+.storage-batch-progress small {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.task-abandon {
+  margin-top: 6px;
+}
+
+.admin-inline-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin: -4px 0 10px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--gold-tint);
+}
+
+.admin-inline-editor .field {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.admin-inline-editor input {
+  width: 100%;
+  font-family: var(--mono);
+}
+
+.admin-inline-editor-error {
+  flex-basis: 100%;
+  color: var(--bad);
+  font-size: 12px;
+}
+
+.admin-password-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-password-field input {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-policy-actions {
+  grid-column: 1 / -1;
+  align-items: center;
+}
+
+.prompt-template-grid .field span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.prompt-template-grid .field-dirty textarea {
+  border-color: var(--gold);
+}
+
+.password-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.password-form input {
+  flex: 1 1 200px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--field);
+  font: inherit;
+  font-size: 13px;
+}
+
+.password-form input:focus {
+  outline: none;
+  border-color: var(--gold);
+}
+
+.api-key-notice.password-error {
+  color: var(--bad);
+}
+
+.simple-stage-plate-expired {
+  cursor: default;
+}
+
+.simple-result-thumb-expired {
+  display: grid;
+  place-items: center;
+  background: var(--mat);
+}

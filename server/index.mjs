@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
 import { authHandler, requireAccount, runAuthMigrations, selfSignupAllowed } from "./auth.mjs";
 import { registerBusinessRoutes, serializeAccount } from "./api.mjs";
+import { creditPolicySettings } from "./app-settings.mjs";
 import { migrateBusinessDatabase, nowIso, sqlite } from "./db.mjs";
 import { assertDebugProductionReady, debugUnlimitedAvailable } from "./debug.mjs";
 import { MAX_IMAGE_BYTES, generatedImageStaticMount, persistGeneratedImage, readManagedGeneratedImage, validateImageBuffer } from "./image-provider.mjs";
@@ -336,12 +337,8 @@ function estimateCredits(payload) {
     fabric: 16,
     lookbook: 26,
   };
-  const policy = {
-    perReference: 4,
-    highQualityMultiplier: 1.35,
-    fourKMultiplier: 1.9,
-    transparentBackgroundFee: 3,
-  };
+  // 后台「积分规则」改过的覆盖默认值；和 /api/me 下发给客户端报价的是同一份。
+  const policy = creditPolicySettings();
   const activeReferenceCount = payload.references.filter(
     (item) => item.hasFile || item.fileName || safeReferenceSourceUrl(item.sourceUrl),
   ).length;

@@ -591,6 +591,28 @@ try {
   const slowDone = await waitForTask(baseUrl, admin, slow.id, (item) => item.status === "completed");
   assert.equal(slowDone.script, "现成文案", "给了现成文案就不再调模型");
 
+  /* ── 取消：跑着的任务本站标 cancelled、不再轮询，引擎那边顺手 DELETE；结束的任务不能再取消 ── */
+  releaseSlow = false;
+  response = await request(baseUrl, admin, "/api/shortvideo/tasks", { method: "POST", ...jsonBody({ subject: "SLOW 取消我", script: "现成文案", terms: ["a"] }) });
+  await assertOk(response, 202);
+  const cancelMe = (await response.json()).task;
+  await waitForTask(baseUrl, admin, cancelMe.id, (item) => item.status === "running" && item.progress === 45);
+  const cancelDeleteBefore = engineLog.filter((entry) => entry.method === "DELETE").length;
+  response = await request(baseUrl, admin, `/api/shortvideo/tasks/${cancelMe.id}/cancel`, { method: "POST" });
+  await assertOk(response, 200);
+  const cancelled = await response.json();
+  assert.equal(cancelled.task.status, "cancelled", "取消后状态是 cancelled");
+  assert.equal(cancelled.activeCount, 0, "取消后不再占并发");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(engineLog.filter((entry) => entry.method === "DELETE").length, cancelDeleteBefore + 1, "取消要把引擎侧任务删掉");
+  response = await request(baseUrl, admin, `/api/shortvideo/tasks/${cancelMe.id}/cancel`, { method: "POST" });
+  assert.equal(response.status, 409, "已经结束的任务不能再取消");
+  response = await request(baseUrl, admin, `/api/shortvideo/tasks/${slow.id}/cancel`, { method: "POST" });
+  assert.equal(response.status, 409, "完成的任务不能取消");
+  response = await request(baseUrl, admin, `/api/shortvideo/tasks/${cancelMe.id}`, { method: "DELETE" });
+  await assertOk(response, 200);
+  releaseSlow = true;
+
   /* ── 引擎失败：阶段和原因原样带回来 ────────────────────────────────────── */
   response = await request(baseUrl, admin, "/api/shortvideo/tasks", { method: "POST", ...jsonBody({ subject: "FAIL 配音会挂", script: "文案", source: "local", materials: ["clip-1.mp4"] }) });
   await assertOk(response, 202);

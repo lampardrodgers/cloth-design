@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent } from "react";
 import { isAdminRole } from "../lib/accounts";
 import { DatabaseZap, Film, KeyRound, LayoutDashboard, Plug, Search, Settings2, ShieldCheck, UserPlus, WalletCards } from "lucide-react";
 import { generationModes } from "../data/catalog";
@@ -89,12 +89,14 @@ interface AdminPanelProps {
   /** overview 带回来的各列表总数/页数；上面那几个数组只是第一页。 */
   pagination?: AdminOverviewResponse["pagination"];
   paymentConfig?: PaymentConfigStatus;
+  /** 服务端下发的积分规则；保存后对所有账号生效（报价和扣费用同一份）。返回字符串表示失败原因。 */
   creditPolicy: CreditPolicy;
-  onCreditPolicyChange: (policy: CreditPolicy) => void;
+  onCreditPolicySave?: (policy: CreditPolicy) => Promise<string | void>;
   storage?: StorageAdminOverview;
   onRunStorageMaintenance?: () => Promise<string | void>;
+  /** 系统提示词模板（内置默认 + 后台覆盖合并后的）；传 null 表示恢复该模式的内置默认。 */
   systemPrompts: SystemPromptMap;
-  onSystemPromptsChange: (modeId: ModeKey, value: string) => void;
+  onSystemPromptsSave?: (patch: Partial<Record<ModeKey, string | null>>) => Promise<string | void>;
 }
 
 export function AdminPanel({
@@ -124,14 +126,71 @@ export function AdminPanel({
   pagination,
   paymentConfig,
   creditPolicy,
-  onCreditPolicyChange,
+  onCreditPolicySave,
   storage,
   onRunStorageMaintenance,
   systemPrompts,
-  onSystemPromptsChange,
+  onSystemPromptsSave,
 }: AdminPanelProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [tab, setTab] = useState<AdminTabKey>(tabFromHash);
+
+  // 积分规则 / 提示词模板：先在草稿里改，点「保存」才推到服务端（对所有人生效）。
+  const [policyDraft, setPolicyDraft] = useState<CreditPolicy>(creditPolicy);
+  const [policyNotice, setPolicyNotice] = useState("");
+  const [policyBusy, setPolicyBusy] = useState(false);
+  useEffect(() => setPolicyDraft(creditPolicy), [creditPolicy]);
+  const policyDirty = JSON.stringify(policyDraft) !== JSON.stringify(creditPolicy);
+  const savePolicy = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!onCreditPolicySave || policyBusy) return;
+    setPolicyBusy(true);
+    setPolicyNotice("");
+    try {
+      const error = await onCreditPolicySave(policyDraft);
+      setPolicyNotice(error || "已保存。所有账号的报价和服务端扣费都按这份规则来。");
+    } finally {
+      setPolicyBusy(false);
+    }
+  };
+
+  const [promptDrafts, setPromptDrafts] = useState<Partial<Record<ModeKey, string>>>({});
+  const [promptNotice, setPromptNotice] = useState("");
+  const [promptBusy, setPromptBusy] = useState<ModeKey | "all" | "">("");
+  const promptValue = (modeId: ModeKey, fallback: string) => promptDrafts[modeId] ?? systemPrompts[modeId] ?? fallback;
+  const dirtyPromptModes = generationModes.filter((mode) => promptDrafts[mode.id] !== undefined && promptDrafts[mode.id] !== (systemPrompts[mode.id] ?? mode.systemTemplate)).map((mode) => mode.id);
+  const savePrompts = async (patch: Partial<Record<ModeKey, string | null>>, busyKey: ModeKey | "all") => {
+    if (!onSystemPromptsSave || promptBusy) return;
+    setPromptBusy(busyKey);
+    setPromptNotice("");
+    try {
+      const error = await onSystemPromptsSave(patch);
+      if (error) {
+        setPromptNotice(error);
+        return;
+      }
+      setPromptDrafts((current) => {
+        const next = { ...current };
+        for (const key of Object.keys(patch) as ModeKey[]) delete next[key];
+        return next;
+      });
+      setPromptNotice(Object.values(patch).some((value) => value === null) ? "已恢复内置默认。" : "已保存。之后所有账号拼提示词都用这份模板。");
+    } finally {
+      setPromptBusy("");
+    }
+  };
+
+  // 改密 / 配 Key 用行内小表单，不再用 window.prompt（明文弹窗，还会卡住整个页面）。
+  const [userEditor, setUserEditor] = useState<{ id: string; kind: "password" | "apiKey" } | null>(null);
+  const [userEditorValue, setUserEditorValue] = useState("");
+  const [userEditorBusy, setUserEditorBusy] = useState(false);
+  const [userEditorNotice, setUserEditorNotice] = useState("");
+  const [createPasswordVisible, setCreatePasswordVisible] = useState(false);
+  const openUserEditor = (id: string, kind: "password" | "apiKey") => {
+    setUserEditor((current) => (current?.id === id && current.kind === kind ? null : { id, kind }));
+    setUserEditorValue("");
+    setUserEditorNotice("");
+  };
 
   // 地址栏 hash 是唯一真相：前进/后退、手敲 /admin#billing 都能对上。
   useEffect(() => {
@@ -297,24 +356,40 @@ export function AdminPanel({
     }
   };
 
-  const resetPassword = async (user: UserAccount) => {
-    if (!onResetPassword) return;
-    const next = window.prompt(`给「${user.username ?? user.name}」设置新密码（至少 8 位）：`);
-    if (!next) return;
-    const error = await onResetPassword(user.id, next);
-    setCreateNotice(error || `已重置「${user.username ?? user.name}」的密码，请把新密码告诉对方。`);
-  };
-
-  const editApiKey = async (user: UserAccount) => {
-    if (!onSetApiKey) return;
-    const next = window.prompt(
-      `给「${user.username ?? user.name}」配置图像接口 Key。\n留空并确定 = 清除，改用站点共享 Key。`,
-      "",
-    );
-    if (next === null) return;
-    const error = await onSetApiKey(user.id, next.trim(), user.apiProviderId || "default");
-    if (!error) usersList.refresh();
-    setCreateNotice(error || (next.trim() ? `已给「${user.username ?? user.name}」配好 Key。` : `已清除「${user.username ?? user.name}」的 Key。`));
+  const submitUserEditor = async (event: FormEvent, user: UserAccount) => {
+    event.preventDefault();
+    if (!userEditor || userEditorBusy) return;
+    const value = userEditorValue.trim();
+    setUserEditorBusy(true);
+    setUserEditorNotice("");
+    try {
+      if (userEditor.kind === "password") {
+        if (!onResetPassword) return;
+        if (value.length < 8) {
+          setUserEditorNotice("密码至少 8 位。");
+          return;
+        }
+        const error = await onResetPassword(user.id, value);
+        if (error) {
+          setUserEditorNotice(error);
+          return;
+        }
+        setUserEditor(null);
+        setCreateNotice(`已重置「${user.username ?? user.name}」的密码，请把新密码告诉对方；对方原来的登录态已失效。`);
+        return;
+      }
+      if (!onSetApiKey) return;
+      const error = await onSetApiKey(user.id, value, user.apiProviderId || "default");
+      if (error) {
+        setUserEditorNotice(error);
+        return;
+      }
+      usersList.refresh();
+      setUserEditor(null);
+      setCreateNotice(value ? `已给「${user.username ?? user.name}」配好 Key。` : `已清除「${user.username ?? user.name}」的 Key。`);
+    } finally {
+      setUserEditorBusy(false);
+    }
   };
 
   /** 这条线路本身最高能出到几 K；账号上限只能在这个范围内往下压。 */
@@ -405,9 +480,14 @@ export function AdminPanel({
                     <span>账号名</span>
                     <input required value={draft.username} onChange={(e) => setDraft({ ...draft, username: e.target.value })} placeholder="xiaoli" autoComplete="off" spellCheck={false} />
                   </label>
-                  <label className="field">
+                  <label className="field admin-create-password">
                     <span>初始密码</span>
-                    <input type="text" required minLength={8} value={draft.password} onChange={(e) => setDraft({ ...draft, password: e.target.value })} placeholder="至少 8 位" autoComplete="off" />
+                    <span className="admin-password-field">
+                      <input type={createPasswordVisible ? "text" : "password"} required minLength={8} value={draft.password} onChange={(e) => setDraft({ ...draft, password: e.target.value })} placeholder="至少 8 位" autoComplete="new-password" />
+                      <button type="button" className="text-button" onClick={() => setCreatePasswordVisible((visible) => !visible)} aria-label={createPasswordVisible ? "隐藏密码" : "显示密码"}>
+                        {createPasswordVisible ? "隐藏" : "显示"}
+                      </button>
+                    </span>
                   </label>
                   <label className="field">
                     <span>显示名</span>
@@ -485,8 +565,10 @@ export function AdminPanel({
                   const usage = user.usage;
                   const approved = user.approved !== false;
                   const lastActive = usage?.lastActiveAt ? new Date(usage.lastActiveAt) : null;
+                  const editing = userEditor?.id === user.id ? userEditor : null;
                   return (
-                    <div className={`table-row ${approved ? "" : "table-row-pending"}`} role="row" key={user.id}>
+                    <Fragment key={user.id}>
+                    <div className={`table-row ${approved ? "" : "table-row-pending"}`} role="row">
                       <span className="admin-user-cell">
                         <i className="admin-user-avatar" aria-hidden="true">{(user.name || user.username || "?").trim().charAt(0)}</i>
                         <span className="admin-user-lines">
@@ -582,8 +664,9 @@ export function AdminPanel({
                             type="button"
                             className={`admin-tag admin-tag-button ${user.hasOwnApiKey ? "admin-tag-ok" : ""}`}
                             title={user.hasOwnApiKey ? `已配 ${user.apiKeyHint ?? ""}，点击更换或清除` : "点击给这个账号配专属 Key"}
-                            onClick={() => void editApiKey(user)}
+                            onClick={() => openUserEditor(user.id, "apiKey")}
                             disabled={!onSetApiKey}
+                            aria-expanded={editing?.kind === "apiKey"}
                           >
                             {user.hasOwnApiKey ? user.apiKeyHint ?? "已配" : "共享"}
                           </button>
@@ -601,10 +684,37 @@ export function AdminPanel({
                         <button className="btn btn-secondary" title="加 100 积分" disabled={user.unlimited} onClick={() => onCreditAdjust?.(user.id, 100)}>+100</button>
                         <button className="btn btn-secondary" title="扣 100 积分" disabled={user.unlimited} onClick={() => onCreditAdjust?.(user.id, -100)}>-100</button>
                         {onResetPassword ? (
-                          <button className="btn btn-secondary" title="重置这个账号的登录密码" onClick={() => void resetPassword(user)}>改密</button>
+                          <button className="btn btn-secondary" title="重置这个账号的登录密码" aria-expanded={editing?.kind === "password"} onClick={() => openUserEditor(user.id, "password")}>改密</button>
                         ) : null}
                       </span>
                     </div>
+                    {editing ? (
+                      <form className="admin-inline-editor" onSubmit={(event) => void submitUserEditor(event, user)}>
+                        <label className="field">
+                          <span>
+                            {editing.kind === "password"
+                              ? `给「${user.username ?? user.name}」设置新密码（至少 8 位，对方现有登录态会失效）`
+                              : `给「${user.username ?? user.name}」配置图像接口 Key（留空保存 = 清除，改用站点共享 Key）`}
+                          </span>
+                          <input
+                            type="password"
+                            value={userEditorValue}
+                            onChange={(event) => setUserEditorValue(event.target.value)}
+                            placeholder={editing.kind === "password" ? "新密码" : user.hasOwnApiKey ? `当前 ${user.apiKeyHint ?? "已配"}，粘贴新 Key 替换` : "sk-…"}
+                            autoComplete={editing.kind === "password" ? "new-password" : "off"}
+                            spellCheck={false}
+                            minLength={editing.kind === "password" ? 8 : undefined}
+                            autoFocus
+                          />
+                        </label>
+                        <button type="submit" className="btn btn-primary" disabled={userEditorBusy || (editing.kind === "password" && userEditorValue.trim().length < 8)}>
+                          {userEditorBusy ? "保存中…" : editing.kind === "password" ? "重置密码" : userEditorValue.trim() ? "保存 Key" : "清除 Key"}
+                        </button>
+                        <button type="button" className="btn btn-secondary" onClick={() => setUserEditor(null)} disabled={userEditorBusy}>取消</button>
+                        {userEditorNotice ? <small className="admin-inline-editor-error">{userEditorNotice}</small> : null}
+                      </form>
+                    ) : null}
+                    </Fragment>
                   );
                 })}
                 {usersList.items.length === 0 ? (
@@ -778,18 +888,47 @@ export function AdminPanel({
               </div>
             </Section>
 
-            <Section title="系统提示词模板">
+            <Section title="系统提示词模板"
+              action={
+                onSystemPromptsSave ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={!dirtyPromptModes.length || Boolean(promptBusy)}
+                    onClick={() => void savePrompts(Object.fromEntries(dirtyPromptModes.map((modeId) => [modeId, promptDrafts[modeId] ?? ""])), "all")}
+                  >
+                    {promptBusy === "all" ? "保存中…" : dirtyPromptModes.length ? `保存 ${dirtyPromptModes.length} 处改动` : "保存"}
+                  </button>
+                ) : undefined
+              }
+            >
+              <p className="admin-note">
+                保存后对<strong>所有账号</strong>生效：大家拼提示词用的都是这份模板。没保存的改动只在这一页上。
+              </p>
               <div className="prompt-template-grid">
-                {generationModes.map((mode) => (
-                  <label className="field" key={mode.id}>
-                    <span>{mode.title}</span>
-                    <textarea
-                      value={systemPrompts[mode.id] ?? mode.systemTemplate}
-                      onChange={(event) => onSystemPromptsChange(mode.id, event.target.value)}
-                    />
-                  </label>
-                ))}
+                {generationModes.map((mode) => {
+                  const overridden = (systemPrompts[mode.id] ?? mode.systemTemplate) !== mode.systemTemplate;
+                  const dirty = dirtyPromptModes.includes(mode.id);
+                  return (
+                    <label className={`field ${dirty ? "field-dirty" : ""}`} key={mode.id}>
+                      <span>
+                        {mode.title}
+                        {dirty ? <em className="admin-tag">未保存</em> : overridden ? <em className="admin-tag admin-tag-ok">已覆盖默认</em> : null}
+                        {overridden && onSystemPromptsSave ? (
+                          <button type="button" className="text-button" disabled={Boolean(promptBusy)} onClick={() => void savePrompts({ [mode.id]: null }, mode.id)}>
+                            {promptBusy === mode.id ? "恢复中…" : "恢复默认"}
+                          </button>
+                        ) : null}
+                      </span>
+                      <textarea
+                        value={promptValue(mode.id, mode.systemTemplate)}
+                        onChange={(event) => setPromptDrafts((current) => ({ ...current, [mode.id]: event.target.value }))}
+                      />
+                    </label>
+                  );
+                })}
               </div>
+              {promptNotice ? <p className="admin-create-notice">{promptNotice}</p> : null}
             </Section>
           </>
         ) : null}
@@ -806,20 +945,23 @@ export function AdminPanel({
           <>
             <section className="admin-two">
               <Section title="积分规则" action={<WalletCards size={17} />}>
+                <p className="admin-note">
+                  保存后对<strong>所有账号</strong>生效：前台报价和服务端扣费用的是同一份规则。没保存的改动只在这一页上。
+                </p>
                 <div className="metric-row admin-metrics">
                   <Metric label="参考图" value={`+${creditPolicy.perReference}`} />
                   <Metric label="高质量" value={`x${creditPolicy.highQualityMultiplier}`} />
                   <Metric label="4K" value={`x${creditPolicy.fourKMultiplier}`} />
                   <Metric label="失败退款" value={`${creditPolicy.failureRefundRate * 100}%`} tone="good" />
                 </div>
-                <div className="settings-grid admin-settings-grid">
+                <form className="settings-grid admin-settings-grid" onSubmit={(event) => void savePolicy(event)}>
                   <label className="field">
                     <span>每张参考图加分</span>
                     <input
                       type="number"
                       min={0}
-                      value={creditPolicy.perReference}
-                      onChange={(event) => onCreditPolicyChange({ ...creditPolicy, perReference: Number(event.target.value) })}
+                      value={policyDraft.perReference}
+                      onChange={(event) => setPolicyDraft({ ...policyDraft, perReference: Number(event.target.value) })}
                     />
                   </label>
                   <label className="field">
@@ -828,8 +970,8 @@ export function AdminPanel({
                       type="number"
                       step={0.05}
                       min={1}
-                      value={creditPolicy.highQualityMultiplier}
-                      onChange={(event) => onCreditPolicyChange({ ...creditPolicy, highQualityMultiplier: Number(event.target.value) })}
+                      value={policyDraft.highQualityMultiplier}
+                      onChange={(event) => setPolicyDraft({ ...policyDraft, highQualityMultiplier: Number(event.target.value) })}
                     />
                   </label>
                   <label className="field">
@@ -838,8 +980,8 @@ export function AdminPanel({
                       type="number"
                       step={0.05}
                       min={1}
-                      value={creditPolicy.fourKMultiplier}
-                      onChange={(event) => onCreditPolicyChange({ ...creditPolicy, fourKMultiplier: Number(event.target.value) })}
+                      value={policyDraft.fourKMultiplier}
+                      onChange={(event) => setPolicyDraft({ ...policyDraft, fourKMultiplier: Number(event.target.value) })}
                     />
                   </label>
                   <label className="field">
@@ -847,11 +989,22 @@ export function AdminPanel({
                     <input
                       type="number"
                       min={0}
-                      value={creditPolicy.transparentBackgroundFee}
-                      onChange={(event) => onCreditPolicyChange({ ...creditPolicy, transparentBackgroundFee: Number(event.target.value) })}
+                      value={policyDraft.transparentBackgroundFee}
+                      onChange={(event) => setPolicyDraft({ ...policyDraft, transparentBackgroundFee: Number(event.target.value) })}
                     />
                   </label>
-                </div>
+                  <div className="admin-provider-actions admin-policy-actions">
+                    <button type="submit" className="btn btn-primary" disabled={!onCreditPolicySave || !policyDirty || policyBusy}>
+                      {policyBusy ? "保存中…" : "保存积分规则"}
+                    </button>
+                    {policyDirty ? (
+                      <button type="button" className="btn btn-secondary" onClick={() => setPolicyDraft(creditPolicy)} disabled={policyBusy}>
+                        放弃改动
+                      </button>
+                    ) : null}
+                    {policyNotice ? <small className="muted-text">{policyNotice}</small> : null}
+                  </div>
+                </form>
               </Section>
 
               <Section title="充值套餐" action={<KeyRound size={17} />}>

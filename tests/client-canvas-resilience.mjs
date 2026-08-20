@@ -68,6 +68,10 @@ try {
   browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
 
+  // Google Fonts 是 index.html 里引的外链：CDN 慢的时候几十个子集字体会拖住 networkidle，
+  // 和这里要测的东西无关，直接掐掉。
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
+
   let blockCanvasChunk = true;
   await page.route(/CanvasBoard-.*\.(js|css)$/, (route) =>
     blockCanvasChunk ? route.fulfill({ status: 404, body: "not found" }) : route.continue(),

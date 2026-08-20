@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   creditPolicy as defaultCreditPolicy,
   generationModes,
@@ -35,12 +35,16 @@ import {
   saveWebdavSettings,
   testWebdavSettings,
   endDebugSession,
+  saveAdminCreditPolicy,
+  saveAdminSystemPrompts,
   signOut,
   updateAdminPackage,
   updateAdminUser,
+  UNAUTHORIZED_EVENT,
   type AdminOverviewResponse,
   type ApiConfig,
   type StorageResponse,
+  type UnauthorizedDetail,
   type WebdavSettingsInput,
   setUserShortVideoAccess,
 } from "./lib/api";
@@ -57,7 +61,7 @@ import {
   buildSubmissionRecord,
   MAX_SUBMISSION_RECORDS,
 } from "./lib/freeStudio";
-import { clearStoredStateAccount, setStoredStateAccount, useCappedStoredState, useStoredState } from "./lib/storedState";
+import { clearStoredStateAccount, seedAccountPreferences, setStoredStateAccount, useCappedStoredState, useStoredState } from "./lib/storedState";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -85,7 +89,7 @@ import { AdminPanel } from "./components/AdminPanel";
 import { AuthPanel } from "./components/AuthPanel";
 import { FreeStudio, type FreeGenerationInput, type FreeLayout } from "./components/FreeStudio";
 import { ReferencePanel } from "./components/ReferencePanel";
-import { StoragePanel, type LocalFolderState } from "./components/StoragePanel";
+import { StoragePanel, type BatchProgress, type LocalFolderState } from "./components/StoragePanel";
 import { isAdminRole } from "./lib/accounts";
 import { ShortVideoHub } from "./components/ShortVideoHub";
 import { StudioWorkspace } from "./components/StudioWorkspace";
@@ -104,6 +108,25 @@ const navigation: Array<{
   { id: "account", label: "账户", displayLabel: "账户与积分", description: "套餐明细" },
   { id: "storage", label: "存储", displayLabel: "文件管理", description: "保存归档" },
 ];
+
+/**
+ * 视图进地址栏：/free /studio /workflows /account /storage /shortvideo 各占一个路径，
+ * 刷新停在原处、浏览器前进后退有效、链接能分享。/admin 另有后台壳子，见 handleSetAdminPath。
+ */
+const viewPaths: Record<ViewKey, string> = {
+  free: "/free",
+  studio: "/studio",
+  workflows: "/workflows",
+  account: "/account",
+  storage: "/storage",
+  shortvideo: "/shortvideo",
+};
+
+function viewFromPath(pathname: string): ViewKey {
+  const segment = pathname.split("/").filter(Boolean)[0] ?? "";
+  const match = (Object.keys(viewPaths) as ViewKey[]).find((key) => viewPaths[key] === `/${segment}`);
+  return match ?? "free";
+}
 
 const initialSystemPrompts = generationModes.reduce((map, mode) => {
   map[mode.id] = mode.systemTemplate;
@@ -190,9 +213,14 @@ function mergeResults(existing: GeneratedResult[], incoming: GeneratedResult[] =
 }
 
 function App() {
-  // 自由创作排在导航第一位，登录后也直接落在这里。
-  const [view, setView] = useState<ViewKey>("free");
+  // 自由创作排在导航第一位，登录后也直接落在这里。视图由地址栏路径决定，切视图就是 pushState。
   const [path, setPath] = useState(() => window.location.pathname);
+  const requestedView = viewFromPath(path);
+  const setView = useCallback((next: ViewKey) => {
+    const nextPath = viewPaths[next];
+    if (window.location.pathname !== nextPath) window.history.pushState({}, "", nextPath);
+    setPath(nextPath);
+  }, []);
   const [settings, setSettings] = useStoredState<StudioSettings>("clothdesign:settings", initialSettings);
   const [references, setReferences] = useState<ReferenceImage[]>(initialReferences);
   const [prompt, setPrompt] = useState(
@@ -224,6 +252,10 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  // 短视频只对开了权限的账号存在；没权限的账号直接敲 /shortvideo 就当作自由创作。
+  const view: ViewKey = requestedView === "shortvideo" && currentUser?.features?.shortVideo !== true ? "free" : requestedView;
+  const currentUserRef = useRef<UserAccount | null>(null);
+  currentUserRef.current = currentUser;
   const [packages, setPackages] = useState<RechargePackage[]>([]);
   const [orders, setOrders] = useState<PaymentOrder[]>([]);
   const [ledger, setLedger] = useState<CreditLedgerEntry[]>([]);
@@ -233,11 +265,14 @@ function App() {
   const [imageProviders, setImageProviders] = useState<ImageProviderOption[]>([]);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState("");
+  // 会话失效时给登录页的一句说明；和 authError 分开，免得被后续请求各自的「请先登录」盖掉。
+  const [sessionNotice, setSessionNotice] = useState("");
   const [debugUnlimited, setDebugUnlimited] = useState(false);
   const [adminOverview, setAdminOverview] = useState<AdminOverviewResponse | null>(null);
   const [routes, setRoutes] = useStoredState("clothdesign:routes", modelRoutes);
-  const [creditPolicy, setCreditPolicy] = useStoredState<CreditPolicy>("clothdesign:creditPolicy", defaultCreditPolicy);
-  const [systemPrompts, setSystemPrompts] = useStoredState<SystemPromptMap>("clothdesign:systemPrompts", initialSystemPrompts);
+  // 积分规则和系统提示词模板由服务端下发（后台改一次对所有人生效，扣费用的也是这份），不再只存管理员本机。
+  const [creditPolicy, setCreditPolicy] = useState<CreditPolicy>(defaultCreditPolicy);
+  const [systemPrompts, setSystemPrompts] = useState<SystemPromptMap>(initialSystemPrompts);
   // 文件管理：服务器那边的概况/文件列表从接口取；本地文件夹只存在这台浏览器里。
   const [storageData, setStorageData] = useState<StorageResponse | null>(null);
   const [storageLoading, setStorageLoading] = useState(false);
@@ -423,8 +458,13 @@ function App() {
     setAuthError("");
     try {
       const data = await fetchMe();
+      // 服务端那份偏好先落到这个账号的本地命名空间，再切命名空间渲染，提示词库 / 设置 / 草稿就跨设备一致了。
+      seedAccountPreferences(data.account.id, data.preferences);
       setStoredStateAccount(data.account.id);
       setCurrentUser(data.account);
+      setSessionNotice("");
+      if (data.creditPolicy) setCreditPolicy(data.creditPolicy);
+      setSystemPrompts({ ...initialSystemPrompts, ...(data.systemPrompts ?? {}) });
       setDebugUnlimited(Boolean(data.debugUnlimited));
       setPackages(data.packages);
       setOrders(data.orders);
@@ -447,6 +487,27 @@ function App() {
 
   useEffect(() => {
     void loadAccount();
+  }, []);
+
+  // 会话过期 / 账号被锁：任何一个请求撞上都统一回登录页，不再各自弹「请求失败: 401」。
+  // 本地命名空间里的输入不清（和主动退出不同），重新登录就还在。
+  useEffect(() => {
+    const handleUnauthorized = (event: Event) => {
+      const detail = (event as CustomEvent<UnauthorizedDetail>).detail;
+      if (!currentUserRef.current) return;
+      setStoredStateAccount(null);
+      setCurrentUser(null);
+      setDebugUnlimited(false);
+      setAdminOverview(null);
+      setActiveOrder(null);
+      setSessionNotice(
+        detail?.pendingApproval || /锁定/.test(detail?.message || "")
+          ? detail.message
+          : "登录已失效，请重新登录。重新登录后，这台设备上没提交的输入还在。",
+      );
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
   }, []);
 
   useEffect(() => {
@@ -534,12 +595,30 @@ function App() {
     setOptimizationNotice("已按当前功能、参考图关系和商业出图质量补齐提示词。");
   };
 
+  /**
+   * 每条在跑的出图请求对应一个 AbortController，任务面板的「放弃等待」就是 abort 它。
+   * 服务端收到请求后照样出图、照样计费——这里只是不再等：成片之后会从服务端同步进列表。
+   */
+  const generationAbortRef = useRef(new Map<string, AbortController>());
+  const ABANDONED_MESSAGE = "已放弃等待；服务器仍在出图，成功后成片会同步进列表（刷新或打开文件管理可见）。";
+  const generationError = (error: unknown, fallback: string) => {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return Object.assign(new Error(ABANDONED_MESSAGE), { abandoned: true });
+    }
+    return error instanceof Error ? error : new Error(fallback);
+  };
+  const handleAbandonTask = (task: GenerationTask) => {
+    generationAbortRef.current.get(task.id)?.abort();
+  };
+
   const handleGenerate = async (mode: GenerationMode, cost: number) => {
     if (generationLockRef.current) return;
     generationLockRef.current = true;
     setGenerationSubmitting(true);
     const ratio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
     const taskId = `task-${Date.now()}`;
+    const abortController = new AbortController();
+    generationAbortRef.current.set(taskId, abortController);
     const taskPrompt = prompt.trim() || mode.promptStarter;
     const nextTask: GenerationTask = {
       id: taskId,
@@ -568,6 +647,7 @@ function App() {
         userPrompt: taskPrompt,
         apiSize: ratio.apiSize,
         ratioLabel: ratio.label,
+        signal: abortController.signal,
       });
       // 只覆盖服务端这次回报的字段，别把 providerHealth 抹掉，否则顶栏状态会退化成猜测值。
       setApiConfig((current) => ({
@@ -618,6 +698,7 @@ function App() {
       setResults((items) => [...newResults, ...items]);
       void autoSaveResultsLocally(newResults);
     } catch (error) {
+      const failure = generationError(error, "生成失败");
       setTasks((items) =>
         items.map((task) =>
           task.id === taskId
@@ -627,13 +708,14 @@ function App() {
                 progress: 100,
                 credits: 0,
                 finishedAt: Date.now(),
-                message: error instanceof Error ? error.message : "生成失败",
+                message: failure.message,
               }
             : task,
         ),
       );
     } finally {
       window.clearTimeout(progressTimer);
+      generationAbortRef.current.delete(taskId);
       generationLockRef.current = false;
       setGenerationSubmitting(false);
     }
@@ -674,6 +756,8 @@ function App() {
     const intentLabels = { free: "", annotation: "按标注改图", sketch: "按草图生成" } as const;
     const taskLabel = trimmedPrompt || intentLabels[intent] || "自由创作";
     const taskId = `task-${Date.now()}`;
+    const abortController = new AbortController();
+    generationAbortRef.current.set(taskId, abortController);
 
     setTasks((items) => [
       {
@@ -712,6 +796,7 @@ function App() {
         userPrompt: taskLabel,
         apiSize: ratio.apiSize,
         ratioLabel: ratio.label,
+        signal: abortController.signal,
       });
       if (response.account) setCurrentUser(response.account);
       setApiConfig((current) => ({
@@ -768,15 +853,17 @@ function App() {
       void autoSaveResultsLocally(newResults);
       return newResults;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "生成失败";
+      const failure = generationError(error, "生成失败");
       setTasks((items) =>
         items.map((task) =>
           task.id === taskId
-            ? { ...task, status: "failed", progress: 100, credits: 0, finishedAt: Date.now(), message }
+            ? { ...task, status: "failed", progress: 100, credits: 0, finishedAt: Date.now(), message: failure.message }
             : task,
         ),
       );
-      throw error;
+      throw failure;
+    } finally {
+      generationAbortRef.current.delete(taskId);
     }
   };
 
@@ -826,7 +913,6 @@ function App() {
   const handleSetAdminPath = (nextPath: string) => {
     window.history.pushState({}, "", nextPath);
     setPath(nextPath);
-    if (nextPath !== "/admin") setView("free");
   };
 
   /** 把成片同步进各处状态：创作台的 results、后台的最近生成、文件管理的列表。 */
@@ -992,21 +1078,41 @@ function App() {
     for (const item of items) await saveResultLocally(item);
   };
 
+  // 「全部存到本地」逐张写文件，几百张要等好一阵：把 N/M 进度亮出来，并允许中途停下。
+  const [saveAllProgress, setSaveAllProgress] = useState<BatchProgress | null>(null);
+  const saveAllCancelRef = useRef(false);
+  const handleCancelSaveAll = () => {
+    saveAllCancelRef.current = true;
+  };
+
   const handleSaveAllLocally = async (): Promise<string | void> => {
-    // 「全部存到本地」是整个账号的口径，不是当前这一页——先把所有页翻一遍。
-    const source = storageData ? await fetchAllStorageResults() : results;
-    const targets = source.filter((item) => item.storageStatus !== "expired");
-    let failed = 0;
-    let firstError = "";
-    for (const item of targets) {
-      const error = await saveResultLocally(item);
-      if (error) {
-        failed += 1;
-        firstError = firstError || error;
-        if (/权限/.test(error)) break;
+    saveAllCancelRef.current = false;
+    setSaveAllProgress({ done: 0, total: 0, label: "正在统计要存的成片…" });
+    try {
+      // 「全部存到本地」是整个账号的口径，不是当前这一页——先把所有页翻一遍。
+      const source = storageData ? await fetchAllStorageResults() : results;
+      const targets = source.filter((item) => item.storageStatus !== "expired");
+      let failed = 0;
+      let done = 0;
+      let firstError = "";
+      setSaveAllProgress({ done: 0, total: targets.length, label: `0 / ${targets.length}` });
+      for (const item of targets) {
+        if (saveAllCancelRef.current) {
+          return `已停止：存了 ${done} 张，还有 ${targets.length - done} 张没存${failed ? `（其中 ${failed} 张失败：${firstError}）` : ""}`;
+        }
+        const error = await saveResultLocally(item);
+        done += 1;
+        if (error) {
+          failed += 1;
+          firstError = firstError || error;
+          if (/权限/.test(error)) break;
+        }
+        setSaveAllProgress({ done, total: targets.length, label: `${done} / ${targets.length}` });
       }
+      if (failed) return `${targets.length - failed} 张已存，${failed} 张失败：${firstError}`;
+    } finally {
+      setSaveAllProgress(null);
     }
-    if (failed) return `${targets.length - failed} 张已存，${failed} 张失败：${firstError}`;
   };
 
   const localFolderState: LocalFolderState = {
@@ -1019,9 +1125,55 @@ function App() {
     lastError: localFolderStats.lastError,
   };
 
-  const handleDeleteResult = async (id: string) => {
-    const deletedResult = results.find((item) => item.id === id);
-    const remainingResults = results.filter((item) => item.id !== id);
+  /*
+   * 删除成片是软删除：先从界面上拿掉并给 5 秒「撤销」，到点才真的调接口删记录和文件。
+   * 以前是点一下立刻连服务器文件一起没了，没确认也没后悔药。
+   */
+  const pendingDeleteTimersRef = useRef(new Map<string, number>());
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
+  const pendingDeleteSet = useMemo(() => new Set(pendingDeleteIds), [pendingDeleteIds]);
+  const visibleResults = useMemo(
+    () => (pendingDeleteSet.size ? results.filter((item) => !pendingDeleteSet.has(item.id)) : results),
+    [pendingDeleteSet, results],
+  );
+
+  const handleDeleteResult = (id: string) => {
+    if (pendingDeleteTimersRef.current.has(id)) return;
+    const timer = window.setTimeout(() => {
+      pendingDeleteTimersRef.current.delete(id);
+      setPendingDeleteIds((ids) => ids.filter((item) => item !== id));
+      void commitDeleteResult(id);
+    }, 5000);
+    pendingDeleteTimersRef.current.set(id, timer);
+    setPendingDeleteIds((ids) => [...ids, id]);
+  };
+
+  const handleUndoDeletes = () => {
+    pendingDeleteTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    pendingDeleteTimersRef.current.clear();
+    setPendingDeleteIds([]);
+  };
+
+  // 页面关掉时还没到点的删除要真的删掉（keepalive 让请求在卸载后也能发出去），别让「已删除」又回来。
+  useEffect(() => {
+    const flush = () => {
+      pendingDeleteTimersRef.current.forEach((timer, id) => {
+        window.clearTimeout(timer);
+        void fetch(`/api/generation-results/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include", keepalive: true }).catch(() => undefined);
+      });
+      pendingDeleteTimersRef.current.clear();
+    };
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, []);
+
+  // 定时器 5 秒后才触发，闭包里的 results 早过期了；读最新的那份。
+  const resultsRef = useRef(results);
+  resultsRef.current = results;
+  const commitDeleteResult = async (id: string) => {
+    const latestResults = resultsRef.current;
+    const deletedResult = latestResults.find((item) => item.id === id);
+    const remainingResults = latestResults.filter((item) => item.id !== id);
     try {
       await deleteGenerationResult(id);
       setResults((items) => items.filter((item) => item.id !== id));
@@ -1043,6 +1195,12 @@ function App() {
   // 调试座位和管理员开过「无限额度」的账号，在界面上是同一种状态：显示 ∞、不校验余额。
   const unlimitedCredits = debugUnlimited || currentUser?.unlimited === true;
 
+  // 功能中心的控制项和上传素材都是组件内 state：第一次进去之后就保活（hidden 不卸载），切视图回来还在。
+  const [workflowsVisited, setWorkflowsVisited] = useState(false);
+  useEffect(() => {
+    if (view === "workflows") setWorkflowsVisited(true);
+  }, [view]);
+
   const renderView = () => {
     if (!currentUser) return null;
     if (view === "studio") {
@@ -1051,7 +1209,7 @@ function App() {
           settings={settings}
           prompt={prompt}
           references={references}
-          results={results}
+          results={visibleResults}
           user={currentUser}
           creditPolicy={creditPolicy}
           optimizationNotice={optimizationNotice}
@@ -1083,7 +1241,7 @@ function App() {
     if (view === "free") {
       return (
         <FreeStudio
-          results={results.filter((result) => result.mode === "free")}
+          results={visibleResults.filter((result) => result.mode === "free")}
           submissions={submissions}
           credits={unlimitedCredits ? Number.MAX_SAFE_INTEGER : currentUser.credits}
           creditPolicy={creditPolicy}
@@ -1110,7 +1268,7 @@ function App() {
             ledger={ledger}
             paymentCapabilities={paymentCapabilities}
             debugUnlimited={unlimitedCredits}
-            generationResults={results}
+            generationResults={visibleResults}
             activeOrder={activeOrder}
             onRecharge={handleRecharge}
             onDemoComplete={handleDemoComplete}
@@ -1143,9 +1301,8 @@ function App() {
       );
     }
 
-    if (view === "workflows") {
-      return <WorkflowCenter generatedResults={results} apiConfig={apiConfig} />;
-    }
+    // 功能中心在下面保活渲染，这里不再单独返回。
+    if (view === "workflows") return null;
 
     // 短视频只对开了权限的账号（默认 admin）渲染；权限被收回时视图跟着消失，服务端每个接口也各自把关。
     if (view === "shortvideo") {
@@ -1157,7 +1314,7 @@ function App() {
       <main className="single-view panel-scroll">
         <StoragePanel
           overview={storageData?.overview ?? null}
-          results={storageData?.results ?? results}
+          results={(storageData?.results ?? results).filter((item) => !pendingDeleteSet.has(item.id))}
           pagination={storageData?.resultsPagination}
           onPageChange={(page) => void loadStorage(page)}
           loading={storageLoading}
@@ -1173,6 +1330,8 @@ function App() {
           onToggleAutoSave={(value) => setLocalFolderPolicy({ autoSave: value })}
           onSaveToFolder={saveResultLocally}
           onSaveAllToFolder={handleSaveAllLocally}
+          saveAllProgress={saveAllProgress}
+          onCancelSaveAll={handleCancelSaveAll}
         />
       </main>
     );
@@ -1203,7 +1362,9 @@ function App() {
           }}
           selfSignupAllowed={apiConfig?.selfSignupAllowed !== false}
         />
-        {authError && !authError.includes("请先登录") ? <div className="auth-error">{authError}</div> : null}
+        {sessionNotice || (authError && !authError.includes("请先登录")) ? (
+          <div className="auth-error">{sessionNotice || authError}</div>
+        ) : null}
       </>
     );
   }
@@ -1350,7 +1511,14 @@ function App() {
             pagination={adminOverview?.pagination}
             paymentConfig={adminOverview?.paymentConfig ?? paymentConfig}
             creditPolicy={creditPolicy}
-            onCreditPolicyChange={setCreditPolicy}
+            onCreditPolicySave={async (policy) => {
+              try {
+                const saved = await saveAdminCreditPolicy(policy);
+                setCreditPolicy(saved.creditPolicy);
+              } catch (error) {
+                return error instanceof Error ? error.message : "保存积分规则失败";
+              }
+            }}
             storage={adminOverview?.storage}
             onRunStorageMaintenance={async () => {
               try {
@@ -1361,9 +1529,14 @@ function App() {
               }
             }}
             systemPrompts={systemPrompts}
-            onSystemPromptsChange={(modeId: ModeKey, value: string) =>
-              setSystemPrompts((items) => ({ ...items, [modeId]: value }))
-            }
+            onSystemPromptsSave={async (patch) => {
+              try {
+                const saved = await saveAdminSystemPrompts(patch);
+                setSystemPrompts({ ...initialSystemPrompts, ...saved.systemPrompts });
+              } catch (error) {
+                return error instanceof Error ? error.message : "保存提示词模板失败";
+              }
+            }}
           />
         </main>
       </div>
@@ -1552,6 +1725,11 @@ function App() {
             )}
           </aside>
           {renderView()}
+          {workflowsVisited ? (
+            <div className="view-keepalive" hidden={view !== "workflows"}>
+              <WorkflowCenter generatedResults={visibleResults} apiConfig={apiConfig} />
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -1565,9 +1743,10 @@ function App() {
           <div className="task-popover" role="dialog" aria-label="生成任务">
             <TaskRail
               tasks={tasks}
-              results={results}
+              results={visibleResults}
               submissions={submissions}
               onRetry={handleRetryTask}
+              onAbandon={handleAbandonTask}
               onClose={() => setTaskMenuOpen(false)}
             />
           </div>
@@ -1578,6 +1757,14 @@ function App() {
         <div className="global-notice" role="alert">
           <span>{authError}</span>
           <button type="button" onClick={() => setAuthError("")} aria-label="关闭提示">×</button>
+        </div>
+      ) : null}
+      {pendingDeleteIds.length ? (
+        <div className="global-notice undo-notice" role="status" aria-live="polite">
+          <span>已删除 {pendingDeleteIds.length} 张成片，5 秒后连服务器文件一起清掉</span>
+          <button type="button" className="undo-button" onClick={handleUndoDeletes}>
+            撤销
+          </button>
         </div>
       ) : null}
       {providerTestNotice ? (

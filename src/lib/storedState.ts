@@ -1,27 +1,128 @@
-import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { saveMyPreferences } from "./api";
 import { reportClientError } from "./clientErrors";
-import { ACTIVE_STORAGE_ACCOUNT_KEY, clearAccountStoredState, storedStateKeyForAccount } from "./storageNamespace";
+import { idbDeletePrefix } from "./idbStore";
+import {
+  ACTIVE_STORAGE_ACCOUNT_KEY,
+  STORAGE_NAMESPACE_EVENT,
+  activeStorageAccount,
+  clearAccountStoredState,
+  setActiveStorageAccountCache,
+  storedStateKeyForAccount,
+} from "./storageNamespace";
 
-const STORAGE_NAMESPACE_EVENT = "clothdesign:storage-namespace";
-let currentStorageAccount: string | null | undefined;
+export { STORAGE_NAMESPACE_EVENT, activeStorageAccount } from "./storageNamespace";
 
-function activeStorageAccount() {
-  if (currentStorageAccount !== undefined) return currentStorageAccount;
-  try {
-    currentStorageAccount = window.localStorage.getItem(ACTIVE_STORAGE_ACCOUNT_KEY);
-  } catch {
-    currentStorageAccount = null;
+/* ── 跨设备同步的偏好 ───────────────────────────────────────────────────────
+ * 这些键除了写 localStorage，还防抖推到 /api/me/preferences；登录时服务端那份先落地再渲染。
+ * 任务 / 成片 / 提交记录 / 附件不在其中：它们要么服务端本来就有，要么太大。
+ * ────────────────────────────────────────────────────────────────────────── */
+export const SYNCED_PREFERENCE_KEYS: ReadonlySet<string> = new Set([
+  "clothdesign:settings",
+  "clothdesign:settingsLocked",
+  "clothdesign:modeDrafts",
+  "clothdesign:promptLibrary",
+  "clothdesign:free:prompt",
+  "clothdesign:free:ratio",
+  "clothdesign:free:resolution",
+  "clothdesign:free:quantity",
+  "clothdesign:free:layout",
+  "clothdesign:railCollapsed",
+  "clothdesign:localFolder",
+  "clothdesign:shortvideo:form",
+  "clothdesign:shortvideo:platform",
+  "clothdesign:shortvideo:module",
+]);
+
+const PREFERENCE_SYNC_DELAY_MS = 1500;
+const pendingPreferencePatch = new Map<string, unknown>();
+let preferenceSyncTimer: number | null = null;
+let preferenceSyncAccount: string | null = null;
+
+async function flushPreferenceSync() {
+  if (preferenceSyncTimer !== null) {
+    window.clearTimeout(preferenceSyncTimer);
+    preferenceSyncTimer = null;
   }
-  return currentStorageAccount;
+  if (!pendingPreferencePatch.size || !preferenceSyncAccount) return;
+  // 推送途中账号换了就别把 A 的偏好写到 B 头上。
+  if (preferenceSyncAccount !== activeStorageAccount()) {
+    pendingPreferencePatch.clear();
+    return;
+  }
+  const patch = Object.fromEntries(pendingPreferencePatch);
+  pendingPreferencePatch.clear();
+  try {
+    await saveMyPreferences(patch);
+  } catch (error) {
+    reportClientError({
+      scope: "preferences",
+      message: `偏好同步失败：${error instanceof Error ? error.message : String(error)}`,
+      detail: { keys: Object.keys(patch) },
+    });
+  }
+}
+
+/** 偏好有改动：攒一会儿再一起推，连续打字不会一键一请求。 */
+export function queuePreferenceSync(key: string, value: unknown) {
+  const accountId = activeStorageAccount();
+  if (!accountId || !SYNCED_PREFERENCE_KEYS.has(key)) return;
+  preferenceSyncAccount = accountId;
+  pendingPreferencePatch.set(key, value);
+  if (preferenceSyncTimer !== null) window.clearTimeout(preferenceSyncTimer);
+  preferenceSyncTimer = window.setTimeout(() => void flushPreferenceSync(), PREFERENCE_SYNC_DELAY_MS);
+}
+
+// 关页前把还没推出去的那一批推掉，不然刚改的设置只留在这台机器上。
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => void flushPreferenceSync());
+}
+
+/**
+ * 登录拿到服务端偏好后调用：把它们写进这个账号的 localStorage 命名空间（服务端为准），
+ * 本机有、服务端还没有的键则反向补推上去（老用户第一次升级时把提示词库带上云）。
+ * 要在 setStoredStateAccount 之前调，后者会广播让所有 hook 重读。
+ */
+export function seedAccountPreferences(accountId: string, preferences: Record<string, unknown> | undefined) {
+  const remote = preferences && typeof preferences === "object" ? preferences : {};
+  for (const key of SYNCED_PREFERENCE_KEYS) {
+    const storageKey = storedStateKeyForAccount(key, accountId);
+    if (!storageKey) continue;
+    // 本机刚改、还没推出去的以本机为准；loadAccount 在支付 / 重登时会再跑，别让旧的服务端值把它盖掉。
+    if (pendingPreferencePatch.has(key) && preferenceSyncAccount === accountId) continue;
+    if (key in remote) {
+      writeStoredState(storageKey, remote[key]);
+      continue;
+    }
+    try {
+      const local = window.localStorage.getItem(storageKey);
+      if (local !== null) pendingPreferencePatch.set(key, JSON.parse(local));
+    } catch {
+      // 读不出来就不补推
+    }
+  }
+  if (pendingPreferencePatch.size) {
+    preferenceSyncAccount = accountId;
+    if (preferenceSyncTimer !== null) window.clearTimeout(preferenceSyncTimer);
+    preferenceSyncTimer = window.setTimeout(() => void flushPreferenceSync(), PREFERENCE_SYNC_DELAY_MS);
+  }
 }
 
 export function setStoredStateAccount(accountId: string | null) {
-  currentStorageAccount = accountId;
+  setActiveStorageAccountCache(accountId);
   try {
     if (accountId) window.localStorage.setItem(ACTIVE_STORAGE_ACCOUNT_KEY, accountId);
     else window.localStorage.removeItem(ACTIVE_STORAGE_ACCOUNT_KEY);
   } catch {
     // The in-memory state still switches below when storage is unavailable.
+  }
+  if (!accountId) {
+    // 退出 / 掉线：没推出去的偏好作废，别等下个账号登录时推错人。
+    pendingPreferencePatch.clear();
+    if (preferenceSyncTimer !== null) {
+      window.clearTimeout(preferenceSyncTimer);
+      preferenceSyncTimer = null;
+    }
   }
   window.dispatchEvent(new CustomEvent(STORAGE_NAMESPACE_EVENT, { detail: { accountId } }));
 }
@@ -32,6 +133,8 @@ export function clearStoredStateAccount(accountId: string | null | undefined) {
   } catch {
     // Logout must continue even when localStorage is disabled.
   }
+  const prefix = accountId ? storedStateKeyForAccount("clothdesign:", accountId) : null;
+  if (prefix) void idbDeletePrefix(prefix).catch(() => undefined);
 }
 
 export function readStoredState<T>(key: string, fallback: T): T {
@@ -56,23 +159,31 @@ export function writeStoredState(key: string, value: unknown): boolean {
 /**
  * 与 localStorage 同步的 state。
  *
- * 写不进去（配额满）时：数组就砍掉后半截再试一次——尾部是最旧的，扔掉损失最小；
- * 不是数组就只能放弃。两种情况都往服务端记一笔，别再像以前那样静默吞掉：
- * 静默失败表现出来是「刷新之后记录莫名其妙不动了」，从现象根本猜不到是配额问题。
+ * 写不进去（配额满）时：数组就砍掉后半截再试一次——这里的数组（任务 / 成片 / 提交记录）都是
+ * 新在前排的，尾部是最旧的，扔掉损失最小；不是数组就只能放弃。两种情况都往服务端记一笔，
+ * 别再像以前那样静默吞掉：静默失败表现出来是「刷新之后记录莫名其妙不动了」，从现象根本猜不到是配额问题。
+ * 内容型的大数组（简易模式附件）不走这里，走 useIdbState——它们是旧在前排的，砍后半会把刚加的砍掉。
  */
 export function useStoredState<T>(key: string, fallback: T) {
   const [storageKey, setStorageKey] = useState<string | null>(() => storedStateKeyForAccount(key, activeStorageAccount()));
-  const [value, setValue] = useState<T>(() => (storageKey ? readStoredState(storageKey, fallback) : fallback));
+  const [value, setValueState] = useState<T>(() => (storageKey ? readStoredState(storageKey, fallback) : fallback));
+  // 只有调用方 setValue 过才算用户改动，才推同步；首次挂载 / 换账号重读那一轮不算。
+  const dirtyRef = useRef(false);
+  const setValue = useCallback<Dispatch<SetStateAction<T>>>((action) => {
+    dirtyRef.current = true;
+    setValueState(action);
+  }, []);
 
   useEffect(() => {
     const switchAccount = () => {
       const nextKey = storedStateKeyForAccount(key, activeStorageAccount());
+      dirtyRef.current = false;
       setStorageKey(nextKey);
-      setValue(nextKey ? readStoredState(nextKey, fallback) : fallback);
+      setValueState(nextKey ? readStoredState(nextKey, fallback) : fallback);
     };
     const handleStorage = (event: StorageEvent) => {
       if (event.key === ACTIVE_STORAGE_ACCOUNT_KEY) {
-        currentStorageAccount = event.newValue;
+        setActiveStorageAccountCache(event.newValue);
         switchAccount();
       }
     };
@@ -85,7 +196,11 @@ export function useStoredState<T>(key: string, fallback: T) {
   }, [key]);
 
   useEffect(() => {
-    if (!storageKey || writeStoredState(storageKey, value)) return;
+    if (!storageKey) return;
+    if (writeStoredState(storageKey, value)) {
+      if (dirtyRef.current) queuePreferenceSync(key, value);
+      return;
+    }
     if (Array.isArray(value) && value.length > 1) {
       const kept = Math.floor(value.length / 2);
       reportClientError({
@@ -93,11 +208,11 @@ export function useStoredState<T>(key: string, fallback: T) {
         message: `localStorage 配额不足，${storageKey} 从 ${value.length} 条裁到 ${kept} 条`,
         detail: { key: storageKey, kept, dropped: value.length - kept },
       });
-      setValue(value.slice(0, kept) as unknown as T);
+      setValueState(value.slice(0, kept) as unknown as T);
       return;
     }
     reportClientError({ scope: "storage", message: `localStorage 写入失败：${storageKey}`, detail: { key: storageKey } });
-  }, [storageKey, value]);
+  }, [key, storageKey, value]);
 
   return [value, setValue] as const;
 }

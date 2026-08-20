@@ -16,6 +16,13 @@ export interface LocalFolderState {
   lastError: string | null;
 }
 
+/** 批量操作（全部存到本地）的进度：done / total，label 是给人看的一句话。 */
+export interface BatchProgress {
+  done: number;
+  total: number;
+  label: string;
+}
+
 interface StoragePanelProps {
   overview: StorageOverview | null;
   /** 当前这一页的成片；总数看 pagination / overview。 */
@@ -35,6 +42,9 @@ interface StoragePanelProps {
   onToggleAutoSave: (value: boolean) => void;
   onSaveToFolder: (result: GeneratedResult) => Promise<string | void>;
   onSaveAllToFolder: () => Promise<string | void>;
+  /** 「全部存到本地」跑的时候的 N/M 进度；不在跑为 null。 */
+  saveAllProgress?: BatchProgress | null;
+  onCancelSaveAll?: () => void;
 }
 
 const RETENTION_FALLBACK_DAYS = 3;
@@ -83,6 +93,8 @@ export function StoragePanel({
   onToggleAutoSave,
   onSaveToFolder,
   onSaveAllToFolder,
+  saveAllProgress = null,
+  onCancelSaveAll,
 }: StoragePanelProps) {
   const retentionDays = overview?.retentionDays ?? RETENTION_FALLBACK_DAYS;
   const settings = overview?.settings;
@@ -273,8 +285,19 @@ export function StoragePanel({
                 <button type="button" className="btn btn-secondary" onClick={saveAllLocal} disabled={!folderReady || folderBusy || savableCount === 0}>
                   把当前 {savableCount} 张全部存到本地
                 </button>
+                {saveAllProgress && onCancelSaveAll ? (
+                  <button type="button" className="btn btn-secondary" onClick={onCancelSaveAll}>
+                    停止
+                  </button>
+                ) : null}
                 <small className="muted-text">按日期分子目录，文件名带标题；同名覆盖。</small>
               </div>
+              {saveAllProgress ? (
+                <div className="storage-batch-progress" role="progressbar" aria-valuemin={0} aria-valuemax={saveAllProgress.total || 1} aria-valuenow={saveAllProgress.done} aria-label="全部存到本地的进度">
+                  <div className="progress-track"><span style={{ width: `${saveAllProgress.total ? Math.round((saveAllProgress.done / saveAllProgress.total) * 100) : 0}%` }} /></div>
+                  <small>{saveAllProgress.label}</small>
+                </div>
+              ) : null}
               {folderNotice ? <p className="storage-notice">{folderNotice}</p> : null}
               {localFolder.lastError ? <p className="storage-notice storage-notice-error">{localFolder.lastError}</p> : null}
               {localFolder.lastSavedPath ? <p className="muted-text storage-last">最近写入：{localFolder.lastSavedPath}</p> : null}

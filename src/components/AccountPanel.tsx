@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { changeMyPassword } from "../lib/api";
 import { imageQualityLabel } from "../lib/imageQuality";
 import { resolutionShortLabels } from "../lib/resolution";
 import type {
@@ -62,6 +63,33 @@ export function AccountPanel({
   const [apiKeyBusy, setApiKeyBusy] = useState(false);
   const [apiKeyNotice, setApiKeyNotice] = useState("");
   const [providerId, setProviderId] = useState(currentUser.apiProviderId || imageProviders[0]?.id || "default");
+  // 自己改密码：以前只有管理员能在后台重置，用户没有入口。
+  const [passwordDraft, setPasswordDraft] = useState({ current: "", next: "", confirm: "" });
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordNotice, setPasswordNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const submitPassword = async (event: FormEvent) => {
+    event.preventDefault();
+    if (passwordBusy) return;
+    if (passwordDraft.next.length < 8) {
+      setPasswordNotice({ ok: false, text: "新密码至少 8 位。" });
+      return;
+    }
+    if (passwordDraft.next !== passwordDraft.confirm) {
+      setPasswordNotice({ ok: false, text: "两次输入的新密码不一样。" });
+      return;
+    }
+    setPasswordBusy(true);
+    setPasswordNotice(null);
+    try {
+      await changeMyPassword(passwordDraft.current, passwordDraft.next);
+      setPasswordDraft({ current: "", next: "", confirm: "" });
+      setPasswordNotice({ ok: true, text: "密码已修改。其它设备上的登录已失效，需要用新密码重新登录。" });
+    } catch (error) {
+      setPasswordNotice({ ok: false, text: error instanceof Error ? error.message : "修改密码失败" });
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
   useEffect(() => setProviderId(currentUser.apiProviderId || imageProviders[0]?.id || "default"), [currentUser.apiProviderId, imageProviders]);
   const selectedProvider = imageProviders.find((provider) => provider.id === providerId);
 
@@ -174,6 +202,51 @@ export function AccountPanel({
           ) : null}
           {apiKeyNotice ? <small className="api-key-notice">{apiKeyNotice}</small> : null}
           <small className="muted-text">Key 加密保存在本站服务器上，页面上永远只显示前 3 位和后 4 位。</small>
+        </section>
+      ) : null}
+
+      {currentUser.username || currentUser.email ? (
+        <section className="editorial-section password-section">
+          <span className="rail-kicker">修改密码</span>
+          <form className="password-form" onSubmit={(event) => void submitPassword(event)}>
+            <input
+              type="password"
+              value={passwordDraft.current}
+              onChange={(event) => setPasswordDraft({ ...passwordDraft, current: event.target.value })}
+              placeholder="当前密码"
+              autoComplete="current-password"
+              aria-label="当前密码"
+              disabled={passwordBusy}
+              required
+            />
+            <input
+              type="password"
+              value={passwordDraft.next}
+              onChange={(event) => setPasswordDraft({ ...passwordDraft, next: event.target.value })}
+              placeholder="新密码（至少 8 位）"
+              autoComplete="new-password"
+              aria-label="新密码"
+              minLength={8}
+              disabled={passwordBusy}
+              required
+            />
+            <input
+              type="password"
+              value={passwordDraft.confirm}
+              onChange={(event) => setPasswordDraft({ ...passwordDraft, confirm: event.target.value })}
+              placeholder="再输一遍新密码"
+              autoComplete="new-password"
+              aria-label="确认新密码"
+              minLength={8}
+              disabled={passwordBusy}
+              required
+            />
+            <button type="submit" className="btn btn-primary" disabled={passwordBusy || !passwordDraft.current || !passwordDraft.next || !passwordDraft.confirm}>
+              {passwordBusy ? "修改中…" : "修改密码"}
+            </button>
+          </form>
+          {passwordNotice ? <small className={passwordNotice.ok ? "api-key-notice" : "api-key-notice password-error"}>{passwordNotice.text}</small> : null}
+          <small className="muted-text">改完其它设备上的登录会一起失效；忘了当前密码请联系管理员在后台重置。</small>
         </section>
       ) : null}
 

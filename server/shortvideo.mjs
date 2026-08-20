@@ -1078,6 +1078,28 @@ export function registerShortVideoRoutes(app) {
     res.json({ task: serializeShortVideoTask(row) });
   });
 
+  /**
+   * 取消排队中 / 生成中的任务：本站标成 cancelled、不再轮询；引擎那边的任务顺手删掉
+   * （MPT 没有「暂停」，删任务就是它的取消）。已经结束的任务走 DELETE。
+   */
+  app.post("/api/shortvideo/tasks/:id/cancel", async (req, res) => {
+    const account = await requireShortVideoAccount(req, res);
+    if (!account) return;
+    const row = ownedTaskOr404(req, res, account);
+    if (!row) return;
+    if (row.status !== "queued" && row.status !== "running") {
+      res.status(409).json({ error: "任务已经结束，不用取消；要清掉请直接删除。" });
+      return;
+    }
+    updateTask(row.id, { status: "cancelled", stage: "cancelled", error: "已手动取消。", finished_at: nowIso() });
+    engineLostSince.delete(row.id);
+    if (row.engine_task_id && engineConfigured()) {
+      void deleteEngineTask(row.engine_task_id).catch((error) => console.warn(`[shortvideo] 取消引擎任务 ${row.engine_task_id} 失败：`, error?.message || error));
+    }
+    stopPollingIfIdle();
+    res.json({ task: serializeShortVideoTask(getTaskRow(row.id)), activeCount: activeTaskCount(account.user.id) });
+  });
+
   app.delete("/api/shortvideo/tasks/:id", async (req, res) => {
     const account = await requireShortVideoAccount(req, res);
     if (!account) return;

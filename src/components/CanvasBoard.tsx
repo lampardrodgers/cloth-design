@@ -496,13 +496,36 @@ function loadImageSize(src: string) {
 }
 
 /** 把一张图落到画布上：建 asset + image shape，返回新形状 id。给了 box 就按 box 等比放进去。 */
+/**
+ * 服务器托管的成片（/generated-images/…）只保留 3 天，到期文件就没了。
+ * 放进画布的图要一直在，所以落盘前先把字节拉下来转成 data URL 存进 tldraw 的资产里；
+ * 拉不到（已经清理、网络不通）就只能先按地址放，至少不把整个动作卡死。
+ */
+async function canvasAssetSource(url: string) {
+  if (!url.startsWith("/generated-images/")) return url;
+  try {
+    const response = await fetch(url, { credentials: "include" });
+    if (!response.ok) return url;
+    const blob = await response.blob();
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error ?? new Error("读取失败"));
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return url;
+  }
+}
+
 async function placeImage(
   editor: Editor,
   image: { url: string; name: string; resultId?: string; usage?: AttachmentUsage; annotated?: boolean },
   box: { x: number; y: number; w: number; h: number } | null,
   longEdge = 460,
 ) {
-  const natural = await loadImageSize(image.url);
+  const src = await canvasAssetSource(image.url);
+  const natural = await loadImageSize(src);
   const assetId = AssetRecordType.createId();
   editor.createAssets([
     {
@@ -511,10 +534,10 @@ async function placeImage(
       typeName: "asset",
       props: {
         name: image.name,
-        src: image.url,
+        src,
         w: natural.w,
         h: natural.h,
-        mimeType: image.url.startsWith("data:") ? image.url.slice(5, image.url.indexOf(";")) : "image/png",
+        mimeType: src.startsWith("data:") ? src.slice(5, src.indexOf(";")) : "image/png",
         isAnimated: false,
       },
       meta: {},
@@ -1171,15 +1194,26 @@ interface FramePanelRef {
   annotated: boolean;
 }
 
-function CanvasOverlay({
-  pendingImages,
-  onPendingConsumed,
-  onActions,
-}: {
+interface CanvasOverlayProps {
   pendingImages: PendingCanvasImage[];
   onPendingConsumed: (ids: string[]) => void;
   onActions: (actions: CanvasActions) => void;
-}) {
+}
+
+/**
+ * 传给 CanvasOverlay 的 props 走 context，而不是每次 pendingImages 变了就造一个新的
+ * InFrontOfTheCanvas 组件：tldraw 按组件身份挂载，身份一换整个浮层就卸载重挂，
+ * busyFrameIds / consumedRef 归零——面板按钮重新可点而画框还写着「正在生成…」，能重复提交。
+ */
+const CanvasOverlayPropsContext = createContext<CanvasOverlayProps | null>(null);
+
+function CanvasOverlayHost() {
+  const props = useContext(CanvasOverlayPropsContext);
+  if (!props) return null;
+  return <CanvasOverlay {...props} />;
+}
+
+function CanvasOverlay({ pendingImages, onPendingConsumed, onActions }: CanvasOverlayProps) {
   const editor = useEditor();
   const api = useCanvasApi();
   const ui = useCanvasUi();
@@ -1899,6 +1933,11 @@ function useCanvasWatchdog(shellRef: React.RefObject<HTMLDivElement | null>, onR
       if (state.gaveUp || document.hidden || Date.now() < state.graceUntil) return;
       const shell = shellRef.current;
       if (!shell) return;
+      // 简易模式下画布是 display:none 保活着的（不卸载，切回来状态还在）；量不到尺寸不是变白。
+      if (shell.offsetParent === null && shell.getBoundingClientRect().width === 0) {
+        state.strikes = 0;
+        return;
+      }
 
       const container = shell.querySelector(".tl-container");
       const rect = container?.getBoundingClientRect();
@@ -2014,16 +2053,19 @@ export function CanvasBoard({
     [costFor, credits, results, onGenerate, onNotice, onSendToSimple],
   );
 
+  // 组件表必须是稳定的：InFrontOfTheCanvas 固定成 CanvasOverlayHost，数据走 context。
   const components = useMemo<TLComponents>(
     () => ({
       Toolbar: CanvasToolbar,
       StylePanel: CanvasStylePanel,
       ImageToolbar: CanvasImageToolbar,
       SharePanel: CanvasSharePanel,
-      InFrontOfTheCanvas: () => (
-        <CanvasOverlay pendingImages={pendingImages} onPendingConsumed={onPendingConsumed} onActions={setActions} />
-      ),
+      InFrontOfTheCanvas: CanvasOverlayHost,
     }),
+    [],
+  );
+  const overlayProps = useMemo<CanvasOverlayProps>(
+    () => ({ pendingImages, onPendingConsumed, onActions: setActions }),
     [onPendingConsumed, pendingImages],
   );
 
@@ -2058,6 +2100,21 @@ export function CanvasBoard({
     (editor: Editor) => {
       // 之前的版本把画布锁成深色，用户偏好会一直留着；这里明确回到浅色，和整个工作台一致。
       editor.user.updateUserPreferences({ colorScheme: "light" });
+      // 画框的「正在生成…」跟着画布一起存进了 IndexedDB；刷新 / 重挂之后那次请求早就断了，
+      // 不收口的话画框会永远转圈。真出了图，成片库里照样有。
+      const stale = editor
+        .getCurrentPageShapes()
+        .filter((shape): shape is AiFrameShape => isAiFrame(shape) && shape.props.status === "running");
+      if (stale.length) {
+        editor.run(
+          () => {
+            stale.forEach((frame) =>
+              updateFrame(editor, frame, { status: "failed", message: "刷新时断开了跟踪；如果这次出图成功，成片可以在成片库里找到。" }),
+            );
+          },
+          { history: "ignore" },
+        );
+      }
       markReady();
     },
     [markReady],
@@ -2067,6 +2124,7 @@ export function CanvasBoard({
     <CanvasApiContext.Provider value={api}>
       <CanvasUiContext.Provider value={ui}>
         <CanvasActionsContext.Provider value={actions}>
+          <CanvasOverlayPropsContext.Provider value={overlayProps}>
           <div className="canvas-shell" ref={shellRef}>
             <Tldraw
               key={mountKey}
@@ -2089,6 +2147,7 @@ export function CanvasBoard({
               </div>
             ) : null}
           </div>
+          </CanvasOverlayPropsContext.Provider>
         </CanvasActionsContext.Provider>
       </CanvasUiContext.Provider>
     </CanvasApiContext.Provider>

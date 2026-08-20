@@ -177,7 +177,7 @@ assert(canvasSource.includes("editor.deleteShapes(ids)") && canvasSource.include
 
 // 9. 导航：自由创作排第一，登录后直接落在这里
 assert(app.indexOf('id: "free"') < app.indexOf('id: "studio"'), "自由创作要排在导航第一位");
-assert(app.includes('useState<ViewKey>("free")'), "默认视图跟着导航第一项走");
+assert(app.includes('return match ?? "free";'), "默认视图跟着导航第一项走（路径认不出来就是自由创作）");
 
 // 10. 多人使用：账户页能填自备 Key，后台能开通账号、看用量
 const account = await fs.readFile("src/components/AccountPanel.tsx", "utf8");

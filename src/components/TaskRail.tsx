@@ -31,13 +31,15 @@ interface TaskRailProps {
   /** 提交现场：任务还在跑、输入框已经清空时，靠它回答「这条任务提交的是什么」。 */
   submissions?: SubmissionRecord[];
   onRetry: (task: GenerationTask) => void;
+  /** 运行中的任务「放弃等待」：中断这次请求（服务端照样出图，成片之后会同步进列表）。 */
+  onAbandon?: (task: GenerationTask) => void;
   onClose?: () => void;
 }
 
 /** 任务栏一次画多少条，点「显示更多」再往下加一批。 */
 const TASK_PAGE_SIZE = 20;
 
-export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClose }: TaskRailProps) {
+export function TaskRail({ tasks, results = [], submissions = [], onRetry, onAbandon, onClose }: TaskRailProps) {
   const running = tasks.filter((task) => task.status === "running").length;
   const success = tasks.filter((task) => task.status === "success").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
@@ -132,6 +134,11 @@ export function TaskRail({ tasks, results = [], submissions = [], onRetry, onClo
                 <small>{displayTaskMessage(task.message)}</small>
                 {task.status === "failed" ? (
                   <button type="button" className="btn btn-secondary" onClick={() => onRetry(task)}>恢复设置</button>
+                ) : null}
+                {task.status === "running" && onAbandon ? (
+                  <button type="button" className="btn btn-secondary task-abandon" onClick={() => onAbandon(task)} title="不再等这张；服务器仍会出图，成片之后会同步进列表">
+                    放弃等待
+                  </button>
                 ) : null}
               </div>
             </article>

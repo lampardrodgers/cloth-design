@@ -3,6 +3,7 @@ import { Clapperboard, CloudUpload, Download, Megaphone, RefreshCw, Sparkles, Tr
 import {
   archiveShortVideoTask,
   createShortVideoTask,
+  cancelShortVideoTask,
   deleteShortVideoTask,
   fetchShortVideoMaterials,
   fetchShortVideoOverview,
@@ -403,7 +404,25 @@ export function ShortVideoStudio() {
     }
   };
 
+  /** 排队中 / 生成中的任务取消：本站标成已取消、不再轮询；引擎那边的任务顺手删掉。 */
+  const handleCancel = async (task: ShortVideoTask) => {
+    if (!window.confirm(task.status === "queued" ? "取消这条排队中的任务？" : "这条已经在生成了，取消后已消耗的引擎时间不会退回。仍然取消？")) return;
+    setBusy(`cancel:${task.id}`);
+    try {
+      const data = await cancelShortVideoTask(task.id);
+      setActiveCount(data.activeCount);
+      setTasks((current) => current.map((item) => (item.id === task.id ? data.task : item)));
+      setNotice({ tone: "info", text: "已取消。" });
+    } catch (error) {
+      setNotice({ tone: "bad", text: error instanceof Error ? error.message : "取消失败。" });
+    } finally {
+      setBusy("");
+    }
+  };
+
   const handleDelete = async (task: ShortVideoTask) => {
+    // 删除连服务器上的成片一起没了，没有回收站：至少确认一次。
+    if (!window.confirm(task.status === "completed" ? "删除这条任务和它的成片、字幕？服务器上的文件会一起清掉，无法恢复。" : "删除这条任务记录？")) return;
     try {
       await deleteShortVideoTask(task.id);
       // 重新拉当前这一页：删掉一条之后要把后面的补上来，总数也要跟着变。
@@ -992,7 +1011,14 @@ export function ShortVideoStudio() {
                     </div>
                   </div>
                 ) : null}
-                {expanded && (task.status === "completed" || task.status === "failed") ? (
+                {expanded && isActive(task) ? (
+                  <div className="shortvideo-task-actions">
+                    <button type="button" className="text-button danger" onClick={() => void handleCancel(task)} disabled={busy === `cancel:${task.id}`}>
+                      <Trash2 size={13} aria-hidden="true" /> {busy === `cancel:${task.id}` ? "取消中…" : "取消任务"}
+                    </button>
+                  </div>
+                ) : null}
+                {expanded && (task.status === "completed" || task.status === "failed" || task.status === "cancelled") ? (
                   <div className="shortvideo-task-actions">
                     {task.result.subtitle ? (
                       <a className="text-button" href={`${task.result.subtitle}?download`}>

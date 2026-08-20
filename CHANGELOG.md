@@ -1,5 +1,19 @@
 # Changelog
 
+## 未发布
+
+- 画布：「放到画布」不再把浮层卸载重挂。以前 `InFrontOfTheCanvas` 写在 `useMemo` 里、依赖 `pendingImages`，每加一张待放图就造一个新组件，tldraw 按组件身份整层重挂，`busyFrameIds` / `consumedRef` 归零——面板按钮重新可点而画框还写着「正在生成…」，能重复提交。现在浮层组件固定，`pendingImages` 走 context。
+- 画布：刷新 / 重挂之后遗留在 IndexedDB 里的「正在生成…」画框，onMount 时统一收口成失败并说明「刷新时断开了跟踪；如果这次出图成功，成片可以在成片库里找到」。简易 / 画布切换不再卸载画布（打开过就 `display:none` 保活），切布局时在跑的请求不会对着已销毁的 editor 写；看门狗量不到隐藏画布的尺寸时不再误判白屏。放进画布的受管成片先转成 data URL 存进 tldraw 资产，服务器 3 天清理后画布上不裂图。
+- 简易模式的附件移出 localStorage（data URL 几张 PNG 就撑爆 5MB，撑爆时会悄悄砍掉后加的那几张），改存 IndexedDB（`src/lib/idbStore.ts`，按账号隔离、退出时一并清理）；写失败明确提示，不再静默。过期（服务器已清理）的成片在简易模式里显示「服务器副本已清理」而不是裂图，下载按钮收起。
+- 后台「积分规则」「系统提示词模板」从管理员本机 localStorage 搬到服务端 `app_config`（`server/app-settings.mjs`）：`/api/me` 下发给每个账号，服务端 `estimateCredits` 扣费用的就是同一份，管理员改倍率对所有人生效；提示词模板按模式覆盖、可一键恢复内置默认。两个版块都改成「改草稿 → 保存」，页面上写清楚是对所有账号生效。新增 `PUT /api/admin/credit-policy`、`PUT /api/admin/system-prompts`。
+- 删除成片改成软删除：点删除先从界面拿掉并给 5 秒「撤销」（底部提示条），到点才真的调接口删记录和服务器文件；页面关掉前还没到点的用 keepalive 请求补发。短视频删除加确认；排队中 / 生成中的短视频任务可以「取消」（新增 `POST /api/shortvideo/tasks/:id/cancel`：本站标 cancelled、不再轮询、引擎侧任务顺手删）。
+- 会话失效统一处理：`parseJson` 遇到 401、或 403 里的「账号已锁定 / 待开通」，广播 `clothdesign:unauthorized`，App 收到后回登录页并说明「登录已失效」；本地命名空间里没提交的输入不清，重新登录还在。不再每个动作各自弹「请求失败: 401」。
+- 视图进地址栏：`/free` `/studio` `/workflows` `/account` `/storage` `/shortvideo` 各占一个路径，刷新停在原处、浏览器前进后退有效、链接能分享；没权限的账号敲 `/shortvideo` 当作自由创作。功能中心第一次进去之后保活（hidden 不卸载），切视图回来表单、上传素材、轮询都还在。
+- 批量与取消：「全部存到本地」有 N/M 进度条和「停止」；任务面板里运行中的出图任务可以「放弃等待」（中断这次请求；服务端照样出图，成片之后会同步进列表），简易模式收到放弃不再把描述放回输入框。
+- 账户页新增「修改密码」（走 better-auth `change-password`，改完其它设备的登录态一并失效）。后台改密 / 配 Key 不再用明文的 `window.prompt`，改成行内 `type=password` 小表单；建号表单的初始密码也改成密码框（可点「显示」）。
+- 提示词库、色卡、设置、模式草稿、自由创作参数、侧栏折叠、短视频表单等偏好跨设备同步：`user_profile.preferences_json` + `PUT /api/me/preferences`，登录时服务端那份先落到本地命名空间再渲染，本机改动防抖 1.5 秒推回；本机有、服务端没有的键首次登录时反向补推。任务 / 成片 / 附件不同步。
+- 新增 `tests/server-app-settings.mjs`、`tests/client-review-fixes.mjs`（真浏览器：地址栏视图、软删除撤销、会话失效回登录、功能中心保活），`tests/server-shortvideo.mjs` 补取消用例。
+
 ## V0.8.2 - 2026-08-20
 
 - 增加统一的安全出站请求层：校验域名解析结果，拒绝本机、内网、云元数据等地址，限制重定向并防止跨域转发敏感请求头；参考图、工作流素材和 WebDAV 请求统一接入。

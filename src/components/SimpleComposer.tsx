@@ -428,10 +428,20 @@ export function SimpleComposer({
                 </div>
               ) : null}
               <div className="simple-stage-body simple-stage-image">
-                <button type="button" className="simple-stage-plate" onClick={() => setZoomOpen(true)} title="点开放大">
-                  <img src={selected.imageUrl} alt={selected.title} />
-                  {isPlaceholderImage(selected.imageUrl) ? <em className="placeholder-tag">演示占位图</em> : null}
-                </button>
+                {selected.storageStatus === "expired" ? (
+                  // 服务器只保留 3 天，文件清掉之后别再渲染一张裂图。
+                  <div className="simple-stage-plate simple-stage-plate-expired">
+                    <div className="expired-plate" role="img" aria-label={`${selected.title} 已过期`}>
+                      <strong>服务器副本已清理</strong>
+                      <span>{selected.archivePath ? `云盘备份：${selected.archivePath}` : "成片只在服务器保留 3 天，请及时存到本地或云盘"}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <button type="button" className="simple-stage-plate" onClick={() => setZoomOpen(true)} title="点开放大">
+                    <img src={selected.imageUrl} alt={selected.title} />
+                    {isPlaceholderImage(selected.imageUrl) ? <em className="placeholder-tag">演示占位图</em> : null}
+                  </button>
+                )}
                 {promptOpen && (submission || selected.prompt) ? (
                   <div className="stage-prompt" role="dialog" aria-label="这张成片的提交详情">
                     <header>
@@ -527,9 +537,11 @@ export function SimpleComposer({
                   >
                     提交详情
                   </button>
-                  <a className="text-button" href={selected.imageUrl} download={resultFileName(selected)}>
-                    下载
-                  </a>
+                  {selected.storageStatus !== "expired" ? (
+                    <a className="text-button" href={selected.imageUrl} download={resultFileName(selected)}>
+                      下载
+                    </a>
+                  ) : null}
                   <button type="button" className="text-button danger" onClick={() => onDeleteResult(selected.id)}>
                     删除
                   </button>
@@ -599,11 +611,15 @@ export function SimpleComposer({
               <figure className={`simple-result-card ${selected?.id === result.id ? "active" : ""}`} key={result.id}>
                 <button
                   type="button"
-                  className="simple-result-thumb"
+                  className={`simple-result-thumb ${result.storageStatus === "expired" ? "simple-result-thumb-expired" : ""}`}
                   aria-pressed={selected?.id === result.id}
                   onClick={() => handleSelectResult(result.id)}
                 >
-                  <img src={result.imageUrl} alt={result.title} loading="lazy" />
+                  {result.storageStatus === "expired" ? (
+                    <span className="result-thumb-expired" aria-label={`${result.title} 已清理`}>已清理</span>
+                  ) : (
+                    <img src={result.imageUrl} alt={result.title} loading="lazy" />
+                  )}
                   {isPlaceholderImage(result.imageUrl) ? <em className="placeholder-tag">演示占位图</em> : null}
                 </button>
                 <figcaption>
@@ -617,9 +633,11 @@ export function SimpleComposer({
                   <button type="button" className="text-button" onClick={() => onSendToCanvas(result)}>
                     放到画布
                   </button>
-                  <a className="text-button" href={result.imageUrl} download={resultFileName(result)}>
-                    下载
-                  </a>
+                  {result.storageStatus !== "expired" ? (
+                    <a className="text-button" href={result.imageUrl} download={resultFileName(result)}>
+                      下载
+                    </a>
+                  ) : null}
                   <button type="button" className="text-button danger" onClick={() => onDeleteResult(result.id)}>
                     删除
                   </button>

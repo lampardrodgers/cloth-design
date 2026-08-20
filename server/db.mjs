@@ -246,6 +246,10 @@ function createBusinessTables() {
     // 短视频模块默认只有 admin 能用；后台可以按账号单独打开（见 server/shortvideo.mjs）。
     sqlite.exec("ALTER TABLE user_profile ADD COLUMN shortvideo_enabled INTEGER NOT NULL DEFAULT 0 CHECK (shortvideo_enabled IN (0, 1))");
   }
+  if (!profileColumns.has("preferences_json")) {
+    // 跨设备同步的账号偏好（提示词库、色卡、设置、草稿）；以前只在浏览器 localStorage 里。
+    sqlite.exec("ALTER TABLE user_profile ADD COLUMN preferences_json TEXT");
+  }
 
   // 后台只认 owner（部署时建的 admin 账号）。早期用下拉框提成 admin 的账号一律降回普通用户。
   sqlite.prepare("UPDATE user_profile SET role = 'user', updated_at = ? WHERE role = 'admin'").run(nowIso());

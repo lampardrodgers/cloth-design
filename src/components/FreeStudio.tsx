@@ -5,6 +5,7 @@ import { resetCanvasStore } from "../lib/canvasStore";
 import { filesToAttachments, MAX_ATTACHMENTS } from "../lib/freeStudio";
 import { lazyWithReload } from "../lib/lazyChunk";
 import { clampResolution, resolutionShortLabels } from "../lib/resolution";
+import { useIdbState } from "../lib/idbStore";
 import { useStoredState } from "../lib/storedState";
 import type {
   AttachmentUsage,
@@ -83,7 +84,9 @@ export function FreeStudio({
   onOpenAccount,
 }: FreeStudioProps) {
   const [prompt, setPrompt] = useStoredState("clothdesign:free:prompt", "");
-  const [attachments, setAttachments] = useStoredState<FreeAttachment[]>("clothdesign:free:attachments", []);
+  // 附件是 data URL，几张 PNG 就能把 5MB 的 localStorage 撑爆（撑爆时会悄悄丢掉后加的那几张），
+  // 所以放 IndexedDB；写失败会明确提示，不再静默。
+  const [attachments, setAttachments, attachmentsStore] = useIdbState<FreeAttachment[]>("clothdesign:free:attachments", []);
   const [ratioId, setRatioId] = useStoredState("clothdesign:free:ratio", "1-1");
   const [resolution, setResolution] = useStoredState<ResolutionKey>("clothdesign:free:resolution", "native");
   const [quantity, setQuantity] = useStoredState("clothdesign:free:quantity", 1);
@@ -94,6 +97,15 @@ export function FreeStudio({
   }, [capability.maxResolution, setResolution]);
   const [pendingImages, setPendingImages] = useState<PendingCanvasImage[]>([]);
   const [notice, setNotice] = useState("");
+  // 画布一旦打开过就不再卸载，切到简易只是 display:none：
+  // 否则切布局时正在跑的 placeImage / 生成会对着已销毁的 editor 写，回来后画框永远「正在生成…」。
+  const [canvasOpened, setCanvasOpened] = useState(layout === "canvas");
+  useEffect(() => {
+    if (layout === "canvas") setCanvasOpened(true);
+  }, [layout]);
+  useEffect(() => {
+    if (attachmentsStore.error) setNotice(attachmentsStore.error);
+  }, [attachmentsStore.error]);
   /** 简易模式每次提交都留一个可见任务卡，直到对应成片真正回来。 */
   const [pendingJobs, setPendingJobs] = useState<SimplePendingJob[]>([]);
   const [completionQueue, setCompletionQueue] = useState<SimpleGenerationCompletion[]>([]);
@@ -158,6 +170,8 @@ export function FreeStudio({
       })
       .catch((error) => {
         setNotice(error instanceof Error ? error.message : "生成失败");
+        // 用户自己「放弃等待」的不算失败，别把描述放回去——服务器还在出图。
+        if ((error as { abandoned?: boolean })?.abandoned) return;
         setPrompt((current) => (current.trim() ? current : submitted.prompt));
         setAttachments((current) => (current.length ? current : submitted.attachments));
       })
@@ -268,8 +282,9 @@ export function FreeStudio({
             }
           />
         </div>
-      ) : (
-        <div className="free-body free-body-canvas">
+      ) : null}
+      {canvasOpened ? (
+        <div className="free-body free-body-canvas" hidden={layout !== "canvas"}>
           <ProviderBanner apiConfig={apiConfig} compact />
           <ErrorBoundary
             scope="canvas"
@@ -322,7 +337,7 @@ export function FreeStudio({
             </div>
           ) : null}
         </div>
-      )}
+      ) : null}
     </main>
   );
 }

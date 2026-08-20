@@ -1,8 +1,10 @@
 import type {
   CreditLedgerEntry,
+  CreditPolicy,
   GeneratedResult,
   GenerationMode,
   ImageProviderOption,
+  ModeKey,
   PaymentCapabilities,
   PaymentConfigStatus,
   PaymentOrder,
@@ -13,6 +15,7 @@ import type {
   ResolutionKey,
   StorageOverview,
   StudioSettings,
+  SystemPromptMap,
   UserAccount,
   WorkflowAsset,
   WorkflowDashboard,
@@ -135,6 +138,12 @@ export interface MeResponse {
   paymentCapabilities: PaymentCapabilities;
   paymentConfig: PaymentConfigStatus;
   imageProviders: ImageProviderOption[];
+  /** 后台改过、对所有账号生效的积分规则（服务端扣费用的同一份）。 */
+  creditPolicy?: CreditPolicy;
+  /** 后台改过的系统提示词模板（只含改过的模式；没改的用内置默认）。 */
+  systemPrompts?: Partial<SystemPromptMap>;
+  /** 这个账号跨设备同步的偏好（提示词库 / 设置 / 草稿），按 localStorage 的键存。 */
+  preferences?: Record<string, unknown>;
 }
 
 export interface AdminSummary {
@@ -214,10 +223,34 @@ function pageQuery(query: AdminListQuery = {}) {
   return text ? `?${text}` : "";
 }
 
+/** 会话失效（401）、账号被锁 / 待开通（403）时广播一次；App 监听后统一回登录页，不用每个动作各自弹「请求失败: 401」。 */
+export const UNAUTHORIZED_EVENT = "clothdesign:unauthorized";
+
+export interface UnauthorizedDetail {
+  status: number;
+  message: string;
+  pendingApproval?: boolean;
+}
+
+function sessionLost(response: Response, data: { error?: string; pendingApproval?: boolean }) {
+  if (response.status === 401) return true;
+  if (response.status !== 403) return false;
+  // 403 还有「需要管理员权限」这种正常拒绝，只有账号本身不可用才算会话失效。
+  return data.pendingApproval === true || /锁定/.test(String(data.error || ""));
+}
+
 async function parseJson<T>(response: Response): Promise<T> {
-  const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+  const data = (await response.json().catch(() => ({}))) as T & { error?: string; pendingApproval?: boolean };
   if (!response.ok || data.error) {
-    throw new Error(data.error || `请求失败: ${response.status}`);
+    const message = data.error || `请求失败: ${response.status}`;
+    if (sessionLost(response, data)) {
+      window.dispatchEvent(
+        new CustomEvent<UnauthorizedDetail>(UNAUTHORIZED_EVENT, {
+          detail: { status: response.status, message, pendingApproval: data.pendingApproval === true },
+        }),
+      );
+    }
+    throw new Error(message);
   }
   return data as T;
 }
@@ -383,6 +416,36 @@ export async function selectMyImageProvider(providerId: string) {
     body: JSON.stringify({ providerId }),
   });
   return parseJson<{ account: UserAccount }>(response);
+}
+
+/** 自己改密码：走 better-auth 自带的接口，改完其它设备上的登录态一并失效。 */
+export async function changeMyPassword(currentPassword: string, newPassword: string) {
+  const response = await fetch("/api/auth/change-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ currentPassword, newPassword, revokeOtherSessions: true }),
+  });
+  const data = (await response.json().catch(() => ({}))) as { message?: string; code?: string; error?: string };
+  if (!response.ok) {
+    const code = String(data.code || "");
+    if (code === "INVALID_PASSWORD") throw new Error("当前密码不对。");
+    if (code === "PASSWORD_TOO_SHORT") throw new Error("新密码至少 8 位。");
+    if (code === "PASSWORD_TOO_LONG") throw new Error("新密码太长了。");
+    throw new Error(data.message || data.error || `修改密码失败: ${response.status}`);
+  }
+  return data;
+}
+
+/** 账号偏好合并写入；值为 null 表示删掉这个键。 */
+export async function saveMyPreferences(patch: Record<string, unknown>) {
+  const response = await fetch("/api/me/preferences", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ preferences: patch }),
+  });
+  return parseJson<{ preferences: Record<string, unknown> }>(response);
 }
 
 export async function clearMyApiKey() {
@@ -580,6 +643,27 @@ export async function setAdminUserApiKey(id: string, apiKey: string, providerId?
   return parseJson<{ user: UserAccount }>(response);
 }
 
+export async function saveAdminCreditPolicy(creditPolicy: CreditPolicy) {
+  const response = await fetch("/api/admin/credit-policy", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ creditPolicy }),
+  });
+  return parseJson<{ creditPolicy: CreditPolicy }>(response);
+}
+
+/** 按模式覆盖系统提示词模板；值为 null 恢复内置默认。 */
+export async function saveAdminSystemPrompts(systemPrompts: Partial<Record<ModeKey, string | null>>) {
+  const response = await fetch("/api/admin/system-prompts", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ systemPrompts }),
+  });
+  return parseJson<{ systemPrompts: Partial<SystemPromptMap> }>(response);
+}
+
 export async function resetAdminUserPassword(id: string, password: string) {
   const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}/password`, {
     method: "POST",
@@ -642,6 +726,7 @@ export async function requestGeneration({
   userPrompt,
   apiSize,
   ratioLabel,
+  signal,
 }: {
   mode: GenerationMode;
   settings: StudioSettings;
@@ -651,6 +736,8 @@ export async function requestGeneration({
   userPrompt?: string;
   apiSize: string;
   ratioLabel: string;
+  /** 「放弃等待」用：中断这次请求（服务端照样出图，成片之后会同步进列表）。 */
+  signal?: AbortSignal;
 }): Promise<GenerateApiResponse> {
   const form = new FormData();
   const referencePayload = references.map(({ file, previewUrl, ...reference }) => ({
@@ -683,6 +770,7 @@ export async function requestGeneration({
     method: "POST",
     credentials: "include",
     body: form,
+    signal,
   });
   return parseJson<GenerateApiResponse>(response);
 }
@@ -754,6 +842,12 @@ export async function createShortVideoTask(input: ShortVideoRequest) {
     body: JSON.stringify(input),
   });
   return parseJson<{ task: ShortVideoTask }>(response);
+}
+
+/** 取消排队中 / 生成中的短视频任务；已结束的任务用 deleteShortVideoTask。 */
+export async function cancelShortVideoTask(id: string) {
+  const response = await fetch(`/api/shortvideo/tasks/${encodeURIComponent(id)}/cancel`, { method: "POST", credentials: "include" });
+  return parseJson<{ task: ShortVideoTask; activeCount: number }>(response);
 }
 
 export async function deleteShortVideoTask(id: string) {
