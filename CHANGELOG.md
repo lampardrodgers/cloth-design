@@ -1,6 +1,6 @@
 # Changelog
 
-## 未发布
+## V0.9.0 - 2026-08-20
 
 - 画布：「放到画布」不再把浮层卸载重挂。以前 `InFrontOfTheCanvas` 写在 `useMemo` 里、依赖 `pendingImages`，每加一张待放图就造一个新组件，tldraw 按组件身份整层重挂，`busyFrameIds` / `consumedRef` 归零——面板按钮重新可点而画框还写着「正在生成…」，能重复提交。现在浮层组件固定，`pendingImages` 走 context。
 - 画布：刷新 / 重挂之后遗留在 IndexedDB 里的「正在生成…」画框，onMount 时统一收口成失败并说明「刷新时断开了跟踪；如果这次出图成功，成片可以在成片库里找到」。简易 / 画布切换不再卸载画布（打开过就 `display:none` 保活），切布局时在跑的请求不会对着已销毁的 editor 写；看门狗量不到隐藏画布的尺寸时不再误判白屏。放进画布的受管成片先转成 data URL 存进 tldraw 资产，服务器 3 天清理后画布上不裂图。
