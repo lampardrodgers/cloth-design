@@ -635,6 +635,16 @@ export function registerBusinessRoutes(app) {
     });
   });
 
+  /**
+   * 对所有人生效的那两份规则单独一个轻接口：页面开着的时候管理员改了报价 / 模板，
+   * 客户端回到前台、或定时拉一次，就不会拿旧报价、旧模板出图。
+   */
+  app.get("/api/app-settings", async (req, res) => {
+    const account = await requireAccount(req, res);
+    if (!account) return;
+    res.json({ creditPolicy: creditPolicySettings(), systemPrompts: systemPromptOverrides() });
+  });
+
   /** 账号偏好合并写入：键为 null 表示删除。客户端防抖写，这里只认 clothdesign: 前缀的键。 */
   app.put("/api/me/preferences", async (req, res) => {
     const account = await requireAccount(req, res);

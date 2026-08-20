@@ -35,14 +35,33 @@ export const SYNCED_PREFERENCE_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 const PREFERENCE_SYNC_DELAY_MS = 1500;
+/** 推送失败的重试间隔：第 1 次 3 秒、第 2 次 10 秒、第 3 次 30 秒，再失败就放弃并上报。 */
+const PREFERENCE_RETRY_DELAYS_MS = [3000, 10000, 30000];
 const pendingPreferencePatch = new Map<string, unknown>();
 let preferenceSyncTimer: number | null = null;
 let preferenceSyncAccount: string | null = null;
+let preferenceSyncInFlight: Promise<void> | null = null;
+let preferenceSyncFailures = 0;
 
-async function flushPreferenceSync() {
+function schedulePreferenceSync(delay: number) {
+  if (preferenceSyncTimer !== null) window.clearTimeout(preferenceSyncTimer);
+  preferenceSyncTimer = window.setTimeout(() => void flushPreferenceSync(), delay);
+}
+
+/**
+ * 把攒着的偏好推到服务端。
+ * 以前是「清空队列 → 发请求」，请求一失败这批改动就没了；现在失败会把没被新改动覆盖的键放回队列按退避重试，
+ * 退出登录前也会先 await 一次，不再出现「改完设置 1 秒内点退出 = 这次修改彻底丢了」。
+ */
+export async function flushPreferenceSync(options: { keepalive?: boolean } = {}): Promise<void> {
   if (preferenceSyncTimer !== null) {
     window.clearTimeout(preferenceSyncTimer);
     preferenceSyncTimer = null;
+  }
+  if (preferenceSyncInFlight) {
+    // 上一批还在路上：等它落地再推剩下的，别让两批乱序互相覆盖。
+    await preferenceSyncInFlight;
+    if (!pendingPreferencePatch.size) return;
   }
   if (!pendingPreferencePatch.size || !preferenceSyncAccount) return;
   // 推送途中账号换了就别把 A 的偏好写到 B 头上。
@@ -50,17 +69,38 @@ async function flushPreferenceSync() {
     pendingPreferencePatch.clear();
     return;
   }
+  const account = preferenceSyncAccount;
   const patch = Object.fromEntries(pendingPreferencePatch);
   pendingPreferencePatch.clear();
-  try {
-    await saveMyPreferences(patch);
-  } catch (error) {
-    reportClientError({
-      scope: "preferences",
-      message: `偏好同步失败：${error instanceof Error ? error.message : String(error)}`,
-      detail: { keys: Object.keys(patch) },
-    });
-  }
+  preferenceSyncInFlight = (async () => {
+    try {
+      await saveMyPreferences(patch, options);
+      preferenceSyncFailures = 0;
+    } catch (error) {
+      if (account !== activeStorageAccount()) return; // 已经退出 / 掉线：这批作废
+      // 失败的键放回队列（期间用户又改过的键以新值为准），按退避重试。
+      for (const [key, value] of Object.entries(patch)) {
+        if (!pendingPreferencePatch.has(key)) pendingPreferencePatch.set(key, value);
+      }
+      preferenceSyncAccount = account;
+      preferenceSyncFailures += 1;
+      const delay = PREFERENCE_RETRY_DELAYS_MS[preferenceSyncFailures - 1];
+      if (delay !== undefined) {
+        schedulePreferenceSync(delay);
+        return;
+      }
+      preferenceSyncFailures = 0;
+      pendingPreferencePatch.clear();
+      reportClientError({
+        scope: "preferences",
+        message: `偏好同步失败（已重试 ${PREFERENCE_RETRY_DELAYS_MS.length} 次）：${error instanceof Error ? error.message : String(error)}`,
+        detail: { keys: Object.keys(patch) },
+      });
+    } finally {
+      preferenceSyncInFlight = null;
+    }
+  })();
+  await preferenceSyncInFlight;
 }
 
 /** 偏好有改动：攒一会儿再一起推，连续打字不会一键一请求。 */
@@ -69,13 +109,17 @@ export function queuePreferenceSync(key: string, value: unknown) {
   if (!accountId || !SYNCED_PREFERENCE_KEYS.has(key)) return;
   preferenceSyncAccount = accountId;
   pendingPreferencePatch.set(key, value);
-  if (preferenceSyncTimer !== null) window.clearTimeout(preferenceSyncTimer);
-  preferenceSyncTimer = window.setTimeout(() => void flushPreferenceSync(), PREFERENCE_SYNC_DELAY_MS);
+  schedulePreferenceSync(PREFERENCE_SYNC_DELAY_MS);
 }
 
-// 关页前把还没推出去的那一批推掉，不然刚改的设置只留在这台机器上。
+/** 还有没推出去的偏好吗（测试 / 退出前的判断用）。 */
+export function hasPendingPreferenceSync() {
+  return pendingPreferencePatch.size > 0 || preferenceSyncInFlight !== null;
+}
+
+// 关页前把还没推出去的那一批推掉（keepalive：页面卸载后请求也能发完），不然刚改的设置只留在这台机器上。
 if (typeof window !== "undefined") {
-  window.addEventListener("pagehide", () => void flushPreferenceSync());
+  window.addEventListener("pagehide", () => void flushPreferenceSync({ keepalive: true }));
 }
 
 /**
@@ -103,8 +147,7 @@ export function seedAccountPreferences(accountId: string, preferences: Record<st
   }
   if (pendingPreferencePatch.size) {
     preferenceSyncAccount = accountId;
-    if (preferenceSyncTimer !== null) window.clearTimeout(preferenceSyncTimer);
-    preferenceSyncTimer = window.setTimeout(() => void flushPreferenceSync(), PREFERENCE_SYNC_DELAY_MS);
+    schedulePreferenceSync(PREFERENCE_SYNC_DELAY_MS);
   }
 }
 
@@ -118,7 +161,9 @@ export function setStoredStateAccount(accountId: string | null) {
   }
   if (!accountId) {
     // 退出 / 掉线：没推出去的偏好作废，别等下个账号登录时推错人。
+    // （主动退出的那条路在调这里之前会先 await flushPreferenceSync()，所以这里清掉的只是掉线时推不出去的。）
     pendingPreferencePatch.clear();
+    preferenceSyncFailures = 0;
     if (preferenceSyncTimer !== null) {
       window.clearTimeout(preferenceSyncTimer);
       preferenceSyncTimer = null;

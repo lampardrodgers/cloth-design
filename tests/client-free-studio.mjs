@@ -39,6 +39,12 @@ assert(!mixedPrompt.includes("系统限制"), mixedPrompt);
 assert(!mixedPrompt.includes("服装图片"), mixedPrompt);
 
 const barePrompt = freeStudio.buildFreePrompt("一只在窗台上打盹的猫", [], settings);
+// 后台给「自由生成」配了模式提示词就要带上；默认为空串时和原来一个字都不差。
+assert.equal(freeStudio.buildFreePrompt("一只猫", [], settings, ""), freeStudio.buildFreePrompt("一只猫", [], settings));
+assert(freeStudio.buildFreePrompt("一只猫", [], settings, "只画动物").includes("模式提示: 只画动物"));
+assert(freeStudio.buildSketchPrompt("", settings, "只画动物").includes("模式提示: 只画动物"));
+assert(freeStudio.buildAnnotationEditPrompt("", settings, "只画动物").includes("模式提示: 只画动物"));
+assert(!freeStudio.buildAnnotationEditPrompt("", settings, "   ").includes("模式提示"));
 assert(!barePrompt.includes("上传图片顺序"), barePrompt);
 assert(!barePrompt.includes("入画图片要求"), barePrompt);
 assert(!barePrompt.includes("参考图片要求"), barePrompt);

@@ -210,6 +210,8 @@ const engineTasks = new Map(); // id → { body, ticks, mode }
 const engineLog = [];
 const fakeMp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(6000, 7)]);
 let releaseSlow = false;
+// HOLD 模式：引擎先报 running，第二次查询起把响应扣住，等测试放行后才一口气回「完成」——用来复现「轮询中途被取消」的竞争。
+let holdEngine = null;
 
 function engineJson(res, status, data, message = "success") {
   res.statusCode = status;
@@ -248,7 +250,7 @@ const fakeEngine = http.createServer(async (req, res) => {
     const body = JSON.parse((await readBody(req)).toString("utf8"));
     const id = `mpt-${engineTasks.size + 1}`;
     const subject = String(body.video_subject || "");
-    const mode = subject.includes("FAIL") ? "fail" : subject.includes("SLOW") ? "slow" : subject.includes("LOST") ? "lost" : "ok";
+    const mode = subject.includes("FAIL") ? "fail" : subject.includes("SLOW") ? "slow" : subject.includes("LOST") ? "lost" : subject.includes("HOLD") ? "hold" : "ok";
     engineTasks.set(id, { body, ticks: 0, mode });
     engineJson(res, 200, { task_id: id });
     return;
@@ -268,6 +270,15 @@ const fakeEngine = http.createServer(async (req, res) => {
     if (task.mode === "slow" && !releaseSlow) {
       engineJson(res, 200, { task_id: taskMatch[1], state: 4, progress: 45 });
       return;
+    }
+    if (task.mode === "hold") {
+      if (task.ticks < 2 || !holdEngine) {
+        engineJson(res, 200, { task_id: taskMatch[1], state: 4, progress: 45 });
+        return;
+      }
+      holdEngine.onHeld();
+      await holdEngine.released;
+      // 放行后直接报完成：如果服务端没守住，cancelled 会被改成 completed、成片还会被拉回本站。
     }
     if (task.ticks < 3) {
       engineJson(res, 200, { task_id: taskMatch[1], state: 4, progress: task.ticks === 1 ? 5 : 30 });
@@ -612,6 +623,31 @@ try {
   response = await request(baseUrl, admin, `/api/shortvideo/tasks/${cancelMe.id}`, { method: "DELETE" });
   await assertOk(response, 200);
   releaseSlow = true;
+
+  /* ── 取消 vs 轮询竞争：轮询已经读到 running 行、正等引擎回包，这时取消；回包（哪怕是「完成」）不能把 cancelled 改回去 ── */
+  let onHeld;
+  let releaseEngine;
+  const heldPromise = new Promise((resolve) => (onHeld = resolve));
+  const releasedPromise = new Promise((resolve) => (releaseEngine = resolve));
+  holdEngine = { onHeld, released: releasedPromise };
+  response = await request(baseUrl, admin, "/api/shortvideo/tasks", { method: "POST", ...jsonBody({ subject: "HOLD 竞争", script: "现成文案", terms: ["a"] }) });
+  await assertOk(response, 202);
+  const racing = (await response.json()).task;
+  await heldPromise; // 引擎已经把这次轮询扣住了：服务端手里是一份 running 的旧行
+  response = await request(baseUrl, admin, `/api/shortvideo/tasks/${racing.id}/cancel`, { method: "POST" });
+  await assertOk(response, 200);
+  assert.equal((await response.json()).task.status, "cancelled");
+  releaseEngine(); // 引擎这时才回「完成 + 成片」
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  response = await request(baseUrl, admin, `/api/shortvideo/tasks/${racing.id}`);
+  await assertOk(response);
+  const afterRace = (await response.json()).task;
+  assert.equal(afterRace.status, "cancelled", "迟到的引擎回包不能把已取消的任务改回 running / completed");
+  assert.deepEqual(afterRace.result?.videos ?? [], [], "取消后不该再把成片登记进来");
+  await assert.rejects(fs.access(path.join(assetDir, racing.id)), "取消后不该把成片拉回本站目录");
+  response = await request(baseUrl, admin, "/api/shortvideo/overview");
+  assert.equal((await response.json()).activeCount, 0, "已取消的任务不再占并发");
+  holdEngine = null;
 
   /* ── 引擎失败：阶段和原因原样带回来 ────────────────────────────────────── */
   response = await request(baseUrl, admin, "/api/shortvideo/tasks", { method: "POST", ...jsonBody({ subject: "FAIL 配音会挂", script: "文案", source: "local", materials: ["clip-1.mp4"] }) });

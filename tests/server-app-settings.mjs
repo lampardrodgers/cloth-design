@@ -80,12 +80,18 @@ const apiSource = await fs.readFile("server/api.mjs", "utf8");
 assert(apiSource.includes('app.put("/api/admin/credit-policy"'), "后台改积分规则的接口");
 assert(apiSource.includes('app.put("/api/admin/system-prompts"'), "后台改提示词模板的接口");
 assert(apiSource.includes('app.put("/api/me/preferences"'), "账号偏好写入接口");
+assert(apiSource.includes('app.get("/api/app-settings"'), "开着的页面要能轻量地重新拉规则 / 模板，不用重新登录才生效");
 assert(apiSource.includes("creditPolicy: creditPolicySettings(),") && apiSource.includes("preferences: readUserPreferences(account.user.id),"), "/api/me 要下发规则和偏好");
 
 const app = await fs.readFile("src/App.tsx", "utf8");
 assert(!app.includes('useStoredState<CreditPolicy>("clothdesign:creditPolicy"'), "积分规则不再存管理员本机");
 assert(!app.includes('useStoredState<SystemPromptMap>("clothdesign:systemPrompts"'), "提示词模板不再存管理员本机");
 assert(app.includes("if (data.creditPolicy) setCreditPolicy(data.creditPolicy);"), "登录时接服务端下发的积分规则");
+assert(app.includes("const data = await fetchAppSettings();") && app.includes('document.addEventListener("visibilitychange", onVisible);'), "回到前台 / 定时要重新拉规则和模板，已打开的页面不能一直用旧报价");
+assert(app.includes("systemTemplate: systemPrompts[requestedMode.id] ?? requestedMode.systemTemplate"), "创作台出图要套后台配的系统提示词，不是静态目录那份");
+assert(app.includes("const freeModeHint = systemPrompts.free ?? mode.systemTemplate;"), "自由创作也要带上后台给 free 配的模式提示");
+const freeStudioLib = await fs.readFile("src/lib/freeStudio.ts", "utf8");
+assert(freeStudioLib.includes("function modeHintSection(modeHint?: string)"), "自由创作三种提示词都能插入后台模式提示");
 assert(app.includes("seedAccountPreferences(data.account.id, data.preferences);"), "登录时先把服务端偏好落到本地命名空间");
 assert(app.indexOf("seedAccountPreferences(data.account.id, data.preferences);") < app.indexOf("setStoredStateAccount(data.account.id);"), "偏好要在切命名空间之前落地，否则 hook 读到的还是旧的");
 

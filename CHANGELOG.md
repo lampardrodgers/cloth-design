@@ -13,6 +13,15 @@
 - 账户页新增「修改密码」（走 better-auth `change-password`，改完其它设备的登录态一并失效）。后台改密 / 配 Key 不再用明文的 `window.prompt`，改成行内 `type=password` 小表单；建号表单的初始密码也改成密码框（可点「显示」）。
 - 提示词库、色卡、设置、模式草稿、自由创作参数、侧栏折叠、短视频表单等偏好跨设备同步：`user_profile.preferences_json` + `PUT /api/me/preferences`，登录时服务端那份先落到本地命名空间再渲染，本机改动防抖 1.5 秒推回；本机有、服务端没有的键首次登录时反向补推。任务 / 成片 / 附件不同步。
 - 新增 `tests/server-app-settings.mjs`、`tests/client-review-fixes.mjs`（真浏览器：地址栏视图、软删除撤销、会话失效回登录、功能中心保活），`tests/server-shortvideo.mjs` 补取消用例。
+- 第二轮 review 补漏（上面几条「部分修复」的收尾）：
+  - 后台系统提示词真的进出图链路：创作台出图以前拿的是静态目录里的模式对象，后台改的模板到不了 `buildOptimizedPrompt`；现在 `handleGenerate` 把服务端模板套到模式上，自由创作 / 按标注改图 / 按草图生成也带上后台给 free 配的「模式提示」（默认为空，不配则一个字不变）。积分规则 / 模板不再只在登录时拉一次：新增 `GET /api/app-settings`，页面回到前台（切标签 / 聚焦）最多 30 秒拉一次、后台常驻每 5 分钟拉一次，管理员改完报价对开着的页面也生效。
+  - 短视频取消不再被轮询改回去：轮询是「读行 → 等引擎 → 写回」，等引擎那几秒里用户取消了，旧行会把 cancelled 覆盖成 running / completed / failed；现在 `updateTask(..., { onlyActive })` 只改还在 queued / running 的行，标失败 / 进度 / 完成都走它，成片拉到一半发现已取消就把刚落盘的文件删掉。
+  - 关页 / 刷新时的软删除本地也同步：以前只 keepalive 发 DELETE，localStorage 里的成片列表没改，刷新回来 `mergeResults` 又把它捞出来；现在 pagehide 直接改 localStorage（成片 + 没剩成片的任务），并给刚删的 id 留 10 分钟「墓碑」——新页面的 `/api/me` 可能比那条 DELETE 先到服务端，合并时按墓碑过滤；进返回缓存再回来的页面撤销条和列表也一起收掉。退出登录前撤销期内的删除立刻提交。
+  - 会话失效覆盖到自己解析响应的接口：改密（`/api/auth/change-password`）和建工作流任务遇到 401 / 锁定也广播统一事件回登录页。
+  - 偏好同步不再静默丢：推送失败的键放回队列按 3s / 10s / 30s 退避重试（期间用户又改过的键以新值为准），同一时间只有一批在路上；关页前那次推送 keepalive；退出登录前先 `await` 把没推的推掉，不再出现「改完设置 1 秒内点退出 = 这次修改丢了」。
+  - 过期成片在简易模式里「加入参考 / 放到画布」禁用并说明原因；放到画布时文件已清理（404）直接报错而不是放一张注定裂掉的图，网络抖动先重试一次；打开画布时把升级前放进去的服务器地址资产后台补转成 data URL（`migrateManagedAssets`），待放图里有一张放不进去不再卡住整批。
+  - 「全部推到云盘」和「全部存到本地」一样改成客户端逐张推：N/M 进度条 + 「停止」，WebDAV 没配 / 认证失败这类整批都会挂的错只报一次就停；推完刷新文件管理的总览数字。
+  - 测试：`tests/server-shortvideo.mjs` 加「取消 vs 轮询竞争」用例（引擎扣住回包、中途取消、回包说完成也不能把 cancelled 改回去、成片目录不落盘）；`tests/client-review-fixes.mjs` 真浏览器补：后台模板出现在自由创作和创作台的 `/api/generate` 请求体里、撤销期内刷新页面成片不复活（本地 + 服务器）、偏好 PUT 失败后带着同样的键重试、`/api/app-settings` 登录态可拉；`tests/client-free-studio.mjs` 补模式提示插入。
 
 ## V0.8.2 - 2026-08-20
 

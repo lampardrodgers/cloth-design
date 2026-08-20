@@ -45,6 +45,9 @@ interface StoragePanelProps {
   /** 「全部存到本地」跑的时候的 N/M 进度；不在跑为 null。 */
   saveAllProgress?: BatchProgress | null;
   onCancelSaveAll?: () => void;
+  /** 「全部推到云盘」同样逐张推，也给 N/M 进度和停止。 */
+  archiveAllProgress?: BatchProgress | null;
+  onCancelArchiveAll?: () => void;
 }
 
 const RETENTION_FALLBACK_DAYS = 3;
@@ -95,6 +98,8 @@ export function StoragePanel({
   onSaveAllToFolder,
   saveAllProgress = null,
   onCancelSaveAll,
+  archiveAllProgress = null,
+  onCancelArchiveAll,
 }: StoragePanelProps) {
   const retentionDays = overview?.retentionDays ?? RETENTION_FALLBACK_DAYS;
   const settings = overview?.settings;
@@ -164,6 +169,27 @@ export function StoragePanel({
     setWebdavBusy("");
     setWebdavNotice(error ? { tone: "error", text: error } : { tone: "ok", text: "已把服务器上还没推过的成片全部推到云盘。" });
   };
+
+  const batchProgressBar = (progress: BatchProgress, label: string, onCancel?: () => void) => (
+    <div className="storage-batch-row">
+      <div
+        className="storage-batch-progress"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={progress.total || 1}
+        aria-valuenow={progress.done}
+        aria-label={label}
+      >
+        <div className="progress-track"><span style={{ width: `${progress.total ? Math.round((progress.done / progress.total) * 100) : 0}%` }} /></div>
+        <small>{progress.label}</small>
+      </div>
+      {onCancel ? (
+        <button type="button" className="btn btn-secondary" onClick={onCancel}>
+          停止
+        </button>
+      ) : null}
+    </div>
+  );
 
   const runRow = async (id: string, action: string, task: () => Promise<string | void>) => {
     setRowBusy((current) => ({ ...current, [id]: action }));
@@ -402,6 +428,7 @@ export function StoragePanel({
               {webdavBusy === "archive-all" ? "推送中…" : `把未推的 ${pendingArchiveCount} 张全部推到云盘`}
             </button>
           </div>
+          {archiveAllProgress ? batchProgressBar(archiveAllProgress, "全部推到云盘的进度", onCancelArchiveAll) : null}
           {webdavNotice ? <p className={`storage-notice storage-notice-${webdavNotice.tone}`}>{webdavNotice.text}</p> : null}
           {settings?.lastError && !webdavNotice ? (
             <p className="storage-notice storage-notice-error">

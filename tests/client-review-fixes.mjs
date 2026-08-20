@@ -3,6 +3,9 @@
 // 2) 简易 / 画布切换不卸载画布；简易模式附件走 IndexedDB；
 // 3) 会话失效统一回登录页；视图进地址栏；删除成片有 5 秒撤销；功能中心保活；
 // 4) 后台不再用 window.prompt；短视频删除要确认、跑着的能取消；批量存本地有进度和停止。
+// 5) 第二轮补漏：后台模板真的进出图链路、规则定时刷新；刷新页面时软删除本地也要同步；
+//    改密 / 建工作流任务也走统一的会话失效；偏好同步失败会重试、退出前先推；过期成片不能再加入参考 / 放到画布；
+//    画布里老的服务器地址资产补转；「全部推云盘」也有 N/M 进度和停止。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -62,6 +65,24 @@ assert(taskRail.includes("放弃等待") && taskRail.includes("onAbandon"), "任
 
 const styles = await fs.readFile("src/styles.css", "utf8");
 assert(styles.includes(".free-body-canvas[hidden]") && styles.includes(".view-keepalive[hidden]"), "保活容器的 hidden 要能压过自己的 display");
+
+/* ── 第二轮补漏的静态检查 ─────────────────────────────────────────────────── */
+assert((api.match(/notifyIfSessionLost\(response, data/g) || []).length >= 3, "parseJson、改密、建工作流任务三处都要通知会话失效");
+assert(api.includes("keepalive: options.keepalive === true"), "关页前的偏好推送要 keepalive");
+assert(api.includes("export async function fetchAppSettings()"), "要有轻量的规则 / 模板刷新接口");
+const storedState = await fs.readFile("src/lib/storedState.ts", "utf8");
+assert(storedState.includes("export async function flushPreferenceSync(") && storedState.includes("PREFERENCE_RETRY_DELAYS_MS"), "偏好同步失败要放回队列按退避重试");
+assert(storedState.includes("if (!pendingPreferencePatch.has(key)) pendingPreferencePatch.set(key, value);"), "重试时期间用户又改过的键以新值为准");
+assert(app.includes("await Promise.all([flushPreferenceSync().catch(() => undefined), commitPendingDeletesNow()]);"), "退出前先把没推的偏好推掉、撤销期内的删除提交掉");
+assert(app.includes("const flushPendingDeletes = () => {") && app.includes('storedStateKeyForAccount("clothdesign:results", accountId)'), "关页 / 刷新时软删除要同步改 localStorage，不能只发请求");
+assert(app.includes("const tombstones = recentlyDeletedResultIds(data.account.id);") && app.includes("rememberDeletedResults(accountId, ids);"), "keepalive 的 DELETE 可能比新页面的 /api/me 晚到：刚删的 id 要有墓碑，合并时过滤掉");
+assert(app.includes("archiveAllProgress={archiveAllProgress}") && app.includes("onCancelArchiveAll={handleCancelArchiveAll}"), "全部推云盘也有进度和停止");
+assert(app.includes("const { result } = await archiveGenerationResult(item.id);") && !app.includes("archiveAllGenerationResults("), "全部推云盘改成客户端逐张推，才有得进度可报、有得停");
+assert(simple.includes("EXPIRED_ACTION_HINT") && (simple.match(/disabled=\{(selected|result)\.storageStatus === "expired"\}/g) || []).length >= 4, "过期成片的加入参考 / 放到画布要禁用");
+assert(canvas.includes("async function migrateManagedAssets(editor: Editor)") && canvas.includes("void migrateManagedAssets(editor)"), "打开画布时把老的服务器地址资产补转成 data URL");
+assert(canvas.includes("这张成片已在服务器上清理，没法再放到画布。"), "文件已清理就报错，不往画布放注定裂掉的图");
+const shortVideoServer = await fs.readFile("server/shortvideo.mjs", "utf8");
+assert(shortVideoServer.includes("AND status IN ('queued', 'running')\" : \"\"") && (shortVideoServer.match(/\{ onlyActive: true \}/g) || []).length >= 4, "轮询写回只认还在跑的行，取消不会被引擎回包改回去");
 
 /* ── 真浏览器：地址栏视图 / 软删除撤销 / 会话失效 / 功能中心保活 ─────────── */
 function waitForOutput(child, pattern) {
@@ -199,10 +220,99 @@ try {
   await page.locator("#auth-email").fill("review-fixes@example.test");
   await page.locator("input[autocomplete='current-password']").fill("clothdesign123");
   await page.locator(".auth-shell button[type='submit'], form button[type='submit']").first().click();
-  await page.getByText("ImageDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
+  // 「ImageDesign AI」登录页上也有，得等真正登录后的导航栏出现才算回来了
+  await page.locator(".rail-nav").waitFor({ state: "visible", timeout: 15000 });
   assert.equal(new URL(page.url()).pathname, "/storage", "重新登录后停在掉线前的地址");
 
-  console.log(JSON.stringify({ checks: "passed", deleteCalls }, null, 2));
+  /* 规则 / 模板刷新接口：登录态下能拉到 */
+  // 在页面里发请求（带着页面的登录 cookie）
+  const fetchJson = (url) => page.evaluate(async (target) => {
+    const response = await fetch(target, { credentials: "include" });
+    return { status: response.status, json: await response.json().catch(() => null) };
+  }, url);
+  const settingsResponse = await fetchJson("/api/app-settings");
+  assert.equal(settingsResponse.status, 200);
+  assert.equal(typeof settingsResponse.json.creditPolicy.perReference, "number");
+
+  /* 后台模板要真的进出图链路：把 /api/me 和 /api/app-settings 下发的模板改掉，出图请求里得带着它 */
+  const FREE_HINT = "测试模板标记-FREE-7f3a";
+  const TEXT_HINT = "测试模板标记-TEXT-9c1d";
+  const injectPrompts = async (route) => {
+    const response = await route.fetch();
+    const json = await response.json();
+    await route.fulfill({ response, json: { ...json, systemPrompts: { ...(json.systemPrompts || {}), free: FREE_HINT, text: TEXT_HINT } } });
+  };
+  await page.route("**/api/me", injectPrompts);
+  await page.route("**/api/app-settings", injectPrompts);
+  const generateBodies = [];
+  await page.route("**/api/generate", async (route) => {
+    generateBodies.push(route.request().postData() || "");
+    await route.continue();
+  });
+  await page.reload({ waitUntil: "networkidle" });
+  await page.getByText("ImageDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.locator(".rail-nav button[aria-label='自由创作']").click();
+  await page.getByRole("button", { name: "简易", exact: true }).click();
+  const promptBox2 = page.locator(".simple-card textarea").first();
+  await promptBox2.waitFor({ state: "visible", timeout: 10000 });
+  await promptBox2.fill("一件藏青色西装");
+  await page.locator(".simple-submit button.btn-primary").click();
+  await page.locator(".simple-result-card:not(.simple-result-card-pending) img").first().waitFor({ state: "visible", timeout: 20000 });
+  assert.equal(generateBodies.length, 1, "自由创作发了一次出图请求");
+  assert(generateBodies[0].includes(`模式提示: ${FREE_HINT}`), "自由创作的出图提示词要带后台给 free 配的模式提示");
+  // 创作台（StudioWorkspace 拿的是静态目录里的模式，以前后台模板到不了这里）
+  await page.goto(`${baseUrl}/studio`, { waitUntil: "networkidle" });
+  await page.locator(".studio-workspace").waitFor({ state: "visible", timeout: 15000 });
+  const studioPrompt = page.locator(".studio-workspace textarea[aria-label='画面描述']").first();
+  await studioPrompt.fill("米色针织开衫，白底商业图");
+  const studioGenerate = page.waitForResponse((response) => response.url().includes("/api/generate"), { timeout: 20000 });
+  await page.locator(".studio-workspace button.prompt-generate").click();
+  await studioGenerate;
+  assert.equal(generateBodies.length, 2, "创作台发了一次出图请求");
+  assert(generateBodies[1].includes(`模式提示: ${TEXT_HINT}`), "创作台出图提示词要用后台配的模板，不是静态目录里那份");
+  assert(!generateBodies[1].includes("只输出图片生成提示词。聚焦服装主体"), "静态默认模板不该再出现在请求里");
+  await page.unroute("**/api/me", injectPrompts);
+  await page.unroute("**/api/app-settings", injectPrompts);
+
+  /* 刷新页面时软删除要一起落到本地：不然 keepalive 把服务器记录删了，本地旧记录又把它捞回来 */
+  await page.locator(".rail-nav button[aria-label='自由创作']").click();
+  await page.getByRole("button", { name: "简易", exact: true }).click();
+  await page.locator(".simple-result-card:not(.simple-result-card-pending)").first().waitFor({ state: "visible", timeout: 10000 });
+  const beforeReloadCount = await page.locator(".simple-result-card:not(.simple-result-card-pending)").count();
+  assert(beforeReloadCount >= 1, "这时应该至少有一张成片");
+  const meBefore = (await fetchJson("/api/me")).json;
+  await page.locator(".simple-result-card .simple-result-actions button", { hasText: "删除" }).first().click();
+  await page.locator(".undo-notice").waitFor({ state: "visible" });
+  await page.reload({ waitUntil: "networkidle" }); // 还在 5 秒撤销期内就刷新
+  await page.getByText("ImageDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByRole("button", { name: "简易", exact: true }).click();
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator(".undo-notice").count(), 0, "刷新回来不该还挂着撤销条");
+  const meAfter = (await fetchJson("/api/me")).json;
+  const afterReloadCount = await page.locator(".simple-result-card:not(.simple-result-card-pending)").count();
+  assert.equal(meAfter.generationResults.length, meBefore.generationResults.length - 1, "服务器上也真的删掉了");
+  assert.equal(afterReloadCount, beforeReloadCount - 1, "刷新回来已删除的成片不能复活（本地 + 服务器都要删掉）");
+
+  /* 偏好同步失败要重试：第一次 PUT 给 500，随后应该带着同样的键再推一次 */
+  const preferencePuts = [];
+  await page.route("**/api/me/preferences", async (route) => {
+    const body = route.request().postDataJSON();
+    preferencePuts.push(body);
+    if (preferencePuts.length === 1) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "模拟服务端抖动" }) });
+      return;
+    }
+    await route.continue();
+  });
+  await page.locator(".rail button[aria-label='收起侧边栏']").click(); // clothdesign:railCollapsed 是同步键
+  await page.waitForFunction(() => document.querySelector(".rail.collapsed") !== null);
+  const deadline = Date.now() + 9000;
+  while (preferencePuts.length < 2 && Date.now() < deadline) await page.waitForTimeout(200);
+  assert(preferencePuts.length >= 2, `第一次失败后应该重试（实际 PUT ${preferencePuts.length} 次）`);
+  assert("clothdesign:railCollapsed" in (preferencePuts[1].preferences || {}), "重试那次要带上没推成功的键");
+  assert.equal(preferencePuts[1].preferences["clothdesign:railCollapsed"], true);
+
+  console.log(JSON.stringify({ checks: "passed", deleteCalls, generateRequests: generateBodies.length, preferencePuts: preferencePuts.length }, null, 2));
 } finally {
   await browser?.close();
   appProcess.kill("SIGTERM");

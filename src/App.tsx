@@ -9,7 +9,6 @@ import {
 } from "./data/catalog";
 import {
   adjustAdminCredits,
-  archiveAllGenerationResults,
   archiveGenerationResult,
   clearImageProviderApiKey,
   clearMyApiKey,
@@ -25,6 +24,7 @@ import {
   deleteGenerationResult,
   fetchAdminOverview,
   fetchApiConfig,
+  fetchAppSettings,
   fetchMe,
   fetchPaymentOrder,
   fetchStorage,
@@ -61,7 +61,19 @@ import {
   buildSubmissionRecord,
   MAX_SUBMISSION_RECORDS,
 } from "./lib/freeStudio";
-import { clearStoredStateAccount, seedAccountPreferences, setStoredStateAccount, useCappedStoredState, useStoredState } from "./lib/storedState";
+import {
+  activeStorageAccount,
+  clearStoredStateAccount,
+  flushPreferenceSync,
+  readStoredState,
+  seedAccountPreferences,
+  setStoredStateAccount,
+  useCappedStoredState,
+  useStoredState,
+  writeStoredState,
+} from "./lib/storedState";
+import { storedStateKeyForAccount } from "./lib/storageNamespace";
+import { recentlyDeletedResultIds, rememberDeletedResults } from "./lib/deletedResults";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -471,7 +483,9 @@ function App() {
       setLedger(data.ledger);
       setPaymentCapabilities(data.paymentCapabilities);
       setImageProviders(data.imageProviders || []);
-      setResults((items) => mergeResults(items, data.generationResults));
+      // 刚在关页 / 刷新前删掉的成片：服务端可能还没来得及处理那条 keepalive 的 DELETE，别让它借 /api/me 复活。
+      const tombstones = recentlyDeletedResultIds(data.account.id);
+      setResults((items) => mergeResults(items, data.generationResults).filter((item) => !tombstones.has(item.id)));
       if ("paymentConfig" in data) setPaymentConfig(data.paymentConfig as PaymentConfigStatus);
       return data.account;
     } catch (error) {
@@ -509,6 +523,41 @@ function App() {
     window.addEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized);
   }, []);
+
+  // 积分规则 / 提示词模板以前只在登录时拉一次：管理员改了之后，开着的页面还按旧报价显示、按旧模板出图，
+  // 而服务端已经按新规则扣费。现在回到前台（切标签页 / 窗口聚焦）最多 30 秒拉一次，后台常驻也每 5 分钟拉一次。
+  const appSettingsFetchedAtRef = useRef(0);
+  const currentUserId = currentUser?.id ?? null;
+  useEffect(() => {
+    if (!currentUserId) return;
+    let disposed = false;
+    const refresh = async (force = false) => {
+      if (!force && Date.now() - appSettingsFetchedAtRef.current < 30000) return;
+      appSettingsFetchedAtRef.current = Date.now();
+      try {
+        const data = await fetchAppSettings();
+        if (disposed) return;
+        if (data.creditPolicy) setCreditPolicy(data.creditPolicy);
+        setSystemPrompts({ ...initialSystemPrompts, ...(data.systemPrompts ?? {}) });
+      } catch {
+        // 拉不到就沿用手头这份；下次回前台再试。
+      }
+    };
+    appSettingsFetchedAtRef.current = Date.now(); // 刚登录那次 /api/me 已经带了
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    const onFocus = () => void refresh();
+    const timer = window.setInterval(() => void refresh(true), 5 * 60 * 1000);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [currentUserId]);
 
   useEffect(() => {
     if (!activeOrder || activeOrder.status !== "pending") return;
@@ -611,9 +660,11 @@ function App() {
     generationAbortRef.current.get(task.id)?.abort();
   };
 
-  const handleGenerate = async (mode: GenerationMode, cost: number) => {
+  const handleGenerate = async (requestedMode: GenerationMode, cost: number) => {
     if (generationLockRef.current) return;
     generationLockRef.current = true;
+    // 创作台传进来的是静态目录里的模式；后台给这个模式配过的系统提示词要在这里套上，否则改了对出图不生效。
+    const mode: GenerationMode = { ...requestedMode, systemTemplate: systemPrompts[requestedMode.id] ?? requestedMode.systemTemplate };
     setGenerationSubmitting(true);
     const ratio = ratioOptions.find((item) => item.id === settings.ratioId) ?? ratioOptions[0];
     const taskId = `task-${Date.now()}`;
@@ -747,12 +798,14 @@ function App() {
       resolution,
     };
     const references = await attachmentsToReferences(attachments);
+    // 后台给「自由生成」配的模式提示词（默认为空）；配了就一并带上。
+    const freeModeHint = systemPrompts.free ?? mode.systemTemplate;
     const finalPrompt =
       intent === "annotation"
-        ? buildAnnotationEditPrompt(trimmedPrompt, freeSettings)
+        ? buildAnnotationEditPrompt(trimmedPrompt, freeSettings, freeModeHint)
         : intent === "sketch"
-          ? buildSketchPrompt(trimmedPrompt, freeSettings)
-          : buildFreePrompt(trimmedPrompt, attachments, freeSettings);
+          ? buildSketchPrompt(trimmedPrompt, freeSettings, freeModeHint)
+          : buildFreePrompt(trimmedPrompt, attachments, freeSettings, freeModeHint);
     const intentLabels = { free: "", annotation: "按标注改图", sketch: "按草图生成" } as const;
     const taskLabel = trimmedPrompt || intentLabels[intent] || "自由创作";
     const taskId = `task-${Date.now()}`;
@@ -901,6 +954,8 @@ function App() {
 
   const handleSignOut = async () => {
     const signedOutAccountId = currentUser?.id;
+    // 退出前先把还没推出去的偏好推掉、还在撤销期的删除真的删掉——退了之后就没法再替这个账号发请求了。
+    await Promise.all([flushPreferenceSync().catch(() => undefined), commitPendingDeletesNow()]);
     await Promise.all([signOut().catch(() => undefined), endDebugSession().catch(() => undefined)]);
     clearStoredStateAccount(signedOutAccountId);
     setStoredStateAccount(null);
@@ -958,7 +1013,9 @@ function App() {
   const loadStorage = async (page = storagePageRef.current) => {
     setStorageLoading(true);
     try {
-      const data = await fetchStorage({ page });
+      const fetched = await fetchStorage({ page });
+      const tombstones = recentlyDeletedResultIds(currentUserRef.current?.id);
+      const data = tombstones.size ? { ...fetched, results: fetched.results.filter((item) => !tombstones.has(item.id)) } : fetched;
       storagePageRef.current = data.resultsPagination?.page ?? page;
       setStorageData(data);
       // 服务端是文件状态的权威：过期 / 已推云盘要同步回创作台的列表
@@ -995,16 +1052,50 @@ function App() {
     }
   };
 
+  // 「全部推到云盘」以前是一个接口在服务端一口气推完，几百张要干等、没进度、停不下来：
+  // 现在和「全部存到本地」一样在客户端逐张推，亮 N/M 进度、可以中途停。
+  const [archiveAllProgress, setArchiveAllProgress] = useState<BatchProgress | null>(null);
+  const archiveAllCancelRef = useRef(false);
+  const handleCancelArchiveAll = () => {
+    archiveAllCancelRef.current = true;
+  };
+
   const handleArchiveAll = async (): Promise<string | void> => {
+    archiveAllCancelRef.current = false;
+    setArchiveAllProgress({ done: 0, total: 0, label: "正在统计要推的成片…" });
     try {
-      // 归档完留在当前这一页，别把人甩回第一页。
-      const data = await archiveAllGenerationResults({ page: storagePageRef.current });
-      setStorageData(data);
-      const byId = new Map(data.results.map((item) => [item.id, item]));
-      setResults((items) => items.map((item) => (byId.has(item.id) ? { ...item, ...byId.get(item.id)! } : item)));
-      if (data.summary.failed > 0) return `推了 ${data.summary.archived} 张，${data.summary.failed} 张失败：${data.summary.errors[0] || "未知原因"}`;
+      // 整个账号的口径，不是当前这一页——先把所有页翻一遍，挑出还没推过、也还没过期的。
+      const source = await fetchAllStorageResults();
+      const targets = source.filter((item) => item.storageStatus !== "webdav" && item.storageStatus !== "expired");
+      let done = 0;
+      let failed = 0;
+      let firstError = "";
+      setArchiveAllProgress({ done: 0, total: targets.length, label: `0 / ${targets.length}` });
+      for (const item of targets) {
+        if (archiveAllCancelRef.current) {
+          return `已停止：推了 ${done - failed} 张，还有 ${targets.length - done} 张没推${failed ? `（其中 ${failed} 张失败：${firstError}）` : ""}`;
+        }
+        done += 1;
+        let fatal = false;
+        try {
+          const { result } = await archiveGenerationResult(item.id);
+          applyResultPatch(item.id, result);
+        } catch (error) {
+          failed += 1;
+          firstError = firstError || (error instanceof Error ? error.message : "推送失败");
+          // WebDAV 没配 / 认证失败这种是整批都会挂的，别一张张报一百次。
+          fatal = /WebDAV|未启用|未配置|401|403|认证/.test(firstError);
+        }
+        setArchiveAllProgress({ done, total: targets.length, label: `${done} / ${targets.length}` });
+        if (fatal) break;
+      }
+      if (failed) return `${done - failed} 张已推，${failed} 张失败：${firstError}`;
     } catch (error) {
       return error instanceof Error ? error.message : "批量推送失败";
+    } finally {
+      setArchiveAllProgress(null);
+      // 文件管理页的总览数字（未推 / 已推）在服务端，推完重新取一次当前页。
+      void loadStorage(storagePageRef.current).catch(() => undefined);
     }
   };
 
@@ -1154,43 +1245,90 @@ function App() {
     setPendingDeleteIds([]);
   };
 
-  // 页面关掉时还没到点的删除要真的删掉（keepalive 让请求在卸载后也能发出去），别让「已删除」又回来。
-  useEffect(() => {
-    const flush = () => {
-      pendingDeleteTimersRef.current.forEach((timer, id) => {
-        window.clearTimeout(timer);
-        void fetch(`/api/generation-results/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include", keepalive: true }).catch(() => undefined);
-      });
-      pendingDeleteTimersRef.current.clear();
-    };
-    window.addEventListener("pagehide", flush);
-    return () => window.removeEventListener("pagehide", flush);
-  }, []);
-
   // 定时器 5 秒后才触发，闭包里的 results 早过期了；读最新的那份。
   const resultsRef = useRef(results);
   resultsRef.current = results;
-  const commitDeleteResult = async (id: string) => {
+
+  /** 把一条成片从各处本地状态里拿掉（界面 + 任务 + 参考 + 后台 / 文件管理的列表）。 */
+  const forgetResultLocally = (id: string) => {
     const latestResults = resultsRef.current;
     const deletedResult = latestResults.find((item) => item.id === id);
     const remainingResults = latestResults.filter((item) => item.id !== id);
+    resultsRef.current = remainingResults;
+    setResults((items) => items.filter((item) => item.id !== id));
+    if (deletedResult?.taskId && !remainingResults.some((item) => item.taskId === deletedResult.taskId)) {
+      setTasks((items) => items.filter((task) => task.id !== deletedResult.taskId));
+    }
+    if (deletedResult?.imageUrl) {
+      setReferences((items) => items.filter((item) => item.previewUrl !== deletedResult.imageUrl));
+    }
+    setAdminOverview((current) =>
+      current ? { ...current, generationResults: current.generationResults.filter((item) => item.id !== id) } : current,
+    );
+    setStorageData((current) => (current ? { ...current, results: current.results.filter((item) => item.id !== id) } : current));
+  };
+
+  const commitDeleteResult = async (id: string) => {
     try {
       await deleteGenerationResult(id);
-      setResults((items) => items.filter((item) => item.id !== id));
-      if (deletedResult?.taskId && !remainingResults.some((item) => item.taskId === deletedResult.taskId)) {
-        setTasks((items) => items.filter((task) => task.id !== deletedResult.taskId));
-      }
-      if (deletedResult?.imageUrl) {
-        setReferences((items) => items.filter((item) => item.previewUrl !== deletedResult.imageUrl));
-      }
-      setAdminOverview((current) =>
-        current ? { ...current, generationResults: current.generationResults.filter((item) => item.id !== id) } : current,
-      );
-      setStorageData((current) => (current ? { ...current, results: current.results.filter((item) => item.id !== id) } : current));
+      rememberDeletedResults(currentUserRef.current?.id, [id]);
+      forgetResultLocally(id);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "删除生成结果失败");
     }
   };
+
+  /**
+   * 页面关掉 / 刷新时还没到点的删除要真的删掉（keepalive 让请求在卸载后也能发出去）。
+   * 只发请求还不够：localStorage 里那份成片列表是同步写的，state 更新赶不上卸载，
+   * 刷新回来 mergeResults 会把本地旧记录又捞出来，「已删除」就复活了——所以这里直接改 localStorage；
+   * 进了返回缓存（bfcache）再回来的页面则靠下面的 setState 把撤销条和列表一起收掉，不能再「撤销」一条服务器上已经没了的成片。
+   */
+  const flushPendingDeletes = () => {
+    const ids = [...pendingDeleteTimersRef.current.keys()];
+    if (!ids.length) return ids;
+    pendingDeleteTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    pendingDeleteTimersRef.current.clear();
+    const accountId = activeStorageAccount();
+    const resultsKey = storedStateKeyForAccount("clothdesign:results", accountId);
+    const tasksKey = storedStateKeyForAccount("clothdesign:tasks", accountId);
+    if (resultsKey) {
+      const stored = readStoredState<GeneratedResult[]>(resultsKey, []);
+      const removed = stored.filter((item) => ids.includes(item.id));
+      const remaining = stored.filter((item) => !ids.includes(item.id));
+      writeStoredState(resultsKey, remaining);
+      if (tasksKey) {
+        const orphanTaskIds = new Set(removed.map((item) => item.taskId).filter((taskId) => taskId && !remaining.some((item) => item.taskId === taskId)));
+        if (orphanTaskIds.size) {
+          const storedTasks = readStoredState<GenerationTask[]>(tasksKey, []);
+          writeStoredState(tasksKey, storedTasks.filter((task) => !orphanTaskIds.has(task.id)));
+        }
+      }
+    }
+    rememberDeletedResults(accountId, ids);
+    ids.forEach((id) => forgetResultLocally(id));
+    setPendingDeleteIds([]);
+    return ids;
+  };
+
+  /** 退出登录前：撤销期内的删除立刻提交（等服务端回包）。 */
+  const commitPendingDeletesNow = async () => {
+    const ids = flushPendingDeletes();
+    await Promise.all(ids.map((id) => deleteGenerationResult(id).catch(() => undefined)));
+  };
+
+  const flushPendingDeletesRef = useRef(flushPendingDeletes);
+  flushPendingDeletesRef.current = flushPendingDeletes;
+  useEffect(() => {
+    const onPageHide = () => {
+      const ids = flushPendingDeletesRef.current();
+      ids.forEach((id) => {
+        void fetch(`/api/generation-results/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include", keepalive: true }).catch(() => undefined);
+      });
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
 
   // 调试座位和管理员开过「无限额度」的账号，在界面上是同一种状态：显示 ∞、不校验余额。
   const unlimitedCredits = debugUnlimited || currentUser?.unlimited === true;
@@ -1332,6 +1470,8 @@ function App() {
           onSaveAllToFolder={handleSaveAllLocally}
           saveAllProgress={saveAllProgress}
           onCancelSaveAll={handleCancelSaveAll}
+          archiveAllProgress={archiveAllProgress}
+          onCancelArchiveAll={handleCancelArchiveAll}
         />
       </main>
     );

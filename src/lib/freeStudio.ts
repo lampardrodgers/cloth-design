@@ -220,10 +220,17 @@ export type FreePromptSettings = Pick<
  * 自由创作的提示词：不加服装行业的系统约束，只把「哪张图是参考、哪张图必须入画」
  * 说清楚，其余完全交给用户描述。
  */
+/** 后台给「自由生成」配的模式提示词（默认为空 = 不加任何约束）；非空就作为一段「模式提示」插进去。 */
+function modeHintSection(modeHint?: string) {
+  const hint = modeHint?.trim();
+  return hint ? `模式提示: ${hint}` : "";
+}
+
 export function buildFreePrompt(
   rawPrompt: string,
   attachments: FreeAttachment[],
   settings: FreePromptSettings,
+  modeHint?: string,
 ) {
   const subject = rawPrompt.trim();
   const uploadOrder = attachments
@@ -242,6 +249,7 @@ export function buildFreePrompt(
 
   return [
     "模式: 自由生成（不限题材，按用户描述直接出图）",
+    modeHintSection(modeHint),
     uploadOrder ? `上传图片顺序:\n${uploadOrder}` : "",
     hasMerge
       ? "入画图片要求: 图中主体必须真实出现在最终成片里，保持款式、颜色、材质、细节和比例一致，只允许调整光线、角度和构图让它自然融入画面。"
@@ -262,9 +270,10 @@ export function buildFreePrompt(
  * 按标注改图：把「原图 + 红色批注」的截图当成修改需求书交给图像引擎，
  * 要求它执行标注里的修改，并且输出里不能残留任何标注痕迹。
  */
-export function buildAnnotationEditPrompt(userNote: string, settings: FreePromptSettings) {
+export function buildAnnotationEditPrompt(userNote: string, settings: FreePromptSettings, modeHint?: string) {
   return [
     "模式: 自由生成（按标注改图）",
+    modeHintSection(modeHint),
     "上传图片1 = 带人工标注的原图",
     "改图要求: 上传图片1 是一张被人工标注过的图。请把图中的箭头、线条、圈选和文字批注理解成修改指令，对底图执行这些修改。箭头指向哪里，修改就发生在哪里。",
     "输出要求: 只输出修改后的干净成片。不得保留任何标注箭头、线条、圈选、文字、选中框、控制点或界面元素。除标注明确要求改动的部分外，保持原图的主体、构图、比例、光线和风格不变。",
@@ -304,9 +313,10 @@ export function nearestRatioId(width: number, height: number, ratios: RatioOptio
  * 按草图生成：画布上手绘的线稿、方框和文字就是需求本身，
  * 让图像引擎照着它的构图和标注出一张成品，且不能把草稿痕迹画进结果。
  */
-export function buildSketchPrompt(userNote: string, settings: FreePromptSettings) {
+export function buildSketchPrompt(userNote: string, settings: FreePromptSettings, modeHint?: string) {
   return [
     "模式: 自由生成（按画布草图生成）",
+    modeHintSection(modeHint),
     "上传图片1 = 画布上的手绘草图",
     "草图要求: 上传图片1 是一张手绘草图或示意图。请按它的构图、比例、位置关系和图中文字标注，生成一张完整的成品图片。图里的文字是对画面的描述，不是要画进图里的字。",
     "输出要求: 只输出成品图。不得保留任何草稿线条、参考线、网格、箭头、标注文字、选中框或界面元素。",

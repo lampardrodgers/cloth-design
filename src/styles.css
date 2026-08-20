@@ -8969,3 +8969,15 @@ a.stage-tool {
   place-items: center;
   background: var(--mat);
 }
+
+/* 批量推云盘 / 存本地：进度条和「停止」排一行 */
+.storage-batch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.storage-batch-row .storage-batch-progress {
+  flex: 1;
+  margin-top: 0;
+}

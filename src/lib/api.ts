@@ -239,17 +239,22 @@ function sessionLost(response: Response, data: { error?: string; pendingApproval
   return data.pendingApproval === true || /锁定/.test(String(data.error || ""));
 }
 
+/** 会话失效就广播；自己解析响应的接口（改密、建工作流任务）也要走这里，不能只有 parseJson 会通知。 */
+function notifyIfSessionLost(response: Response, data: { error?: string; pendingApproval?: boolean }, message: string) {
+  if (!sessionLost(response, data)) return false;
+  window.dispatchEvent(
+    new CustomEvent<UnauthorizedDetail>(UNAUTHORIZED_EVENT, {
+      detail: { status: response.status, message, pendingApproval: data.pendingApproval === true },
+    }),
+  );
+  return true;
+}
+
 async function parseJson<T>(response: Response): Promise<T> {
   const data = (await response.json().catch(() => ({}))) as T & { error?: string; pendingApproval?: boolean };
   if (!response.ok || data.error) {
     const message = data.error || `请求失败: ${response.status}`;
-    if (sessionLost(response, data)) {
-      window.dispatchEvent(
-        new CustomEvent<UnauthorizedDetail>(UNAUTHORIZED_EVENT, {
-          detail: { status: response.status, message, pendingApproval: data.pendingApproval === true },
-        }),
-      );
-    }
+    notifyIfSessionLost(response, data, message);
     throw new Error(message);
   }
   return data as T;
@@ -354,6 +359,12 @@ export async function fetchMe(): Promise<MeResponse> {
   return parseJson<MeResponse>(response);
 }
 
+/** 对所有人生效的积分规则 / 提示词模板：页面回到前台或定时拉一次，后台改了不用重新登录才生效。 */
+export async function fetchAppSettings() {
+  const response = await fetch("/api/app-settings", { credentials: "include" });
+  return parseJson<{ creditPolicy: CreditPolicy; systemPrompts: Partial<SystemPromptMap> }>(response);
+}
+
 export async function testMyImageProvider(): Promise<ImageProviderTestResponse> {
   const response = await fetch("/api/me/image-provider/test", {
     method: "POST",
@@ -428,6 +439,8 @@ export async function changeMyPassword(currentPassword: string, newPassword: str
   });
   const data = (await response.json().catch(() => ({}))) as { message?: string; code?: string; error?: string };
   if (!response.ok) {
+    // 登录态没了（401）也走统一的回登录页；密码错是 400，不算。
+    notifyIfSessionLost(response, data, data.message || "登录已失效，请重新登录。");
     const code = String(data.code || "");
     if (code === "INVALID_PASSWORD") throw new Error("当前密码不对。");
     if (code === "PASSWORD_TOO_SHORT") throw new Error("新密码至少 8 位。");
@@ -438,12 +451,14 @@ export async function changeMyPassword(currentPassword: string, newPassword: str
 }
 
 /** 账号偏好合并写入；值为 null 表示删掉这个键。 */
-export async function saveMyPreferences(patch: Record<string, unknown>) {
+export async function saveMyPreferences(patch: Record<string, unknown>, options: { keepalive?: boolean } = {}) {
   const response = await fetch("/api/me/preferences", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify({ preferences: patch }),
+    // 关页前那次推送要 keepalive，否则页面一卸载请求就被浏览器掐掉。
+    keepalive: options.keepalive === true,
   });
   return parseJson<{ preferences: Record<string, unknown> }>(response);
 }
@@ -712,9 +727,13 @@ export async function createWorkflowJob(input: {
     credentials: "include",
     body: JSON.stringify(input),
   });
-  const data = (await response.json().catch(() => ({}))) as { job?: WorkflowJob; dashboard?: WorkflowDashboard; error?: string };
+  const data = (await response.json().catch(() => ({}))) as { job?: WorkflowJob; dashboard?: WorkflowDashboard; error?: string; pendingApproval?: boolean };
   if (data.job && data.dashboard) return data as { job: WorkflowJob; dashboard: WorkflowDashboard; error?: string };
-  if (!response.ok || data.error) throw new Error(data.error || `请求失败: ${response.status}`);
+  if (!response.ok || data.error) {
+    const message = data.error || `请求失败: ${response.status}`;
+    notifyIfSessionLost(response, data, message);
+    throw new Error(message);
+  }
   return data as { job: WorkflowJob; dashboard: WorkflowDashboard; error?: string };
 }
 

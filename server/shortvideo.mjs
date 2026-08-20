@@ -375,23 +375,35 @@ function activeTaskCount(userId) {
   return Number(row?.count || 0);
 }
 
-function updateTask(taskId, fields) {
+/**
+ * 写任务字段；onlyActive 时只改还在 queued / running 的行，返回实际改到的行数。
+ * 轮询是先读行、再等引擎、再写回——中间用户可能已经点了取消，不加这个条件，
+ * 引擎那边的回包会把 cancelled 又改回 running / completed / failed。
+ */
+function updateTask(taskId, fields, { onlyActive = false } = {}) {
   const keys = Object.keys(fields);
-  if (!keys.length) return;
+  if (!keys.length) return 0;
   const assignments = keys.map((key) => `${key} = ?`).join(", ");
-  sqlite
-    .prepare(`UPDATE shortvideo_task SET ${assignments}, updated_at = ? WHERE id = ?`)
+  const guard = onlyActive ? " AND status IN ('queued', 'running')" : "";
+  const info = sqlite
+    .prepare(`UPDATE shortvideo_task SET ${assignments}, updated_at = ? WHERE id = ?${guard}`)
     .run(...keys.map((key) => fields[key]), nowIso(), taskId);
+  return Number(info?.changes || 0);
 }
 
+/** 标失败只对还在跑的任务有意义：已经取消 / 完成的不动。 */
 function markTaskFailed(taskId, message, source = "engine") {
-  updateTask(taskId, {
-    status: "failed",
-    stage: "failed",
-    error: String(message || "生成失败。").slice(0, 600),
-    failure_source: source,
-    finished_at: nowIso(),
-  });
+  return updateTask(
+    taskId,
+    {
+      status: "failed",
+      stage: "failed",
+      error: String(message || "生成失败。").slice(0, 600),
+      failure_source: source,
+      finished_at: nowIso(),
+    },
+    { onlyActive: true },
+  );
 }
 
 /* ── 参数规范化 ───────────────────────────────────────────────────────────── */
@@ -679,13 +691,14 @@ async function syncTaskFromEngine(row) {
   }
   const stage = stageForProgress(progress);
   if (row.status !== "running" || row.progress !== progress || row.stage !== stage) {
-    updateTask(row.id, { status: "running", progress, stage });
+    updateTask(row.id, { status: "running", progress, stage }, { onlyActive: true });
   }
 }
 
-/** 引擎说完成了：把成片和字幕拉回本站目录，再标完成。 */
+/** 引擎说完成了：把成片和字幕拉回本站目录，再标完成。等引擎回包的这段时间里任务可能已被取消，每次落库都只认还在跑的行。 */
 async function importFinishedTask(row, engineTask) {
-  updateTask(row.id, { status: "running", progress: 100, stage: "import" });
+  // 改不到行 = 这条任务在等引擎的时候被取消了：成片不要了，也别再往下拉文件。
+  if (!updateTask(row.id, { status: "running", progress: 100, stage: "import" }, { onlyActive: true })) return;
   const engineVideos = Array.isArray(engineTask.videos) ? engineTask.videos : [];
   if (!engineVideos.length) {
     markTaskFailed(row.id, "引擎报告完成，但没有给出成片文件。", "engine");
@@ -727,16 +740,25 @@ async function importFinishedTask(row, engineTask) {
     engineTaskId: row.engine_task_id,
   };
   const scriptText = String(engineTask.script || row.script || "");
-  updateTask(row.id, {
-    status: "completed",
-    progress: 100,
-    stage: "done",
-    script: scriptText.slice(0, MAX_SCRIPT_CHARS),
-    result_json: JSON.stringify(result),
-    error: null,
-    failure_source: null,
-    finished_at: nowIso(),
-  });
+  const completed = updateTask(
+    row.id,
+    {
+      status: "completed",
+      progress: 100,
+      stage: "done",
+      script: scriptText.slice(0, MAX_SCRIPT_CHARS),
+      result_json: JSON.stringify(result),
+      error: null,
+      failure_source: null,
+      finished_at: nowIso(),
+    },
+    { onlyActive: true },
+  );
+  if (!completed) {
+    // 拉文件这几秒里用户取消了：cancelled 为准，刚落盘的成片清掉，取消那边已经删过引擎任务。
+    await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
   // 成片已经拉回本站，引擎那边的整个任务目录（下载的素材、配音、字幕、成片副本）就是多余的，顺手清掉。
   if (row.engine_task_id && engineConfigured()) {
     void deleteEngineTask(row.engine_task_id).catch((error) => console.warn(`[shortvideo] 清理引擎任务 ${row.engine_task_id} 失败：`, error?.message || error));

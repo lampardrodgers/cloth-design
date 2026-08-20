@@ -47,6 +47,7 @@ import {
   type TLShape,
   type TLShapeId,
   type TLUiOverrides,
+  type TLImageAsset,
 } from "tldraw";
 import { getAssetUrlsByImport } from "@tldraw/assets/imports.vite";
 import "tldraw/tldraw.css";
@@ -495,26 +496,70 @@ function loadImageSize(src: string) {
   });
 }
 
-/** 把一张图落到画布上：建 asset + image shape，返回新形状 id。给了 box 就按 box 等比放进去。 */
+/** 服务器托管、会过期清理的成片地址。 */
+function isManagedResultUrl(url: string) {
+  return url.startsWith("/generated-images/");
+}
+
+async function fetchAsDataUrl(url: string) {
+  const response = await fetch(url, { credentials: "include" });
+  if (!response.ok) {
+    const error = new Error(response.status === 404 || response.status === 410 ? "这张成片已在服务器上清理，没法再放到画布。" : `拉取图片失败（${response.status}）`);
+    (error as Error & { gone?: boolean }).gone = response.status === 404 || response.status === 410;
+    throw error;
+  }
+  const blob = await response.blob();
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("读取失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
 /**
  * 服务器托管的成片（/generated-images/…）只保留 3 天，到期文件就没了。
- * 放进画布的图要一直在，所以落盘前先把字节拉下来转成 data URL 存进 tldraw 的资产里；
- * 拉不到（已经清理、网络不通）就只能先按地址放，至少不把整个动作卡死。
+ * 放进画布的图要一直在，所以落盘前先把字节拉下来转成 data URL 存进 tldraw 的资产里。
+ * 文件已经清理（404）就直接报错，不往画布里放一张注定裂掉的图；网络抖动先重试一次，
+ * 还不行才按地址落下——这种资产会在下次打开画布时由 migrateManagedAssets 再补转一次。
  */
 async function canvasAssetSource(url: string) {
-  if (!url.startsWith("/generated-images/")) return url;
-  try {
-    const response = await fetch(url, { credentials: "include" });
-    if (!response.ok) return url;
-    const blob = await response.blob();
-    return await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error ?? new Error("读取失败"));
-      reader.readAsDataURL(blob);
-    });
-  } catch {
-    return url;
+  if (!isManagedResultUrl(url)) return url;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await fetchAsDataUrl(url);
+    } catch (error) {
+      lastError = error;
+      if ((error as { gone?: boolean }).gone) throw error;
+    }
+  }
+  console.warn("[canvas] 成片暂时拉不下来，先按地址放进画布，下次打开画布时再补转：", lastError);
+  return url;
+}
+
+/**
+ * 升级前放进画布的成片资产还是服务器地址（以及上面网络抖动时退回地址的那些）：
+ * 打开画布时后台把它们逐个转成 data URL 写回资产，文件已经清理的就保持原样（没东西可救）。
+ */
+async function migrateManagedAssets(editor: Editor) {
+  const assets = editor
+    .getAssets()
+    .filter((asset): asset is TLImageAsset => asset.type === "image" && isManagedResultUrl(String(asset.props.src ?? "")));
+  for (const asset of assets) {
+    let src: string;
+    try {
+      src = await fetchAsDataUrl(String(asset.props.src));
+    } catch {
+      continue;
+    }
+    if (editor.isDisposed || !editor.getAsset(asset.id)) continue;
+    editor.run(
+      () => {
+        editor.updateAssets([{ id: asset.id, type: "image", props: { src, mimeType: src.slice(5, src.indexOf(";")) || asset.props.mimeType } }]);
+      },
+      { history: "ignore" },
+    );
   }
 }
 
@@ -1229,7 +1274,12 @@ function CanvasOverlay({ pendingImages, onPendingConsumed, onActions }: CanvasOv
     void (async () => {
       const ids: TLShapeId[] = [];
       for (const item of fresh) {
-        ids.push(await placeImage(editor, { url: item.url, name: item.name }, null));
+        try {
+          ids.push(await placeImage(editor, { url: item.url, name: item.name }, null));
+        } catch (error) {
+          // 一张放不进去（多半是服务器上已清理）不该卡住后面的，也不能让这批永远挂在 pending 里。
+          api.onNotice(error instanceof Error ? error.message : "放到画布失败");
+        }
       }
       if (ids.length) {
         editor.select(...ids);
@@ -1237,7 +1287,7 @@ function CanvasOverlay({ pendingImages, onPendingConsumed, onActions }: CanvasOv
       }
       onPendingConsumed(fresh.map((item) => item.id));
     })();
-  }, [editor, onPendingConsumed, pendingImages]);
+  }, [api, editor, onPendingConsumed, pendingImages]);
 
   const selection = useValue(
     "free-canvas-selection",
@@ -2115,6 +2165,8 @@ export function CanvasBoard({
           { history: "ignore" },
         );
       }
+      // 老资产还指着会过期的服务器地址：后台补转成 data URL，别等它裂了。
+      void migrateManagedAssets(editor).catch((error) => console.warn("[canvas] 资产补转失败：", error));
       markReady();
     },
     [markReady],

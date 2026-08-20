@@ -21,6 +21,9 @@ import { PromptChipBar, usePromptChips } from "./PromptChips";
 import { RatioPicker } from "./RatioPicker";
 import { NumberStepper } from "./ui";
 
+/** 服务器上过期清理的成片只剩一条记录，没法再当参考或放进画布。 */
+const EXPIRED_ACTION_HINT = "这张成片已在服务器上清理，文件不在了，不能再加入参考或放到画布。";
+
 export interface SimplePendingJob {
   id: string;
   prompt: string;
@@ -516,10 +519,22 @@ export function SimpleComposer({
                   <small>{selected.ratioLabel} · {formatResultTime(selected.createdAt)}</small>
                 </div>
                 <div className="simple-stage-actions">
-                  <button type="button" className="text-button" onClick={() => onUseAsAttachment(selected)}>
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={selected.storageStatus === "expired"}
+                    title={selected.storageStatus === "expired" ? EXPIRED_ACTION_HINT : ""}
+                    onClick={() => onUseAsAttachment(selected)}
+                  >
                     加入参考
                   </button>
-                  <button type="button" className="text-button" onClick={() => onSendToCanvas(selected)}>
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={selected.storageStatus === "expired"}
+                    title={selected.storageStatus === "expired" ? EXPIRED_ACTION_HINT : ""}
+                    onClick={() => onSendToCanvas(selected)}
+                  >
                     放到画布
                   </button>
                   <button
@@ -627,10 +642,22 @@ export function SimpleComposer({
                   <small>{result.ratioLabel} · {formatResultTime(result.createdAt)}</small>
                 </figcaption>
                 <div className="simple-result-actions">
-                  <button type="button" className="text-button" onClick={() => onUseAsAttachment(result)}>
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={result.storageStatus === "expired"}
+                    title={result.storageStatus === "expired" ? EXPIRED_ACTION_HINT : ""}
+                    onClick={() => onUseAsAttachment(result)}
+                  >
                     加入参考
                   </button>
-                  <button type="button" className="text-button" onClick={() => onSendToCanvas(result)}>
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={result.storageStatus === "expired"}
+                    title={result.storageStatus === "expired" ? EXPIRED_ACTION_HINT : ""}
+                    onClick={() => onSendToCanvas(result)}
+                  >
                     放到画布
                   </button>
                   {result.storageStatus !== "expired" ? (
