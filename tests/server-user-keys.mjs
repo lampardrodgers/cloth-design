@@ -7,6 +7,7 @@ const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clothdesign-user-keys-")
 process.env.DATABASE_URL = `file:${path.join(tmpDir, "test.db")}`;
 process.env.AUTH_SECRET = "test-auth-secret-for-user-keys-1234567890";
 delete process.env.OPENAI_API_KEY;
+delete process.env.APIMART_API_KEY;
 
 const { migrateBusinessDatabase, sqlite, nowIso } = await import("../server/db.mjs");
 migrateBusinessDatabase();
@@ -133,6 +134,32 @@ assert.equal(keys.decryptApiKey(encrypted), "sk-test-key-1234567890");
 assert.notEqual(keys.encryptApiKey("sk-test-key-1234567890"), encrypted, "每次随机 IV，同一把 Key 密文也不同");
 assert.equal(keys.apiKeyHint("sk-test-key-1234567890"), "sk-…7890");
 assert.equal(keys.apiKeyHint("abcdefg"), "ab…");
+
+/* ── 每条供应商的后台共享 Key：独立、加密、可回退 .env ─────────────────── */
+assert.deepEqual(keys.sharedProviderApiKeyStatus("default"), {
+  serverKeyConfigured: false,
+  serverKeyHint: null,
+  serverKeySource: "none",
+  serverKeyUpdatedAt: null,
+});
+process.env.OPENAI_API_KEY = "sk-env-shared-key-0000";
+assert.equal(keys.serverApiKey("default"), "sk-env-shared-key-0000");
+assert.equal(keys.sharedProviderApiKeyStatus("default").serverKeySource, "env");
+
+const sharedSaved = keys.setSharedProviderApiKey("default", "sk-admin-shared-key-1234567890");
+assert.equal(sharedSaved.serverKeySource, "admin");
+assert.equal(sharedSaved.serverKeyHint, "sk-…7890");
+assert.equal(keys.serverApiKey("default"), "sk-admin-shared-key-1234567890", "后台 Key 要优先于 .env");
+const sharedRow = sqlite.prepare("SELECT value_json FROM app_config WHERE key = 'imageProviderKey:default'").get();
+assert(sharedRow && !sharedRow.value_json.includes("sk-admin-shared-key"), "共享 Key 落库只能保存密文");
+
+keys.setSharedProviderApiKey("apimart", "sk-apimart-admin-key-9876543210");
+assert.equal(keys.serverApiKey("apimart"), "sk-apimart-admin-key-9876543210", "不同供应商的共享 Key 必须互相独立");
+keys.clearSharedProviderApiKey("apimart");
+keys.clearSharedProviderApiKey("default");
+assert.equal(keys.serverApiKey("default"), "sk-env-shared-key-0000", "清除后台 Key 后要回退 .env");
+delete process.env.OPENAI_API_KEY;
+assert.equal(keys.serverApiKey("default"), "");
 
 /* ── 落库 / 解析 / 优先级 ────────────────────────────────────────────────── */
 assert.equal(keys.resolveProviderApiKey("u-legacy").source, "", "没有任何 Key 时要能识别出来");

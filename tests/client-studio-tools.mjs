@@ -186,6 +186,8 @@ assert(account.includes("apiKeyHint"), "账户页只显示脱敏提示");
 const admin = await fs.readFile("src/components/AdminPanel.tsx", "utf8");
 assert(admin.includes("approved: !approved") && admin.includes("开通"), "后台要能开通 / 收回账号");
 assert(admin.includes("usage?.taskCount") && admin.includes("ownKeyTaskCount"), "后台要能看到每个账号的用量");
+assert(admin.includes("共享 API Key") && admin.includes('type="password"'), "后台每条供应商线路都要能安全填写共享 Key");
+assert(admin.includes("clearProviderApiKey") && admin.includes("清除后台 Key"), "后台设置的共享 Key 要能单独清除并回退 .env");
 const authPanel = await fs.readFile("src/components/AuthPanel.tsx", "utf8");
 assert(authPanel.includes("需要管理员在后台开通"), "注册页要说明需要开通");
 

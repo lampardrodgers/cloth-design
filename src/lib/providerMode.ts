@@ -31,7 +31,7 @@ export function providerNotice(apiConfig: ApiConfig | null | undefined): Provide
         : "还没有配置图像接口密钥，点击生成不会调用真实接口，返回的是占位图。",
       hint: apiConfig.providerReady
         ? "把 .env 里的 OPENAI_DEMO_MODE 改成 false 并重启服务，即可切换成真实出图。"
-        : "在项目根目录建 .env（可从 .env.example 复制），填好 OPENAI_API_KEY，需要时再改 OPENAI_BASE_URL / OPENAI_IMAGE_MODEL，然后重启服务。",
+        : "管理员可在后台「图像接口」里为对应供应商填写共享 API Key；也可以在 .env 配置 OPENAI_API_KEY / APIMART_API_KEY。",
     };
   }
 

@@ -52,6 +52,7 @@ function jsonBody(value) {
 
 const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clothdesign-apimart-"));
 let generationBody = null;
+let generationAuthorization = "";
 let statusChecks = 0;
 let fakePort = 0;
 const fakeApi = http.createServer(async (req, res) => {
@@ -65,6 +66,7 @@ const fakeApi = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     generationBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    generationAuthorization = String(req.headers.authorization || "");
     res.end(JSON.stringify({ code: 200, data: [{ status: "submitted", task_id: "task-apimart-1" }] }));
     return;
   }
@@ -110,7 +112,7 @@ const app = spawn(process.execPath, ["server/index.mjs"], {
     ALLOW_PAYMENT_DEMO_API: "true",
     OPENAI_DEMO_MODE: "false",
     OPENAI_API_KEY: "",
-    APIMART_API_KEY: "sk-test-apimart-key-0000000000",
+    APIMART_API_KEY: "",
     APIMART_BASE_URL: `http://127.0.0.1:${fakePort}/v1`,
     APIMART_IMAGE_MODEL: "gpt-image-2",
   },
@@ -125,6 +127,23 @@ try {
     ...jsonBody({ name: "APIMart Tester", email: "apimart@example.test", password: "clothdesign123" }),
   });
   assert(response.ok);
+
+  // 管理后台可以为 APIMart 单独保存共享 Key；响应只给脱敏提示，生成时才解密使用。
+  response = await request(baseUrl, jar, "/api/admin/image-provider", {
+    method: "PUT",
+    ...jsonBody({
+      providerId: "apimart",
+      baseUrl: `http://127.0.0.1:${fakePort}/v1`,
+      model: "gpt-image-2",
+      apiKey: "sk-admin-apimart-key-0000000000",
+    }),
+  });
+  assert(response.ok);
+  const savedProvider = (await response.json()).imageProvider;
+  assert.equal(savedProvider.serverKeyConfigured, true);
+  assert.equal(savedProvider.serverKeySource, "admin");
+  assert.equal(savedProvider.serverKeyHint, "sk-…0000");
+  assert(!JSON.stringify(savedProvider).includes("sk-admin-apimart-key"), "后台响应不能泄露共享 Key 明文");
 
   response = await request(baseUrl, jar, "/api/payments/orders", {
     method: "POST",
@@ -169,7 +188,17 @@ try {
   assert.equal(generationBody.model, "gpt-image-2");
   assert.equal(generationBody.size, "21:9");
   assert.equal(generationBody.resolution, "4k");
+  assert.equal(generationAuthorization, "Bearer sk-admin-apimart-key-0000000000");
   assert(statusChecks >= 2, "异步任务应轮询到 completed");
+
+  response = await request(baseUrl, jar, "/api/admin/image-provider/key", {
+    method: "DELETE",
+    ...jsonBody({ providerId: "apimart" }),
+  });
+  assert(response.ok);
+  const clearedProvider = (await response.json()).imageProvider;
+  assert.equal(clearedProvider.serverKeyConfigured, false);
+  assert.equal(clearedProvider.serverKeySource, "none");
 } finally {
   app.kill("SIGTERM");
   fakeApi.close();

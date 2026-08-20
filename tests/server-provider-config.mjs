@@ -111,6 +111,7 @@ assert(workflows.includes('from "./provider-config.mjs"'));
 const api = await fs.readFile("server/api.mjs", "utf8");
 assert(api.includes('app.put("/api/admin/image-provider"'), "后台要能改");
 assert(api.includes('app.delete("/api/admin/image-provider"'), "后台要能恢复默认");
+assert(api.includes('app.delete("/api/admin/image-provider/key"'), "后台设置的共享 Key 要能单独清除");
 assert(api.includes('app.post("/api/admin/image-provider/test"'), "后台要能测连通");
 assert(api.includes("imageProvider: imageProviderSettings()"), "总览里要带上当前配置");
 assert(api.includes("/models"), "连通测试用不花钱的 /models");

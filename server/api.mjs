@@ -26,13 +26,16 @@ import {
 } from "./debug.mjs";
 import { deleteManagedGeneratedImage } from "./image-provider.mjs";
 import {
+  clearSharedProviderApiKey,
   clearUserApiKey,
   normalizeApiKey,
   resolutionPolicyFor,
   resolveProviderApiKey,
   serverApiKey,
+  setSharedProviderApiKey,
   setUserApiKey,
   setUserApiProvider,
+  sharedProviderApiKeyStatus,
 } from "./user-keys.mjs";
 import {
   archivePendingResults,
@@ -100,7 +103,7 @@ export function serializeAccount(user, profile) {
 function publicImageProviders() {
   return imageProviderSettingsList().map((provider) => ({
     ...provider,
-    serverKeyConfigured: Boolean(serverApiKey(provider.id)),
+    ...sharedProviderApiKeyStatus(provider.id),
   }));
 }
 
@@ -1218,25 +1221,41 @@ export function registerBusinessRoutes(app) {
   app.get("/api/admin/image-provider", async (req, res) => {
     const account = await requireAdmin(req, res);
     if (!account) return;
-    res.json({ imageProvider: imageProviderSettings() });
+    res.json({ imageProvider: { ...imageProviderSettings(), ...sharedProviderApiKeyStatus() } });
   });
 
   app.put("/api/admin/image-provider", async (req, res) => {
     const account = await requireAdmin(req, res);
     if (!account) return;
+    const apiKey = String(req.body?.apiKey ?? "").trim();
+    if (apiKey) {
+      const normalizedKey = normalizeApiKey(apiKey);
+      if (normalizedKey.error) {
+        res.status(400).json({ error: normalizedKey.error });
+        return;
+      }
+    }
     const result = saveImageProviderSettings({ providerId: req.body?.providerId, baseUrl: req.body?.baseUrl, model: req.body?.model });
     if (result.error) {
       res.status(400).json({ error: result.error });
       return;
     }
+    const keyStatus = apiKey
+      ? setSharedProviderApiKey(result.settings.id, apiKey)
+      : sharedProviderApiKeyStatus(result.settings.id);
     insertAudit({
       actorUserId: account.user.id,
       action: "image_provider.update",
       targetType: "app_config",
       targetId: result.settings.id,
-      detail: { providerId: result.settings.id, baseUrl: result.settings.baseUrl, model: result.settings.model },
+      detail: {
+        providerId: result.settings.id,
+        baseUrl: result.settings.baseUrl,
+        model: result.settings.model,
+        apiKey: apiKey ? "updated" : "unchanged",
+      },
     });
-    res.json({ imageProvider: result.settings });
+    res.json({ imageProvider: { ...result.settings, ...keyStatus } });
   });
 
   app.delete("/api/admin/image-provider", async (req, res) => {
@@ -1254,7 +1273,27 @@ export function registerBusinessRoutes(app) {
       targetId: settings.id,
       detail: { providerId: settings.id },
     });
-    res.json({ imageProvider: settings });
+    res.json({ imageProvider: { ...settings, ...sharedProviderApiKeyStatus(settings.id) } });
+  });
+
+  app.delete("/api/admin/image-provider/key", async (req, res) => {
+    const account = await requireAdmin(req, res);
+    if (!account) return;
+    const providerId = req.body?.providerId ?? "default";
+    const status = clearSharedProviderApiKey(providerId);
+    if (status.error) {
+      res.status(400).json({ error: status.error });
+      return;
+    }
+    const settings = imageProviderSettings(providerId);
+    insertAudit({
+      actorUserId: account.user.id,
+      action: "image_provider.api_key.clear",
+      targetType: "app_config",
+      targetId: settings.id,
+      detail: { providerId: settings.id },
+    });
+    res.json({ imageProvider: { ...settings, ...status } });
   });
 
   /**

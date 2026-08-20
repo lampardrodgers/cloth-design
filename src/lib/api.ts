@@ -158,6 +158,9 @@ export interface ImageProviderSettings {
   defaults: { baseUrl: string; model: string };
   updatedAt: string | null;
   serverKeyConfigured?: boolean;
+  serverKeyHint?: string | null;
+  serverKeySource?: "admin" | "env" | "none";
+  serverKeyUpdatedAt?: string | null;
 }
 
 export interface AdminOverviewResponse {
@@ -527,12 +530,22 @@ export async function createAdminUser(input: {
   return parseJson<{ user: UserAccount }>(response);
 }
 
-export async function saveImageProvider(input: { providerId?: string; baseUrl?: string; model?: string }) {
+export async function saveImageProvider(input: { providerId?: string; baseUrl?: string; model?: string; apiKey?: string }) {
   const response = await fetch("/api/admin/image-provider", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(input),
+  });
+  return parseJson<{ imageProvider: ImageProviderSettings }>(response);
+}
+
+export async function clearImageProviderApiKey(providerId = "default") {
+  const response = await fetch("/api/admin/image-provider/key", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ providerId }),
   });
   return parseJson<{ imageProvider: ImageProviderSettings }>(response);
 }

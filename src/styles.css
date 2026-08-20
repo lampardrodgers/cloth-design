@@ -3039,6 +3039,97 @@ a.stage-tool {
   font-size: 29px;
 }
 
+/* 后台分区：左边一列导航 + 右边当前分区的内容。
+   以前十几个版块摞成一条长页面，找什么都得滚；现在一次只画一个分区。 */
+.admin-console {
+  display: grid;
+  grid-template-columns: 212px minmax(0, 1fr);
+  align-items: start;
+  gap: 26px;
+  max-width: 1360px;
+}
+
+/* 导航跟着滚动条粘在顶上，滚到页面底部也能一键换分区。 */
+.admin-nav {
+  position: sticky;
+  top: 0;
+  display: grid;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.admin-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.admin-nav-item:hover {
+  background: var(--mat);
+  color: var(--ink);
+}
+
+.admin-nav-item.active {
+  border-color: var(--gold-line);
+  background: var(--gold-tint);
+  color: var(--gold-deep);
+}
+
+.admin-nav-item svg {
+  flex: none;
+}
+
+.admin-nav-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.admin-nav-text strong {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.admin-nav-text small {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--faint);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.admin-nav-item.active .admin-nav-text small {
+  color: var(--gold-mid);
+}
+
+/* 待开通账号数：不点进「用户」也知道有事要处理。 */
+.admin-nav-badge {
+  flex: none;
+  margin-left: auto;
+  min-width: 19px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--warn);
+  color: #fff;
+  font-size: 11px;
+  font-style: normal;
+  text-align: center;
+}
+
 .admin-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -3049,6 +3140,7 @@ a.stage-tool {
 .admin-two {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  align-items: start;
   gap: 22px;
 }
 
@@ -3216,6 +3308,10 @@ a.stage-tool {
   flex: 3 1 320px;
 }
 
+.admin-provider-key {
+  flex: 2 1 280px;
+}
+
 .admin-provider .field span {
   display: flex;
   align-items: center;
@@ -3238,6 +3334,12 @@ a.stage-tool {
   font: inherit;
   font-family: var(--mono);
   font-size: 12.5px;
+}
+
+.admin-provider-key small {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 .admin-provider-actions {
@@ -3487,6 +3589,31 @@ a.stage-tool {
 .billing-admin-list {
   display: grid;
   gap: 12px;
+}
+
+/* 「商业化底座」那三条说明：以前挤在半栏里连成一行字，现在一条一张卡。 */
+.admin-stack-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.admin-stack-grid article {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.admin-stack-grid article svg {
+  color: var(--gold-mid);
+}
+
+.admin-stack-grid article span {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
 }
 
 .package-admin-list {
@@ -4475,6 +4602,28 @@ a.stage-tool {
   .editorial-split,
   .admin-two {
     grid-template-columns: 1fr;
+  }
+
+  /* 窄屏放不下侧栏：导航改成顶上一条横向滚动的标签。 */
+  .admin-console {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+
+  .admin-nav {
+    z-index: 3;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 6px;
+  }
+
+  .admin-nav-item {
+    flex: none;
+  }
+
+  .admin-nav-text small {
+    display: none;
   }
 }
 

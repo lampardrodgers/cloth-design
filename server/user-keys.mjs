@@ -124,8 +124,88 @@ export function userApiKey(userId) {
   }
 }
 
+function sharedProviderKeyConfigKey(providerId) {
+  return `imageProviderKey:${providerId}`;
+}
+
+function sharedProviderKeyOverride(providerId) {
+  const id = normalizeProviderId(providerId);
+  const row = sqlite.prepare("SELECT value_json FROM app_config WHERE key = ?").get(sharedProviderKeyConfigKey(id));
+  if (!row?.value_json) return null;
+  try {
+    const parsed = JSON.parse(row.value_json);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function sharedProviderApiKey(providerId) {
+  const override = sharedProviderKeyOverride(providerId);
+  if (!override?.apiKeyEncrypted) return "";
+  try {
+    return decryptApiKey(override.apiKeyEncrypted);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 后台给某条供应商线路配置的共享 Key。
+ * 和用户自备 Key 使用同一套 AES-256-GCM 加密，只回传脱敏提示，绝不回传明文。
+ */
+export function setSharedProviderApiKey(providerId, plain) {
+  const id = normalizeProviderId(providerId, "");
+  if (!id) return { error: "图像供应商不存在。" };
+  const normalized = normalizeApiKey(plain);
+  if (normalized.error) return normalized;
+  const timestamp = nowIso();
+  const value = {
+    apiKeyEncrypted: encryptApiKey(normalized.value),
+    apiKeyHint: apiKeyHint(normalized.value),
+    updatedAt: timestamp,
+  };
+  sqlite
+    .prepare(
+      `INSERT INTO app_config (key, value_json, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+    )
+    .run(sharedProviderKeyConfigKey(id), JSON.stringify(value), timestamp);
+  return sharedProviderApiKeyStatus(id);
+}
+
+/** 清掉后台覆盖值；如果 .env 里还有 Key，会自动回退到 .env。 */
+export function clearSharedProviderApiKey(providerId) {
+  const id = normalizeProviderId(providerId, "");
+  if (!id) return { error: "图像供应商不存在。" };
+  sqlite.prepare("DELETE FROM app_config WHERE key = ?").run(sharedProviderKeyConfigKey(id));
+  return sharedProviderApiKeyStatus(id);
+}
+
+export function sharedProviderApiKeyStatus(providerId = "default") {
+  const id = normalizeProviderId(providerId);
+  const override = sharedProviderKeyOverride(id);
+  const custom = sharedProviderApiKey(id);
+  if (custom) {
+    return {
+      serverKeyConfigured: true,
+      serverKeyHint: override?.apiKeyHint || apiKeyHint(custom),
+      serverKeySource: "admin",
+      serverKeyUpdatedAt: override?.updatedAt || null,
+    };
+  }
+  const envKey = String(process.env[providerKeyEnv(id)] || "").trim();
+  return {
+    serverKeyConfigured: Boolean(envKey),
+    serverKeyHint: envKey ? apiKeyHint(envKey) : null,
+    serverKeySource: envKey ? "env" : "none",
+    serverKeyUpdatedAt: null,
+  };
+}
+
 export function serverApiKey(providerId = "default") {
-  return String(process.env[providerKeyEnv(providerId)] || "").trim();
+  const id = normalizeProviderId(providerId);
+  return sharedProviderApiKey(id) || String(process.env[providerKeyEnv(id)] || "").trim();
 }
 
 /**

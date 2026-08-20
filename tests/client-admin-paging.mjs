@@ -69,13 +69,16 @@ assert(
   "生成审计一行放 3 个，别让右边三分之二空着",
 );
 
-// 积分流水平时不看：收起来放在最底下
+// 积分流水平时不看：收起来，压在「计费」分区最后
 const ledgerAt = admin.indexOf('<Section title="积分流水"');
 assert(ledgerAt > 0, "积分流水版块还在");
 assert(admin.includes('<Section title="积分流水" collapsible defaultOpen={false}'), "积分流水默认收起，点开才显示");
-for (const before of ["生成审计", "存储策略", "系统提示词模板"]) {
+for (const before of ["积分规则", "充值套餐", "支付配置", "支付订单", "支付事件"]) {
   assert(admin.indexOf(`<Section title="${before}"`) < ledgerAt, `积分流水要排在「${before}」后面`);
 }
+const billingAt = admin.indexOf('{tab === "billing" ? (');
+const afterBillingAt = admin.indexOf('{tab === "storage" ? (');
+assert(billingAt > 0 && billingAt < ledgerAt && ledgerAt < afterBillingAt, "积分流水归「计费」分区，且是这一分区的最后一块");
 
 const ui = await fs.readFile("src/components/ui.tsx", "utf8");
 assert(ui.includes("collapsible = false") && ui.includes('aria-expanded={open}'), "Section 要支持折叠且对读屏可见");

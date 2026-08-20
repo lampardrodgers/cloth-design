@@ -17,7 +17,7 @@ import { migrateWorkflowDatabase, registerWorkflowRoutes } from "./workflows.mjs
 import { migrateShortVideoDatabase, registerShortVideoRoutes, resumeShortVideoPolling } from "./shortvideo.mjs";
 import { migrateSeedanceDatabase, registerSeedanceRoutes, resumeSeedancePolling } from "./seedance.mjs";
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
-import { resolveProviderApiKey } from "./user-keys.mjs";
+import { resolveProviderApiKey, serverApiKey } from "./user-keys.mjs";
 import { clampResolution, imageApiUrl, imageProviderSettings, imageProviderSettingsList, normalizeResolution } from "./provider-config.mjs";
 import { SERVER_RETENTION_DAYS, autoArchiveTaskResults, scheduleStorageMaintenance } from "./storage.mjs";
 
@@ -78,10 +78,10 @@ app.post("/api/payments/wechat/notify", express.raw({ type: "application/json", 
 app.use(express.json({ limit: "25mb" }));
 
 function hasServerImageKey() {
-  return imageProviderSettingsList().some((provider) => Boolean(process.env[provider.id === "apimart" ? "APIMART_API_KEY" : "OPENAI_API_KEY"]?.trim()));
+  return imageProviderSettingsList().some((provider) => Boolean(serverApiKey(provider.id)));
 }
 
-/** 有没有可用的 Key：账号自备的也算。没传 apiKey 时只看服务端 .env。 */
+/** 有没有可用的 Key：账号自备、后台共享和 .env 任一存在都算。 */
 function isDemoMode(apiKey) {
   const ready = apiKey === undefined ? hasServerImageKey() : Boolean(String(apiKey || "").trim());
   return process.env.OPENAI_DEMO_MODE === "true" || !ready;

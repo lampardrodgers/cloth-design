@@ -11,6 +11,7 @@ import {
   adjustAdminCredits,
   archiveAllGenerationResults,
   archiveGenerationResult,
+  clearImageProviderApiKey,
   clearMyApiKey,
   createAdminUser,
   resetAdminUserPassword,
@@ -1242,6 +1243,14 @@ function App() {
                 await loadAdminOverview();
               } catch (error) {
                 return error instanceof Error ? error.message : "恢复默认失败";
+              }
+            }}
+            onClearImageProviderApiKey={async (providerId) => {
+              try {
+                await clearImageProviderApiKey(providerId);
+                await loadAdminOverview();
+              } catch (error) {
+                return error instanceof Error ? error.message : "清除共享 Key 失败";
               }
             }}
             onTestImageProvider={async (providerId) => {
