@@ -59,13 +59,29 @@ interface UnsyncedPreferences {
   patch: Record<string, unknown>;
 }
 
-function readUnsyncedPreferences(now = Date.now()): Record<string, UnsyncedPreferences> {
+function splitUnsyncedPreferences(now = Date.now()) {
   const stored = readDurableState<Record<string, UnsyncedPreferences>>(UNSYNCED_PREFERENCES_KEY, {});
   const live: Record<string, UnsyncedPreferences> = {};
+  let expired = 0;
   for (const [accountId, entry] of Object.entries(stored && typeof stored === "object" ? stored : {})) {
     if (entry && typeof entry.patch === "object" && entry.patch && now - Number(entry.at || 0) < UNSYNCED_PREFERENCES_TTL_MS) live[accountId] = entry;
+    else expired += 1;
   }
-  return live;
+  return { live, expired };
+}
+
+function readUnsyncedPreferences(now = Date.now()): Record<string, UnsyncedPreferences> {
+  return splitUnsyncedPreferences(now).live;
+}
+
+/**
+ * 把过了 24 小时的暂存真的从存储里删掉（读的时候只是过滤，不写回；不删的话提示词 / 草稿 / 表单原文会一直留在设备上，
+ * 直到下次恰好有别的写入）。启动补水后、退出时、以及每小时跑一次。返回删掉了几个账号的过期记录。
+ */
+export function pruneUnsyncedPreferences(now = Date.now()): number {
+  const { live, expired } = splitUnsyncedPreferences(now);
+  if (expired) writeDurableState(UNSYNCED_PREFERENCES_KEY, live);
+  return expired;
 }
 
 /** 暂存一批没（还没）推出去的偏好。返回是否写进了 localStorage（false = 只留在内存 / IndexedDB 里）。 */
@@ -312,14 +328,33 @@ export function setStoredStateAccount(accountId: string | null) {
   window.dispatchEvent(new CustomEvent(STORAGE_NAMESPACE_EVENT, { detail: { accountId } }));
 }
 
-export function clearStoredStateAccount(accountId: string | null | undefined) {
+/**
+ * 退出登录：清掉这个账号在 localStorage 和 IndexedDB（简易模式附件等）里的全部键。
+ * IndexedDB 那一半要 await 到事务完成——退出后马上关页也得删完；删失败上报（不吞），返回 false。
+ */
+export async function clearStoredStateAccount(accountId: string | null | undefined): Promise<boolean> {
+  let ok = true;
   try {
     clearAccountStoredState(window.localStorage, accountId);
-  } catch {
+  } catch (error) {
     // Logout must continue even when localStorage is disabled.
+    ok = false;
+    reportClientError({ scope: "storage", message: `退出时清理 localStorage 失败：${error instanceof Error ? error.message : String(error)}`, detail: { accountId } });
   }
   const prefix = accountId ? storedStateKeyForAccount("clothdesign:", accountId) : null;
-  if (prefix) void idbDeletePrefix(prefix).catch(() => undefined);
+  if (prefix) {
+    try {
+      await idbDeletePrefix(prefix);
+    } catch (error) {
+      ok = false;
+      reportClientError({
+        scope: "storage",
+        message: `退出时清理 IndexedDB 里的账号数据失败（附件等可能还留在这台设备上）：${error instanceof Error ? error.message : String(error)}`,
+        detail: { accountId },
+      });
+    }
+  }
+  return ok;
 }
 
 export function readStoredState<T>(key: string, fallback: T): T {

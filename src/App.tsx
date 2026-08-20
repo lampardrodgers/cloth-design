@@ -66,6 +66,7 @@ import {
   activeStorageAccount,
   clearStoredStateAccount,
   flushPreferenceSync,
+  pruneUnsyncedPreferences,
   readStoredState,
   seedAccountPreferences,
   setStoredStateAccount,
@@ -74,7 +75,9 @@ import {
   writeStoredState,
 } from "./lib/storedState";
 import { storedStateKeyForAccount } from "./lib/storageNamespace";
-import { forgetDeletedResults, markDeletedResultsDone, pendingDeletedResultIds, recentlyDeletedResultIds, rememberDeletedResults } from "./lib/deletedResults";
+import { adoptLegacyCanvasStore, purgeCanvasStore } from "./lib/canvasStore";
+import { reportClientError } from "./lib/clientErrors";
+import { forgetDeletedResults, markDeletedResultsDone, pendingDeletedResultIds, pruneDeletedResults, recentlyDeletedResultIds, rememberDeletedResults } from "./lib/deletedResults";
 import { flushDurableWrites, hydrateDurableState } from "./lib/durableState";
 import type {
   CreditPolicy,
@@ -230,6 +233,16 @@ function mergeResults(existing: GeneratedResult[], incoming: GeneratedResult[] =
 const SIGN_OUT_SYNC_TIMEOUT_MS = 6000;
 /** 退出前等 IndexedDB 兜底写入落盘的上限（正常几十毫秒就完）。 */
 const DURABLE_FLUSH_TIMEOUT_MS = 1500;
+/** 退出时等本机账号数据（localStorage + IndexedDB 附件 + 文件夹句柄）清完的上限。 */
+const SIGN_OUT_CLEANUP_TIMEOUT_MS = 3000;
+/** 设备级补偿数据（偏好暂存 / 删除墓碑）过期清理的间隔：页面开着几天不关也会把 24 小时前的真的删掉。 */
+const DEVICE_STATE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+
+/** 过了 TTL 的偏好暂存 / 删除墓碑真的从存储里删掉（读的时候只是过滤）。 */
+function pruneExpiredDeviceState() {
+  pruneUnsyncedPreferences();
+  pruneDeletedResults();
+}
 
 function App() {
   // 自由创作排在导航第一位，登录后也直接落在这里。视图由地址栏路径决定，切视图就是 pushState。
@@ -306,6 +319,8 @@ function App() {
     lastError: null,
   });
   const localFolderRef = useRef<FileSystemDirectoryHandle | null>(null);
+  /** 退出登录后要删画布库的账号（等画布卸载后那次 effect 里删）。 */
+  const canvasPurgeRef = useRef<string | null>(null);
   const localFolderAutoSaveRef = useRef(true);
   const [apiConfig, setApiConfig] = useState<ApiConfig | null>(null);
   const [providerTesting, setProviderTesting] = useState(false);
@@ -486,6 +501,8 @@ function App() {
     try {
       // 上次 localStorage 写不进去时落在 IndexedDB 里的偏好暂存 / 删除墓碑先捞回来，下面的落地 / 过滤 / 补删才看得到。
       const [data] = await Promise.all([fetchMe(), hydrateDurableState()]);
+      // 升级前所有账号共用一座画布库：第一个登录的账号接过来（拷进自己的库、删旧库），要在画布挂载之前做完。
+      await adoptLegacyCanvasStore(data.account.id);
       // 服务端那份偏好先落到这个账号的本地命名空间，再切命名空间渲染，提示词库 / 设置 / 草稿就跨设备一致了。
       seedAccountPreferences(data.account.id, data.preferences);
       setStoredStateAccount(data.account.id);
@@ -519,6 +536,13 @@ function App() {
 
   useEffect(() => {
     void loadAccount();
+  }, []);
+
+  // 过期的偏好暂存 / 墓碑：补水完先清一次（不管登没登录），之后每小时一次
+  useEffect(() => {
+    void hydrateDurableState().then(pruneExpiredDeviceState);
+    const timer = window.setInterval(pruneExpiredDeviceState, DEVICE_STATE_PRUNE_INTERVAL_MS);
+    return () => window.clearInterval(timer);
   }, []);
 
   // 会话过期 / 账号被锁：任何一个请求撞上都统一回登录页，不再各自弹「请求失败: 401」。
@@ -980,7 +1004,27 @@ function App() {
     // 暂存 / 墓碑若是退到了 IndexedDB（localStorage 写不进去），等它落盘再退——退完马上关页也不丢。
     await Promise.race([flushDurableWrites(), new Promise<void>((resolve) => window.setTimeout(resolve, DURABLE_FLUSH_TIMEOUT_MS))]);
     await Promise.all([signOut().catch(() => undefined), endDebugSession().catch(() => undefined)]);
-    clearStoredStateAccount(signedOutAccountId);
+    // 这个账号在本机的数据全清：localStorage 命名空间、IndexedDB 里的附件、本地文件夹句柄——等到删完（有上限）再切页，
+    // 退出后马上关页也不会留下半截；删失败 / 超时上报，不再静默吞掉。
+    const cleanupTimeout = new Promise<null>((resolve) => window.setTimeout(() => resolve(null), SIGN_OUT_CLEANUP_TIMEOUT_MS));
+    const cleanup = Promise.all([clearStoredStateAccount(signedOutAccountId), forgetLocalFolder(signedOutAccountId)]).then(
+      ([stateCleared, folderCleared]) => stateCleared && folderCleared,
+    );
+    const cleaned = await Promise.race([cleanup, cleanupTimeout]);
+    if (cleaned === null) {
+      reportClientError({
+        scope: "storage",
+        message: `退出时本机数据清理没在 ${SIGN_OUT_CLEANUP_TIMEOUT_MS / 1000} 秒内完成（IndexedDB 可能被别的标签页占着），先退出，清理在后台继续`,
+        detail: { accountId: signedOutAccountId },
+      });
+    }
+    localFolderRef.current = null;
+    setLocalFolderHandle(null);
+    setLocalFolderPermission(null);
+    setLocalFolderStats({ savedCount: 0, lastSavedPath: null, lastError: null });
+    // 画布库（tldraw 的 IndexedDB）要等画布组件卸载、tldraw 关掉连接之后才删得掉：记下来，切到登录页的那次 effect 里删。
+    canvasPurgeRef.current = signedOutAccountId ?? null;
+    pruneExpiredDeviceState();
     setStoredStateAccount(null);
     setCurrentUser(null);
     setDebugUnlimited(false);
@@ -1129,9 +1173,14 @@ function App() {
     localFolderAutoSaveRef.current = localFolderPolicy.autoSave;
   }, [localFolderPolicy.autoSave]);
 
+  // 句柄按账号存：换了账号（登录 / 切号）就重新读这个账号的，别让上一个账号选的目录留在内存里继续接成片。
   useEffect(() => {
+    localFolderRef.current = null;
+    setLocalFolderHandle(null);
+    setLocalFolderPermission(null);
+    if (!currentUserId) return;
     let cancelled = false;
-    void loadSavedFolder().then(async (handle) => {
+    void loadSavedFolder(currentUserId).then(async (handle) => {
       if (cancelled || !handle) return;
       localFolderRef.current = handle;
       setLocalFolderHandle(handle);
@@ -1140,7 +1189,22 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [currentUserId]);
+
+  // 退出登录：画布组件已经卸载、tldraw 关了连接，这时才删得掉这个账号的画布库。
+  useEffect(() => {
+    if (currentUserId || !canvasPurgeRef.current) return;
+    const accountId = canvasPurgeRef.current;
+    canvasPurgeRef.current = null;
+    void purgeCanvasStore(accountId).then((purged) => {
+      if (purged) return;
+      reportClientError({
+        scope: "canvas",
+        message: "退出时没能删掉这个账号的画布库（可能别的标签页还开着画布），它只对这个账号可见，下次退出再删",
+        detail: { accountId },
+      });
+    });
+  }, [currentUserId]);
 
   const handlePickFolder = async (): Promise<string | void> => {
     try {
@@ -1150,7 +1214,8 @@ function App() {
         setLocalFolderPermission(permission);
         if (permission === "granted") return;
       }
-      const handle = await pickLocalFolder();
+      if (!currentUserId) return "请先登录。";
+      const handle = await pickLocalFolder(currentUserId);
       if (!handle) return;
       localFolderRef.current = handle;
       setLocalFolderHandle(handle);
@@ -1162,7 +1227,7 @@ function App() {
   };
 
   const handleForgetFolder = async () => {
-    await forgetLocalFolder();
+    await forgetLocalFolder(currentUserId);
     localFolderRef.current = null;
     setLocalFolderHandle(null);
     setLocalFolderPermission(null);
@@ -1434,6 +1499,7 @@ function App() {
     if (view === "free") {
       return (
         <FreeStudio
+          accountId={currentUser.id}
           results={visibleResults.filter((result) => result.mode === "free")}
           submissions={submissions}
           credits={unlimitedCredits ? Number.MAX_SAFE_INTEGER : currentUser.credits}

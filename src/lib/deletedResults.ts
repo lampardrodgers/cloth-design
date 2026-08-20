@@ -23,15 +23,31 @@ interface Tombstone {
   pending?: boolean;
 }
 
-function readAll(now = Date.now()): Record<string, Tombstone[]> {
+function splitAll(now = Date.now()) {
   const stored = readDurableState<Record<string, Tombstone[]>>(TOMBSTONE_KEY, {});
   const live: Record<string, Tombstone[]> = {};
+  let expired = 0;
   for (const [accountId, items] of Object.entries(stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {})) {
-    if (!Array.isArray(items)) continue;
+    if (!Array.isArray(items)) {
+      expired += 1;
+      continue;
+    }
     const kept = items.filter((item) => item && typeof item.id === "string" && now - Number(item.at || 0) < (item.pending ? PENDING_TTL_MS : DONE_TTL_MS));
+    expired += items.length - kept.length;
     if (kept.length) live[accountId] = kept;
   }
-  return live;
+  return { live, expired };
+}
+
+function readAll(now = Date.now()): Record<string, Tombstone[]> {
+  return splitAll(now).live;
+}
+
+/** 把过期的墓碑真的从存储里删掉（读时只过滤不写回）。启动补水后、退出时、每小时跑一次。返回删掉的条数。 */
+export function pruneDeletedResults(now = Date.now()): number {
+  const { live, expired } = splitAll(now);
+  if (expired) writeDurableState(TOMBSTONE_KEY, live);
+  return expired;
 }
 
 /** 返回是否写进了 localStorage（false = 只留在内存 / IndexedDB 里，已上报）。 */

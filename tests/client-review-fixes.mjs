@@ -14,6 +14,8 @@
 //    创作台过期成片的放大 / 下载 / 缩略胶片也收掉。
 // 8) 第五轮补漏：durableState 两边都带时间戳、补水时新的赢（旧 IndexedDB 副本不能盖掉新 localStorage）、副本确认删掉才清 shadow、
 //    IndexedDB 写失败上报且可等（退出前等落盘）；登录补推的偏好日志留到服务端确认才划掉；账户页 / 后台审计的过期成片不拉 404。
+// 9) 第六轮补漏：画布库和本地文件夹句柄按账号分开存（账号 B 看不到 / 接不到账号 A 的），退出时清掉；升级前共用的那份由
+//    升级后第一个登录的账号接管；退出时 IndexedDB 附件删除要等完、失败上报；偏好暂存 / 墓碑过了 TTL 真的从存储里删掉。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -145,6 +147,24 @@ assert(accountPanel.includes('result.storageStatus === "expired" ? (') && accoun
 assert(adminPanel.includes('result.storageStatus === "expired" ? (') && adminPanel.includes('className="generation-history-expired"'), "后台生成审计的过期成片不拉 404");
 assert(styles.includes(".generation-history-list .generation-history-expired"), "已清理占位要有样式");
 
+/* ── 第六轮补漏的静态检查 ─────────────────────────────────────────────────── */
+const canvasStore = await fs.readFile("src/lib/canvasStore.ts", "utf8");
+assert(canvasStore.includes("export function canvasPersistenceKey(accountId: string)") && canvasStore.includes("encodeURIComponent(accountId.trim())"), "画布 persistenceKey 要带账号 id");
+assert(canvasStore.includes("export async function adoptLegacyCanvasStore(") && canvasStore.includes("export function purgeCanvasStore("), "升级前共用的画布库要能接管；退出要能删这个账号的画布库");
+assert(canvas.includes("persistenceKey={canvasPersistenceKey(accountId)}") && canvas.includes("key={`${accountId}:${mountKey}`}") && !canvas.includes("CANVAS_PERSISTENCE_KEY"), "画布按账号分库，换账号重挂");
+assert(freeStudio.includes("accountId={accountId}") && freeStudio.includes("await resetCanvasStore(accountId);"), "FreeStudio 把账号传给画布，清库也按账号清");
+const localFolder = await fs.readFile("src/lib/localFolder.ts", "utf8");
+assert(localFolder.includes("function handleKey(accountId: string)") && localFolder.includes("return `folder:${encodeURIComponent(accountId.trim())}`;"), "本地文件夹句柄按账号存");
+assert(localFolder.includes("export async function loadSavedFolder(accountId: string)") && localFolder.includes("export async function pickLocalFolder(accountId: string)") && localFolder.includes("export async function forgetLocalFolder(accountId: string | null | undefined): Promise<boolean>"), "读 / 选 / 忘句柄都按账号");
+assert(app.includes("void loadSavedFolder(currentUserId).then(") && app.includes("}, [currentUserId]);"), "换账号重新读这个账号的句柄，不是只在 App 挂载时读一次");
+assert(app.includes("Promise.all([clearStoredStateAccount(signedOutAccountId), forgetLocalFolder(signedOutAccountId)])") && app.includes("SIGN_OUT_CLEANUP_TIMEOUT_MS"), "退出时等本机数据（含文件夹句柄）清完，有上限");
+assert(app.includes("canvasPurgeRef.current = signedOutAccountId ?? null;") && app.includes("void purgeCanvasStore(accountId).then((purged) => {"), "退出后（画布卸载了）删这个账号的画布库，删不掉上报");
+assert(app.includes("await adoptLegacyCanvasStore(data.account.id);"), "登录时（画布挂载前）接管升级前共用的画布库");
+assert(storedState.includes("export async function clearStoredStateAccount(accountId: string | null | undefined): Promise<boolean>") && storedState.includes("await idbDeletePrefix(prefix);") && storedState.includes("退出时清理 IndexedDB 里的账号数据失败"), "退出清 IndexedDB 要 await 并上报失败，不再 fire-and-forget");
+assert(storedState.includes("export function pruneUnsyncedPreferences(") && storedState.includes("if (expired) writeDurableState(UNSYNCED_PREFERENCES_KEY, live);"), "过期的偏好暂存要真的写回删掉");
+assert(deletedResults.includes("export function pruneDeletedResults(") && deletedResults.includes("if (expired) writeDurableState(TOMBSTONE_KEY, live);"), "过期的墓碑要真的写回删掉");
+assert(app.includes("function pruneExpiredDeviceState()") && app.includes("window.setInterval(pruneExpiredDeviceState, DEVICE_STATE_PRUNE_INTERVAL_MS)") && app.includes("void hydrateDurableState().then(pruneExpiredDeviceState);"), "启动补水后、退出时、每小时清一次过期的补偿数据");
+
 /* ── 真浏览器：地址栏视图 / 软删除撤销 / 会话失效 / 功能中心保活 ─────────── */
 function waitForOutput(child, pattern) {
   return new Promise((resolve, reject) => {
@@ -189,6 +209,7 @@ const appProcess = spawn(process.execPath, ["server/index.mjs"], {
     OPENAI_DEMO_MODE: "true",
     PAYMENT_DEMO_MODE: "true",
     ALLOW_PAYMENT_DEMO_API: "true",
+    SIGNUP_APPROVAL: "false", // 第二个账号（B）注册即用，不用等管理员开通
   },
 });
 
@@ -808,6 +829,149 @@ try {
   assert.equal(netFailFetches, 2, `网络抖动先重试一次、再不行就报错（实际拉了 ${netFailFetches} 次）`);
   assert.equal(await page.locator(".tl-canvas img").count(), 0, "拉不到的成片不能按服务器地址放进画布");
   await page.unroute(`**${netFailPath}`);
+
+  /* 画布库 / 本地文件夹句柄按账号分开存，退出时清掉；升级前共用的那份由升级后第一个登录的账号接管 */
+  const canvasDbName = (id) => `TLDRAW_DOCUMENT_v2clothdesign-free-canvas:${encodeURIComponent(id)}`;
+  const legacyCanvasDb = "TLDRAW_DOCUMENT_v2clothdesign-free-canvas";
+  const listDbs = () => page.evaluate(async () => (await indexedDB.databases()).map((db) => db.name));
+  const waitForDb = (name, present) =>
+    page.waitForFunction(
+      async ({ name, present }) => (await indexedDB.databases()).some((db) => db.name === name) === present,
+      { name, present },
+      { timeout: 10000 },
+    );
+  // 句柄库直接读写（headless 里弹不了目录选择框；App 只用 handle.name 和权限查询，没有 queryPermission 就当 granted）
+  const folderHandles = (op, key, value) =>
+    page.evaluate(
+      async ({ op, key, value }) => {
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open("clothdesign-local-folder", 1);
+          request.onupgradeneeded = () => {
+            if (!request.result.objectStoreNames.contains("handles")) request.result.createObjectStore("handles");
+          };
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        const result = await new Promise((resolve, reject) => {
+          const tx = db.transaction("handles", op === "keys" ? "readonly" : "readwrite");
+          const store = tx.objectStore("handles");
+          const request = op === "keys" ? store.getAllKeys() : op === "set" ? store.put(value, key) : store.delete(key);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        db.close();
+        return result;
+      },
+      { op, key, value },
+    );
+  const folderApi = await page.evaluate(() => typeof window.showDirectoryPicker === "function" && window.isSecureContext);
+  assert(folderApi, "这套用例要在支持 File System Access API 的 Chromium 里跑");
+
+  // 刚才画布开着：库名里得带账号 id，不能再是升级前共用的那个
+  await waitForDb(canvasDbName(accountId), true);
+  assert(!(await listDbs()).includes(legacyCanvasDb), "不能再往升级前共用的画布库里写");
+  // 给 A 种一个「已选的本地文件夹」
+  await folderHandles("set", `folder:${encodeURIComponent(accountId)}`, { kind: "directory", name: "folder-of-a" });
+  await page.goto(`${baseUrl}/storage`, { waitUntil: "networkidle" });
+  await page.locator(".storage-folder-name").waitFor({ state: "visible", timeout: 15000 });
+  await page.waitForFunction(() => document.querySelector(".storage-folder-name")?.textContent?.includes("folder-of-a"), null, { timeout: 10000 });
+
+  // A 退出：A 的画布库、文件夹句柄都要清掉
+  await page.locator(".signout-button").click();
+  await page.locator("#auth-email").waitFor({ state: "visible", timeout: 20000 });
+  await waitForDb(canvasDbName(accountId), false);
+  assert(!(await folderHandles("keys")).includes(`folder:${encodeURIComponent(accountId)}`), "退出要清掉这个账号的文件夹句柄");
+
+  // 种一份「升级前共用」的旧数据：旧画布库（session_state 里放个标记，records 留空 tldraw 才不会当坏库）+ 旧句柄键
+  await page.evaluate(async (name) => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(name, 4);
+      request.onupgradeneeded = () => {
+        for (const table of ["records", "schema", "session_state", "assets"]) {
+          if (!request.result.objectStoreNames.contains(table)) request.result.createObjectStore(table);
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction("session_state", "readwrite");
+      tx.objectStore("session_state").put({ marker: "legacy-canvas" }, "legacy-marker");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  }, legacyCanvasDb);
+  await folderHandles("set", "folder", { kind: "directory", name: "legacy-folder" });
+
+  // 账号 B 登录：接管旧画布库和旧句柄（整库搬到自己名下、旧的删掉），而不是和 A 共用
+  await page.locator("#auth-tab-signup").click();
+  await page.locator("input[autocomplete='name']").fill("Review Fixes B");
+  await page.locator("#auth-email").fill("review-fixes-b@example.test");
+  await page.locator("input[autocomplete='new-password']").fill("clothdesign123");
+  await page.getByRole("button", { name: "创建账号" }).click();
+  await page.locator(".rail-nav").waitFor({ state: "visible", timeout: 15000 });
+  const accountIdB = await page.evaluate(() => localStorage.getItem("clothdesign:active-account"));
+  assert(accountIdB && accountIdB !== accountId, "B 是另一个账号");
+  await waitForDb(legacyCanvasDb, false);
+  await waitForDb(canvasDbName(accountIdB), true);
+  const adoptedMarker = await page.evaluate(async (name) => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const value = await new Promise((resolve, reject) => {
+      const request = db.transaction("session_state", "readonly").objectStore("session_state").get("legacy-marker");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return value;
+  }, canvasDbName(accountIdB));
+  assert.equal(adoptedMarker?.marker, "legacy-canvas", "旧画布库的内容要整库搬进接管账号的库");
+  await page.goto(`${baseUrl}/storage`, { waitUntil: "networkidle" });
+  await page.locator(".storage-folder-name").waitFor({ state: "visible", timeout: 15000 });
+  await page.waitForFunction(() => document.querySelector(".storage-folder-name")?.textContent?.includes("legacy-folder"), null, { timeout: 10000 });
+  const folderKeys = await folderHandles("keys");
+  assert(folderKeys.includes(`folder:${encodeURIComponent(accountIdB)}`) && !folderKeys.includes("folder"), `旧句柄搬到 B 名下、旧键删掉（实际 ${JSON.stringify(folderKeys)}）`);
+  assert(!folderKeys.includes(`folder:${encodeURIComponent(accountId)}`), "A 的句柄退出时已经清了，不能又冒出来");
+
+  // B 开画布：用的是 B 自己的库，能正常起来
+  await page.goto(`${baseUrl}/free`, { waitUntil: "networkidle" });
+  await page.getByText("ImageDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByRole("button", { name: "画布", exact: true }).click();
+  await page.locator(".tl-container").waitFor({ state: "visible", timeout: 60000 });
+  await page.waitForTimeout(800);
+  assert((await listDbs()).includes(canvasDbName(accountIdB)) && !(await listDbs()).includes(canvasDbName(accountId)), "画布开着的是 B 的库，A 的库没有复活");
+
+  // B 退出：B 的也清掉
+  await page.locator(".signout-button").click();
+  await page.locator("#auth-email").waitFor({ state: "visible", timeout: 20000 });
+  await waitForDb(canvasDbName(accountIdB), false);
+  assert(!(await folderHandles("keys")).includes(`folder:${encodeURIComponent(accountIdB)}`), "退出要清掉 B 的文件夹句柄");
+
+  /* 偏好暂存 / 墓碑过了 TTL 要真的从存储里删掉，不是只在读的时候过滤 */
+  await page.evaluate(({ a, b }) => {
+    const old = Date.now() - 25 * 60 * 60 * 1000;
+    localStorage.setItem("clothdesign:unsynced-preferences", JSON.stringify({ $durable: 1, at: Date.now(), value: { [a]: { at: old, patch: { "clothdesign:free:prompt": "STALE-PROMPT" } }, [b]: { at: Date.now(), patch: { "clothdesign:railCollapsed": true } } } }));
+    localStorage.setItem("clothdesign:deleted-results", JSON.stringify({ $durable: 1, at: Date.now(), value: { [a]: [{ id: "old-done", at: old }, { id: "fresh-pending", at: Date.now(), pending: true }] } }));
+  }, { a: accountId, b: accountIdB });
+  await page.reload({ waitUntil: "networkidle" });
+  await page.locator("#auth-email").waitFor({ state: "visible", timeout: 20000 });
+  await page.waitForFunction(
+    ({ a }) => {
+      const raw = localStorage.getItem("clothdesign:unsynced-preferences") || "";
+      const tombstones = localStorage.getItem("clothdesign:deleted-results") || "";
+      return !raw.includes("STALE-PROMPT") && !tombstones.includes("old-done") && !(JSON.parse(raw).value || {})[a];
+    },
+    { a: accountId },
+    { timeout: 10000 },
+  );
+  const prunedStash = await page.evaluate(() => window.__readDurable("clothdesign:unsynced-preferences"));
+  const prunedTombstones = await page.evaluate(() => window.__readDurable("clothdesign:deleted-results"));
+  assert(prunedStash[accountIdB]?.patch?.["clothdesign:railCollapsed"] === true, "没过期的暂存要留着");
+  assert.deepEqual(prunedTombstones[accountId]?.map((item) => item.id), ["fresh-pending"], "没过期的 pending 墓碑要留着，过期的真的删掉");
 
   console.log(JSON.stringify({ checks: "passed", deleteCalls, generateRequests: generateBodies.length, preferencePuts: preferencePuts.length, signOutPuts: signOutPuts.length, replayDeleteCalls, netFailFetches }, null, 2));
 } finally {

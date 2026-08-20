@@ -45,6 +45,8 @@ export interface FreeGenerationInput {
 export type FreeLayout = "simple" | "canvas";
 
 interface FreeStudioProps {
+  /** 当前账号：画布库按账号分开存。 */
+  accountId: string;
   results: GeneratedResult[];
   /** 每次提交的现场存档，按 taskId 对上成片。 */
   submissions: SubmissionRecord[];
@@ -70,6 +72,7 @@ const freeMode = generationModes.find((mode) => mode.id === "free") ?? generatio
  * - 画布：tldraw 无限画布，AI 画框就地生成、批注驱动改图。
  */
 export function FreeStudio({
+  accountId,
   results,
   submissions,
   credits,
@@ -289,7 +292,7 @@ export function FreeStudio({
           <ErrorBoundary
             scope="canvas"
             title="画布没能打开"
-            hint="画布的内容存在这台电脑的浏览器里，刷新不会丢。实在起不来可以清掉本机画布内容重来。"
+            hint="画布的内容存在这台电脑的浏览器里，刷新不会丢（退出登录会一起清掉）。实在起不来可以清掉本机画布内容重来。"
             actions={() => (
               <>
                 <button type="button" className="btn btn-secondary" onClick={() => onLayoutChange("simple")}>
@@ -299,7 +302,7 @@ export function FreeStudio({
                   type="button"
                   className="btn btn-danger"
                   onClick={async () => {
-                    await resetCanvasStore();
+                    await resetCanvasStore(accountId);
                     window.location.reload();
                   }}
                 >
@@ -317,6 +320,7 @@ export function FreeStudio({
               }
             >
               <CanvasBoard
+                accountId={accountId}
                 costFor={canvasCostFor}
                 credits={credits}
                 results={results}

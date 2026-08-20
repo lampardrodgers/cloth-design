@@ -52,7 +52,7 @@ import {
 import { getAssetUrlsByImport } from "@tldraw/assets/imports.vite";
 import "tldraw/tldraw.css";
 import { ratioOptions } from "../data/catalog";
-import { CANVAS_PERSISTENCE_KEY } from "../lib/canvasStore";
+import { canvasPersistenceKey } from "../lib/canvasStore";
 import { reportClientError } from "../lib/clientErrors";
 import { clipboardHasText, clipboardImageFiles } from "../lib/clipboardImages";
 import {
@@ -66,7 +66,6 @@ import { isPlaceholderImage } from "../lib/providerMode";
 import type { AttachmentUsage, FreeAttachment, GeneratedResult, PendingCanvasImage } from "../types";
 
 const assetUrls = getAssetUrlsByImport();
-const PERSISTENCE_KEY = CANVAS_PERSISTENCE_KEY;
 const AI_FRAME_TYPE = "ai-frame";
 const AI_FRAME_TOOL_ID = "ai-frame-tool";
 const ANNOTATION_TOOL_ID = "annotation";
@@ -2070,6 +2069,8 @@ function useCanvasWatchdog(shellRef: React.RefObject<HTMLDivElement | null>, onR
 }
 
 interface CanvasBoardProps {
+  /** 当前账号：画布内容按账号分库存在 IndexedDB 里，换账号就换库。 */
+  accountId: string;
   costFor: (referenceCount: number) => number;
   credits: number;
   results: GeneratedResult[];
@@ -2081,6 +2082,7 @@ interface CanvasBoardProps {
 }
 
 export function CanvasBoard({
+  accountId,
   costFor,
   credits,
   results,
@@ -2194,8 +2196,8 @@ export function CanvasBoard({
           <CanvasOverlayPropsContext.Provider value={overlayProps}>
           <div className="canvas-shell" ref={shellRef}>
             <Tldraw
-              key={mountKey}
-              persistenceKey={PERSISTENCE_KEY}
+              key={`${accountId}:${mountKey}`}
+              persistenceKey={canvasPersistenceKey(accountId)}
               options={editorOptions}
               assetUrls={assetUrls}
               shapeUtils={shapeUtils}

@@ -1,12 +1,20 @@
 /**
  * 「本地文件夹」：用浏览器的 File System Access API 把成片直接写进用户电脑上选定的目录。
- * 目录句柄存在 IndexedDB 里，下次打开同一个浏览器还在（跟着浏览器走，不跟账号走）；
+ * 目录句柄存在 IndexedDB 里、按账号分键：账号 B 登录不会接着往账号 A 选的目录里自动写成片；
+ * 退出登录时这个账号的句柄一起清掉（和其它本地数据「退出即清」一个口径），下次登录要重新选。
  * 权限可能要重新点一次确认。目前只有 Chrome / Edge 支持，Safari / Firefox 走普通下载。
+ *
+ * 升级前句柄是所有账号共用的一个键（`folder`）：升级后第一个登录的账号接管它（搬到自己的键下、删掉旧键），只接一次。
  */
 
 const DB_NAME = "clothdesign-local-folder";
 const STORE = "handles";
-const KEY = "folder";
+/** 升级前共用的键。 */
+const LEGACY_KEY = "folder";
+
+function handleKey(accountId: string) {
+  return `folder:${encodeURIComponent(accountId.trim())}`;
+}
 
 type PermissionState = "granted" | "denied" | "prompt";
 
@@ -73,12 +81,12 @@ async function idbDelete(key: string) {
   });
 }
 
-/** 弹系统目录选择框；用户取消返回 null。 */
-export async function pickLocalFolder(): Promise<FileSystemDirectoryHandle | null> {
-  if (!localFolderSupported() || !window.showDirectoryPicker) return null;
+/** 弹系统目录选择框，选中的句柄记在这个账号名下；用户取消返回 null。 */
+export async function pickLocalFolder(accountId: string): Promise<FileSystemDirectoryHandle | null> {
+  if (!localFolderSupported() || !window.showDirectoryPicker || !accountId) return null;
   try {
     const handle = await window.showDirectoryPicker({ id: "clothdesign-output", mode: "readwrite" });
-    await idbSet(KEY, handle);
+    await idbSet(handleKey(accountId), handle);
     return handle;
   } catch (error) {
     if ((error as DOMException)?.name === "AbortError") return null;
@@ -86,20 +94,31 @@ export async function pickLocalFolder(): Promise<FileSystemDirectoryHandle | nul
   }
 }
 
-export async function loadSavedFolder(): Promise<FileSystemDirectoryHandle | null> {
-  if (!localFolderSupported()) return null;
+/** 这个账号上次选的目录；没有的话，升级前共用的那个句柄（若还在）由它接管。 */
+export async function loadSavedFolder(accountId: string): Promise<FileSystemDirectoryHandle | null> {
+  if (!localFolderSupported() || !accountId) return null;
   try {
-    return (await idbGet<FileSystemDirectoryHandle>(KEY)) ?? null;
+    const own = await idbGet<FileSystemDirectoryHandle>(handleKey(accountId));
+    if (own) return own;
+    const legacy = await idbGet<FileSystemDirectoryHandle>(LEGACY_KEY);
+    if (!legacy) return null;
+    await idbSet(handleKey(accountId), legacy);
+    await idbDelete(LEGACY_KEY);
+    return legacy;
   } catch {
     return null;
   }
 }
 
-export async function forgetLocalFolder() {
+/** 忘掉这个账号选的目录（用户点「不再存本地」、或退出登录时清理）。返回是否清成功。 */
+export async function forgetLocalFolder(accountId: string | null | undefined): Promise<boolean> {
+  if (!accountId) return true;
   try {
-    await idbDelete(KEY);
+    await idbDelete(handleKey(accountId));
+    return true;
   } catch {
     // IndexedDB 不可用时也没什么可清的
+    return false;
   }
 }
 
