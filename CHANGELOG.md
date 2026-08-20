@@ -1,5 +1,16 @@
 # Changelog
 
+## 未发布
+
+- 第八轮 review 补漏（跨标签竞争与失败恢复）：
+  - 旧画布迁移的归属和阶段移入独立 IndexedDB 控制库，用单个 `readwrite` 事务原子认领；两个标签同时登录不同账号时只会有一个账号接管旧库。清空画布先读取权威归属，非归属账号只清自己的库，不再删除别人的旧库或迁移标记。
+  - tldraw 库存在性不再依赖可能丢写的 localStorage 索引：优先用 `indexedDB.databases()`，不支持时用会主动中止新建事务的只探测 open；探测不确定时保留归属、拒绝接管或删除。
+  - 画布待清状态改成控制库里的账号独立键，消除多标签同时改 localStorage 数组的丢更新；退出时 `await` 标记落盘，localStorage 失败也能由 IndexedDB 在下次启动恢复，成功删除权威标记后才清兼容镜像。
+  - 本地文件夹数据库新增永久 legacy owner 和按账号的待清标记：迁移搬运失败也不会让下一个账号接走旧句柄；“断开”或退出清理失败会保留 marker，启动 / 登录前自动补删。补删遇到 IndexedDB 临时不可用会保留状态并上报，但不阻断正常登录。
+  - 文件夹句柄、权限、保存数量、最近路径和错误都带当前账号归属并在切号首帧隐藏；异步权限查询回来前再次核对账号，旧账号的内存状态不会短暂显示或参与自动保存。“断开”失败时保留界面状态并明确提示，不能再假装已清除。
+  - 退出时写画布待清标记也有超时上限（其余清理本来就有）：先同步写 localStorage 镜像再等 IndexedDB，IndexedDB 卡住不会把「退出」永远挂住，超时会上报并靠镜像在下次启动补删。
+  - 新增 `tests/client-local-persistence-races.mjs`：真实双标签同时认领旧画布、非 owner 重置、无 `indexedDB.databases()` 探测、并发待清标记、localStorage 写失败后关页恢复、文件夹永久 owner 与失败补删；并纳入完整 `test:server`。
+
 ## V0.9.0 - 2026-08-20
 
 - 画布：「放到画布」不再把浮层卸载重挂。以前 `InFrontOfTheCanvas` 写在 `useMemo` 里、依赖 `pendingImages`，每加一张待放图就造一个新组件，tldraw 按组件身份整层重挂，`busyFrameIds` / `consumedRef` 归零——面板按钮重新可点而画框还写着「正在生成…」，能重复提交。现在浮层组件固定，`pendingImages` 走 context。

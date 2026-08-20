@@ -160,7 +160,7 @@ assert(localFolder.includes("function handleKey(accountId: string)") && localFol
 assert(localFolder.includes("export async function loadSavedFolder(accountId: string)") && localFolder.includes("export async function pickLocalFolder(accountId: string)") && localFolder.includes("export async function forgetLocalFolder(accountId: string | null | undefined): Promise<boolean>"), "读 / 选 / 忘句柄都按账号");
 assert(app.includes("void loadSavedFolder(currentUserId).then(") && app.includes("}, [currentUserId]);"), "换账号重新读这个账号的句柄，不是只在 App 挂载时读一次");
 assert(app.includes("Promise.all([clearStoredStateAccount(signedOutAccountId), forgetLocalFolder(signedOutAccountId)])") && app.includes("SIGN_OUT_CLEANUP_TIMEOUT_MS"), "退出时等本机数据（含文件夹句柄）清完，有上限");
-assert(app.includes("markCanvasPurgePending(signedOutAccountId);") && (app.match(/void purgePendingCanvasStores\(\);/g) || []).length >= 2, "退出先持久化记「待清」，画布卸载后那次 effect 里删；启动时也补删");
+assert(app.includes("markCanvasPurgePending(signedOutAccountId),\n      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), SIGN_OUT_CLEANUP_TIMEOUT_MS)),") && app.includes("await Promise.all([purgePendingCanvasStores(), purgePendingLocalFolders()])") && (app.match(/void purgePendingCanvasStores\(\);/g) || []).length >= 2, "退出 await 持久化待清状态，启动 / 登录前同时补删画布和文件夹");
 assert(app.includes("await adoptLegacyCanvasStore(data.account.id);"), "登录时（画布挂载前）接管升级前共用的画布库");
 assert(storedState.includes("export async function clearStoredStateAccount(accountId: string | null | undefined): Promise<boolean>") && storedState.includes("await idbDeletePrefix(prefix);") && storedState.includes("退出时清理 IndexedDB 里的账号数据失败"), "退出清 IndexedDB 要 await 并上报失败，不再 fire-and-forget");
 assert(storedState.includes("export function pruneUnsyncedPreferences(") && storedState.includes("if (expired) writeDurableState(UNSYNCED_PREFERENCES_KEY, live);"), "过期的偏好暂存要真的写回删掉");
@@ -168,14 +168,17 @@ assert(deletedResults.includes("export function pruneDeletedResults(") && delete
 assert(app.includes("function pruneExpiredDeviceState()") && app.includes("window.setInterval(pruneExpiredDeviceState, DEVICE_STATE_PRUNE_INTERVAL_MS)") && app.includes("void hydrateDurableState().then(() => {\n      pruneExpiredDeviceState();"), "启动补水后、退出时、每小时清一次过期的补偿数据");
 
 /* ── 第七轮补漏的静态检查 ─────────────────────────────────────────────────── */
-assert(canvasStore.includes('export const LEGACY_CANVAS_MIGRATION_KEY = "clothdesign:legacy-canvas-migration";') && canvasStore.includes("if (migration && migration.accountId !== accountId) return false;"), "旧画布库接管要有持久化归属：别人认领过的不碰");
-assert(canvasStore.includes("if (!writeMigration(migration)) return false;") && canvasStore.includes('writeMigration({ accountId, stage: "delete" });') && canvasStore.includes("if (!(await deleteDatabase(legacyDatabaseName))) {"), "先认领再拷、拷完记 stage=delete、旧库确认删掉才清标记——删失败不算完");
+assert(canvasStore.includes('const CONTROL_DB_NAME = "clothdesign-canvas-control";') && canvasStore.includes("async function claimLegacyMigration(accountId: string)") && canvasStore.includes("if (migration.accountId !== accountId) return false;"), "旧画布库用 IndexedDB readwrite 事务原子认领：别人认领过的不碰");
+assert(canvasStore.includes('setMigrationStateForOwner(accountId, { accountId, stage: "delete" })') && canvasStore.includes("if (!(await deleteDatabase(legacyDatabaseName))) {"), "拷完先把 stage=delete 落进权威控制库，旧库确认删掉才清标记");
+assert(canvasStore.includes("const mirrorSaved = list.includes(accountId) || writeDurableState(PENDING_CANVAS_PURGE_KEY, [...list, accountId]);\n  let controlSaved = false;"), "待清标记先写同步镜像再等 IndexedDB：退出那步超时了也补得回来");
 assert(canvasStore.includes('export const PENDING_CANVAS_PURGE_KEY = "clothdesign:pending-canvas-purge";') && canvasStore.includes("export function purgePendingCanvasStores()") && canvasStore.includes("unmarkCanvasPurgePending(accountId);"), "待清的画布库持久化记下，删成功才划掉");
 assert(canvasStore.includes("ownsLegacy ? deleteDatabase(legacyDatabaseName) : Promise.resolve(true)"), "归属账号退出时旧库一起删，不留给别的账号接");
-assert(app.includes("await purgePendingCanvasStores();\n      await adoptLegacyCanvasStore(data.account.id);"), "登录挂画布前先补删待清的、再接管旧库");
-assert(localFolder.includes("async function idbTakeHandle(accountKey: string)") && localFolder.includes("store.put(legacy, accountKey);\n        store.delete(LEGACY_KEY);") && !localFolder.includes("await idbSet(handleKey(accountId), legacy);"), "旧句柄接管：写新键 + 删旧键在同一个事务里");
+assert(app.includes("await Promise.all([purgePendingCanvasStores(), purgePendingLocalFolders()]);\n      await adoptLegacyCanvasStore(data.account.id);"), "登录挂画布前先补删待清的、再接管旧库");
+assert(localFolder.includes("async function idbTakeHandle(accountKey: string, ownsLegacy: boolean)") && localFolder.includes("store.put(legacy, accountKey);\n        store.delete(LEGACY_KEY);") && !localFolder.includes("await idbSet(handleKey(accountId), legacy);"), "旧句柄接管：写新键 + 删旧键在同一个事务里");
 assert(localFolder.includes("if (legacy) store.delete(LEGACY_KEY);"), "账号键和旧键同时存在：账号键为准、旧键删掉");
 assert(localFolder.includes("清理本地文件夹句柄失败") && localFolder.includes('import { reportClientError } from "./clientErrors";'), "句柄清理失败要上报，不静默");
+assert(localFolder.includes('const LEGACY_OWNER_KEY = "legacy-owner";') && localFolder.includes("async function claimLegacyOwner(accountKey: string)") && localFolder.includes("export function purgePendingLocalFolders()"), "旧句柄有永久原子归属，删除失败留 pending 并在启动时补清");
+assert(app.includes("localFolderOwnerRef.current === currentUserId") && app.includes("localFolderStats.accountId === currentUserId"), "文件夹句柄和最近保存路径只对所属账号显示 / 使用");
 
 /* ── 真浏览器：地址栏视图 / 软删除撤销 / 会话失效 / 功能中心保活 ─────────── */
 function waitForOutput(child, pattern) {
@@ -857,9 +860,10 @@ try {
     page.evaluate(
       async ({ op, key, value }) => {
         const db = await new Promise((resolve, reject) => {
-          const request = indexedDB.open("clothdesign-local-folder", 1);
+          const request = indexedDB.open("clothdesign-local-folder", 2);
           request.onupgradeneeded = () => {
             if (!request.result.objectStoreNames.contains("handles")) request.result.createObjectStore("handles");
+            if (!request.result.objectStoreNames.contains("control")) request.result.createObjectStore("control");
           };
           request.onsuccess = () => resolve(request.result);
           request.onerror = () => reject(request.error);
@@ -894,6 +898,15 @@ try {
   await waitForDb(canvasDbName(accountId), false);
   assert(!(await folderHandles("keys")).includes(`folder:${encodeURIComponent(accountId)}`), "退出要清掉这个账号的文件夹句柄");
 
+  // 模拟从旧版本首次升级：清掉前面用例已经产生的永久 owner，再种一份升级前共用的数据。
+  await page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const request = indexedDB.deleteDatabase("clothdesign-local-folder");
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      }),
+  );
   // 种一份「升级前共用」的旧数据：旧画布库（session_state 里放个标记，records 留空 tldraw 才不会当坏库）+ 旧句柄键
   await page.evaluate(async (name) => {
     const db = await new Promise((resolve, reject) => {
@@ -1092,6 +1105,14 @@ try {
   await page.waitForFunction(() => JSON.stringify(window.__readDurable("clothdesign:pending-canvas-purge")) === "[]", null, { timeout: 5000 });
 
   // 5) 句柄：账号键和旧键同时存在 → 账号键为准、旧键删掉（同一个事务），旧键不会留给下一个账号接
+  await page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const request = indexedDB.deleteDatabase("clothdesign-local-folder");
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      }),
+  );
   await folderHandles("set", `folder:${encodeURIComponent(accountId)}`, { kind: "directory", name: "own-a" });
   await folderHandles("set", "folder", { kind: "directory", name: "stale-legacy" });
   await signIn("review-fixes@example.test");

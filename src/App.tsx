@@ -49,7 +49,7 @@ import {
   type WebdavSettingsInput,
   setUserShortVideoAccess,
 } from "./lib/api";
-import { folderPermission, forgetLocalFolder, loadSavedFolder, localFolderSupported, pickLocalFolder, saveImageToFolder } from "./lib/localFolder";
+import { folderPermission, forgetLocalFolder, loadSavedFolder, localFolderSupported, pickLocalFolder, purgePendingLocalFolders, saveImageToFolder } from "./lib/localFolder";
 import { outputSizeForRatio } from "./lib/outputSize";
 import { capabilityFromAccount } from "./lib/resolution";
 import { resultFileName } from "./lib/resultFiles";
@@ -313,12 +313,14 @@ function App() {
   const [localFolderPolicy, setLocalFolderPolicy] = useStoredState<LocalFolderPolicy>("clothdesign:localFolder", { autoSave: true });
   const [localFolderHandle, setLocalFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [localFolderPermission, setLocalFolderPermission] = useState<LocalFolderState["permission"]>(null);
-  const [localFolderStats, setLocalFolderStats] = useState<{ savedCount: number; lastSavedPath: string | null; lastError: string | null }>({
+  const [localFolderStats, setLocalFolderStats] = useState<{ accountId: string | null; savedCount: number; lastSavedPath: string | null; lastError: string | null }>({
+    accountId: null,
     savedCount: 0,
     lastSavedPath: null,
     lastError: null,
   });
   const localFolderRef = useRef<FileSystemDirectoryHandle | null>(null);
+  const localFolderOwnerRef = useRef<string | null>(null);
   const localFolderAutoSaveRef = useRef(true);
   const [apiConfig, setApiConfig] = useState<ApiConfig | null>(null);
   const [providerTesting, setProviderTesting] = useState(false);
@@ -499,8 +501,8 @@ function App() {
     try {
       // 上次 localStorage 写不进去时落在 IndexedDB 里的偏好暂存 / 删除墓碑先捞回来，下面的落地 / 过滤 / 补删才看得到。
       const [data] = await Promise.all([fetchMe(), hydrateDurableState()]);
-      // 上次退出时没删成的画布库（退出后马上关页 / 被别的标签页占着）先补删，再接管升级前共用的旧库——都要在画布挂载之前做完。
-      await purgePendingCanvasStores();
+      // 上次退出没删成的画布库 / 文件夹句柄先补删，再接管旧数据——都要在当前账号的本地能力挂载之前做完。
+      await Promise.all([purgePendingCanvasStores(), purgePendingLocalFolders()]);
       await adoptLegacyCanvasStore(data.account.id);
       // 服务端那份偏好先落到这个账号的本地命名空间，再切命名空间渲染，提示词库 / 设置 / 草稿就跨设备一致了。
       seedAccountPreferences(data.account.id, data.preferences);
@@ -537,11 +539,12 @@ function App() {
     void loadAccount();
   }, []);
 
-  // 过期的偏好暂存 / 墓碑：补水完先清一次（不管登没登录），之后每小时一次；上次退出没删成的画布库也在这时补删
+  // 过期的偏好暂存 / 墓碑：补水完先清一次（不管登没登录），之后每小时一次；本机待清的画布 / 文件夹也补删
   useEffect(() => {
     void hydrateDurableState().then(() => {
       pruneExpiredDeviceState();
       void purgePendingCanvasStores();
+      void purgePendingLocalFolders();
     });
     const timer = window.setInterval(pruneExpiredDeviceState, DEVICE_STATE_PRUNE_INTERVAL_MS);
     return () => window.clearInterval(timer);
@@ -1022,12 +1025,28 @@ function App() {
       });
     }
     localFolderRef.current = null;
+    localFolderOwnerRef.current = null;
     setLocalFolderHandle(null);
     setLocalFolderPermission(null);
-    setLocalFolderStats({ savedCount: 0, lastSavedPath: null, lastError: null });
+    setLocalFolderStats({ accountId: null, savedCount: 0, lastSavedPath: null, lastError: null });
     // 画布库（tldraw 的 IndexedDB）要等画布组件卸载、tldraw 关掉连接之后才删得掉：先持久化记成「待清」，切到登录页的那次 effect 里删，
     // 删成功才划掉；退出后马上关页也不怕，下次启动 / 登录挂画布前会补删。
-    markCanvasPurgePending(signedOutAccountId);
+    // 和上面的清理一样有上限：IndexedDB 卡住时不能让退出一直等（本机镜像是同步写的，超时了下次启动也补得回来）。
+    const canvasPurgeMarked = await Promise.race([
+      markCanvasPurgePending(signedOutAccountId),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), SIGN_OUT_CLEANUP_TIMEOUT_MS)),
+    ]);
+    if (canvasPurgeMarked === false) {
+      reportClientError({ scope: "canvas", message: "退出时没能持久化画布待清状态", detail: { accountId: signedOutAccountId } });
+    } else if (canvasPurgeMarked === null) {
+      reportClientError({
+        scope: "canvas",
+        message: `退出时画布待清状态没在 ${SIGN_OUT_CLEANUP_TIMEOUT_MS / 1000} 秒内写进 IndexedDB（可能被别的标签页占着），本机镜像已写，下次启动会补删`,
+        detail: { accountId: signedOutAccountId },
+      });
+    }
+    // 兼容镜像若退到了 durableState 的 IndexedDB，这次写发生在前一个 flush 之后，必须再等一次。
+    await Promise.race([flushDurableWrites(), new Promise<void>((resolve) => window.setTimeout(resolve, DURABLE_FLUSH_TIMEOUT_MS))]);
     pruneExpiredDeviceState();
     setStoredStateAccount(null);
     setCurrentUser(null);
@@ -1180,31 +1199,37 @@ function App() {
   // 句柄按账号存：换了账号（登录 / 切号）就重新读这个账号的，别让上一个账号选的目录留在内存里继续接成片。
   useEffect(() => {
     localFolderRef.current = null;
+    localFolderOwnerRef.current = null;
     setLocalFolderHandle(null);
     setLocalFolderPermission(null);
+    setLocalFolderStats({ accountId: currentUserId, savedCount: 0, lastSavedPath: null, lastError: null });
     if (!currentUserId) return;
     let cancelled = false;
     void loadSavedFolder(currentUserId).then(async (handle) => {
       if (cancelled || !handle) return;
+      const permission = await folderPermission(handle, false);
+      if (cancelled || currentUserRef.current?.id !== currentUserId) return;
       localFolderRef.current = handle;
+      localFolderOwnerRef.current = currentUserId;
       setLocalFolderHandle(handle);
-      setLocalFolderPermission(await folderPermission(handle, false));
+      setLocalFolderPermission(permission);
     });
     return () => {
       cancelled = true;
     };
   }, [currentUserId]);
 
-  // 退出登录：画布组件已经卸载、tldraw 关了连接，这时才删得掉待清的画布库（删不掉的留在列表里并上报，下次再删）。
+  // 退出登录：画布组件已经卸载、tldraw 关了连接，这时才删得掉待清的画布库；文件夹失败项也一起重试。
   useEffect(() => {
     if (currentUserId) return;
     void purgePendingCanvasStores();
+    void purgePendingLocalFolders();
   }, [currentUserId]);
 
   const handlePickFolder = async (): Promise<string | void> => {
     try {
       // 已经选过、只是权限退回 prompt：先试着重新授权，不用再弹选择框
-      if (localFolderRef.current && localFolderPermission !== "granted") {
+      if (localFolderRef.current && localFolderOwnerRef.current === currentUserId && localFolderPermission !== "granted") {
         const permission = await folderPermission(localFolderRef.current, true);
         setLocalFolderPermission(permission);
         if (permission === "granted") return;
@@ -1213,24 +1238,28 @@ function App() {
       const handle = await pickLocalFolder(currentUserId);
       if (!handle) return;
       localFolderRef.current = handle;
+      localFolderOwnerRef.current = currentUserId;
       setLocalFolderHandle(handle);
       setLocalFolderPermission(await folderPermission(handle, true));
-      setLocalFolderStats({ savedCount: 0, lastSavedPath: null, lastError: null });
+      setLocalFolderStats({ accountId: currentUserId, savedCount: 0, lastSavedPath: null, lastError: null });
     } catch (error) {
       return error instanceof Error ? error.message : "选择文件夹失败";
     }
   };
 
-  const handleForgetFolder = async () => {
-    await forgetLocalFolder(currentUserId);
+  const handleForgetFolder = async (): Promise<string | void> => {
+    const cleared = await forgetLocalFolder(currentUserId);
+    if (!cleared) return "没能断开本地文件夹，已记下并会在下次启动时重试。";
     localFolderRef.current = null;
+    localFolderOwnerRef.current = null;
     setLocalFolderHandle(null);
     setLocalFolderPermission(null);
+    setLocalFolderStats({ accountId: currentUserId, savedCount: 0, lastSavedPath: null, lastError: null });
   };
 
   const saveResultLocally = async (result: GeneratedResult): Promise<string | void> => {
     const handle = localFolderRef.current;
-    if (!handle) return "还没有选择本地文件夹。";
+    if (!handle || !currentUserId || localFolderOwnerRef.current !== currentUserId) return "还没有选择本地文件夹。";
     if (result.storageStatus === "expired") return "这张成片的服务器副本已经清理，存不了。";
     try {
       const savedPath = await saveImageToFolder(handle, {
@@ -1239,18 +1268,28 @@ function App() {
         createdAt: result.createdAt,
       });
       setLocalFolderPermission("granted");
-      setLocalFolderStats((current) => ({ savedCount: current.savedCount + 1, lastSavedPath: savedPath, lastError: null }));
+      setLocalFolderStats((current) => ({
+        accountId: currentUserId,
+        savedCount: current.accountId === currentUserId ? current.savedCount + 1 : 1,
+        lastSavedPath: savedPath,
+        lastError: null,
+      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : "写入本地文件夹失败";
       if (/权限/.test(message)) setLocalFolderPermission("prompt");
-      setLocalFolderStats((current) => ({ ...current, lastError: message }));
+      setLocalFolderStats((current) => ({
+        accountId: currentUserId,
+        savedCount: current.accountId === currentUserId ? current.savedCount : 0,
+        lastSavedPath: current.accountId === currentUserId ? current.lastSavedPath : null,
+        lastError: message,
+      }));
       return message;
     }
   };
 
   /** 出图后自动存本地：没选文件夹或没开自动就什么也不做；失败不打断流程，只在文件管理里显示。 */
   const autoSaveResultsLocally = async (items: GeneratedResult[]) => {
-    if (!localFolderRef.current || !localFolderAutoSaveRef.current) return;
+    if (!localFolderRef.current || localFolderOwnerRef.current !== currentUserId || !localFolderAutoSaveRef.current) return;
     for (const item of items) await saveResultLocally(item);
   };
 
@@ -1291,14 +1330,16 @@ function App() {
     }
   };
 
+  const localFolderMatchesAccount = Boolean(currentUserId && localFolderOwnerRef.current === currentUserId);
+  const localFolderStatsMatchAccount = Boolean(currentUserId && localFolderStats.accountId === currentUserId);
   const localFolderState: LocalFolderState = {
     supported: localFolderSupported(),
-    name: localFolderHandle?.name ?? null,
-    permission: localFolderPermission,
+    name: localFolderMatchesAccount ? localFolderHandle?.name ?? null : null,
+    permission: localFolderMatchesAccount ? localFolderPermission : null,
     autoSave: localFolderPolicy.autoSave,
-    savedCount: localFolderStats.savedCount,
-    lastSavedPath: localFolderStats.lastSavedPath,
-    lastError: localFolderStats.lastError,
+    savedCount: localFolderStatsMatchAccount ? localFolderStats.savedCount : 0,
+    lastSavedPath: localFolderStatsMatchAccount ? localFolderStats.lastSavedPath : null,
+    lastError: localFolderStatsMatchAccount ? localFolderStats.lastError : null,
   };
 
   /*

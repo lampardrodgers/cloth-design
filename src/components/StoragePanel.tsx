@@ -38,7 +38,7 @@ interface StoragePanelProps {
   onDelete: (id: string) => Promise<string | void> | void;
   localFolder: LocalFolderState;
   onPickFolder: () => Promise<string | void>;
-  onForgetFolder: () => Promise<void>;
+  onForgetFolder: () => Promise<string | void>;
   onToggleAutoSave: (value: boolean) => void;
   onSaveToFolder: (result: GeneratedResult) => Promise<string | void>;
   onSaveAllToFolder: () => Promise<string | void>;
@@ -207,6 +207,14 @@ export function StoragePanel({
     if (error) setFolderNotice(error);
   };
 
+  const forgetFolder = async () => {
+    setFolderBusy(true);
+    setFolderNotice("");
+    const error = await onForgetFolder();
+    setFolderBusy(false);
+    setFolderNotice(error || "已断开本地文件夹。");
+  };
+
   const saveAllLocal = async () => {
     setFolderBusy(true);
     setFolderNotice("正在写入本地文件夹…");
@@ -295,7 +303,7 @@ export function StoragePanel({
                     {localFolder.name ? (localFolder.permission === "granted" ? "更换文件夹" : "重新授权") : "选择文件夹"}
                   </button>
                   {localFolder.name ? (
-                    <button type="button" className="text-button" onClick={() => void onForgetFolder()} disabled={folderBusy}>
+                    <button type="button" className="text-button" onClick={() => void forgetFolder()} disabled={folderBusy}>
                       断开
                     </button>
                   ) : null}

@@ -31,6 +31,13 @@ registerDurableKey(PENDING_CANVAS_PURGE_KEY);
 const TLDRAW_STORE_PREFIX = "TLDRAW_DOCUMENT_v2";
 const TLDRAW_DB_VERSION = 4;
 const TLDRAW_TABLES = ["records", "schema", "session_state", "assets"] as const;
+// 跨标签共享的控制面：迁移归属和每个账号各自的待清标记都放在独立 IndexedDB 里。
+// IndexedDB 的 readwrite 事务会在同一个 origin 内串行，不能像 localStorage 数组那样互相覆盖。
+const CONTROL_DB_NAME = "clothdesign-canvas-control";
+const CONTROL_DB_VERSION = 1;
+const CONTROL_STORE = "state";
+const MIGRATION_CONTROL_KEY = "legacy-migration";
+const PURGE_CONTROL_PREFIX = "purge:";
 /** 等一座库删掉的上限：别的标签页还开着同一个账号的画布时会一直 blocked，不能让退出 / 登录卡死。 */
 const DELETE_TIMEOUT_MS = 4000;
 
@@ -53,38 +60,233 @@ const accountDatabaseName = (accountId: string) => canvasDatabaseName(canvasPers
 
 /* ── 设备级标记 ─────────────────────────────────────────────────────────── */
 
-function readMigration(): LegacyMigration | null {
-  const value = readDurableState<LegacyMigration | null>(LEGACY_CANVAS_MIGRATION_KEY, null);
-  if (!value || typeof value !== "object" || typeof value.accountId !== "string" || !value.accountId) return null;
-  return value.stage === "copy" || value.stage === "delete" ? value : null;
+function asMigration(value: unknown): LegacyMigration | null {
+  if (!value || typeof value !== "object" || typeof (value as LegacyMigration).accountId !== "string" || !(value as LegacyMigration).accountId) return null;
+  return (value as LegacyMigration).stage === "copy" || (value as LegacyMigration).stage === "delete" ? (value as LegacyMigration) : null;
 }
 
-function writeMigration(value: LegacyMigration | null) {
+function readMigrationMirror(): LegacyMigration | null {
+  const value = readDurableState<LegacyMigration | null>(LEGACY_CANVAS_MIGRATION_KEY, null);
+  return asMigration(value);
+}
+
+function writeMigrationMirror(value: LegacyMigration | null) {
   return writeDurableState(LEGACY_CANVAS_MIGRATION_KEY, value);
 }
 
-function readPendingPurges(): string[] {
+function readPendingPurgeMirror(): string[] {
   const value = readDurableState<unknown>(PENDING_CANVAS_PURGE_KEY, []);
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
 
-/** 退出前记下「这个账号的画布库待删」；删成功（purgeCanvasStore）才划掉。返回是否写进了 localStorage。 */
-export function markCanvasPurgePending(accountId: string | null | undefined): boolean {
+function purgeControlKey(accountId: string) {
+  return PURGE_CONTROL_PREFIX + encodeURIComponent(accountId);
+}
+
+function openControlDatabase() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = window.indexedDB.open(CONTROL_DB_NAME, CONTROL_DB_VERSION);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(CONTROL_STORE)) request.result.createObjectStore(CONTROL_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("画布控制库打不开"));
+    request.onblocked = () => reject(new Error("画布控制库被其它标签页占用"));
+  });
+}
+
+async function readControlValue<T>(key: string): Promise<T | undefined> {
+  const db = await openControlDatabase();
+  return new Promise((resolve, reject) => {
+    let value: T | undefined;
+    const tx = db.transaction(CONTROL_STORE, "readonly");
+    const request = tx.objectStore(CONTROL_STORE).get(key);
+    request.onsuccess = () => {
+      value = request.result as T | undefined;
+    };
+    request.onerror = () => reject(request.error ?? new Error("读取画布控制状态失败"));
+    tx.oncomplete = () => {
+      db.close();
+      resolve(value);
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error ?? new Error("读取画布控制状态失败"));
+    };
+    tx.onabort = tx.onerror;
+  });
+}
+
+async function writeControlValue(key: string, value: unknown): Promise<void> {
+  const db = await openControlDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CONTROL_STORE, "readwrite");
+    tx.objectStore(CONTROL_STORE).put(value, key);
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error ?? new Error("写入画布控制状态失败"));
+    };
+    tx.onabort = tx.onerror;
+  });
+}
+
+async function deleteControlValue(key: string): Promise<void> {
+  const db = await openControlDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CONTROL_STORE, "readwrite");
+    tx.objectStore(CONTROL_STORE).delete(key);
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error ?? new Error("删除画布控制状态失败"));
+    };
+    tx.onabort = tx.onerror;
+  });
+}
+
+/** 用同一个 readwrite 事务认领旧库；不同标签页不可能同时从 null 认领成功。 */
+async function claimLegacyMigration(accountId: string): Promise<LegacyMigration> {
+  const fallback = readMigrationMirror();
+  const db = await openControlDatabase();
+  const migration = await new Promise<LegacyMigration>((resolve, reject) => {
+    let result: LegacyMigration | null = null;
+    const tx = db.transaction(CONTROL_STORE, "readwrite");
+    const store = tx.objectStore(CONTROL_STORE);
+    const request = store.get(MIGRATION_CONTROL_KEY);
+    request.onsuccess = () => {
+      result = asMigration(request.result) ?? fallback ?? { accountId, stage: "copy" };
+      if (!asMigration(request.result)) store.put(result, MIGRATION_CONTROL_KEY);
+    };
+    request.onerror = () => reject(request.error ?? new Error("读取旧画布归属失败"));
+    tx.oncomplete = () => {
+      db.close();
+      resolve(result!);
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error ?? new Error("认领旧画布失败"));
+    };
+    tx.onabort = tx.onerror;
+  });
+  writeMigrationMirror(migration);
+  return migration;
+}
+
+async function readMigrationState(): Promise<LegacyMigration | null> {
+  const stored = asMigration(await readControlValue<unknown>(MIGRATION_CONTROL_KEY));
+  if (stored) {
+    writeMigrationMirror(stored);
+    return stored;
+  }
+  const fallback = readMigrationMirror();
+  if (!fallback) return null;
+  // 把上一版本只存在 durableState 里的 owner 原子地种进新控制库；已有并发 claim 时以控制库为准。
+  return claimLegacyMigration(fallback.accountId);
+}
+
+async function setMigrationStateForOwner(accountId: string, next: LegacyMigration | null): Promise<boolean> {
+  const fallback = readMigrationMirror();
+  const db = await openControlDatabase();
+  const changed = await new Promise<boolean>((resolve, reject) => {
+    let allowed = false;
+    const tx = db.transaction(CONTROL_STORE, "readwrite");
+    const store = tx.objectStore(CONTROL_STORE);
+    const request = store.get(MIGRATION_CONTROL_KEY);
+    request.onsuccess = () => {
+      const current = asMigration(request.result) ?? fallback;
+      if (current?.accountId !== accountId) return;
+      allowed = true;
+      if (next) store.put(next, MIGRATION_CONTROL_KEY);
+      else store.delete(MIGRATION_CONTROL_KEY);
+    };
+    request.onerror = () => reject(request.error ?? new Error("读取旧画布归属失败"));
+    tx.oncomplete = () => {
+      db.close();
+      resolve(allowed);
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error ?? new Error("更新旧画布归属失败"));
+    };
+    tx.onabort = tx.onerror;
+  });
+  if (changed) writeMigrationMirror(next);
+  return changed;
+}
+
+/** 退出前持久化「这个账号的画布库待删」；IndexedDB 的账号独立键是权威记录，localStorage 仅保留兼容镜像。 */
+export async function markCanvasPurgePending(accountId: string | null | undefined): Promise<boolean> {
   if (!accountId) return true;
-  const list = readPendingPurges();
-  if (list.includes(accountId)) return true;
-  return writeDurableState(PENDING_CANVAS_PURGE_KEY, [...list, accountId]);
+  // 先写同步的 localStorage 镜像再等 IndexedDB：退出流程对这一步有超时（IndexedDB 卡住不能让退出一直等），
+  // 超时时至少镜像已经落盘，下次启动照样补删。
+  const list = readPendingPurgeMirror();
+  const mirrorSaved = list.includes(accountId) || writeDurableState(PENDING_CANVAS_PURGE_KEY, [...list, accountId]);
+  let controlSaved = false;
+  try {
+    await writeControlValue(purgeControlKey(accountId), true);
+    controlSaved = true;
+  } catch (error) {
+    reportClientError({ scope: "canvas", message: `记录画布待清状态失败：${error instanceof Error ? error.message : String(error)}`, detail: { accountId } });
+  }
+  return controlSaved || mirrorSaved;
 }
 
-function unmarkCanvasPurgePending(accountId: string) {
-  const list = readPendingPurges();
-  if (!list.includes(accountId)) return;
-  writeDurableState(PENDING_CANVAS_PURGE_KEY, list.filter((item) => item !== accountId));
+async function unmarkCanvasPurgePending(accountId: string): Promise<boolean> {
+  try {
+    await deleteControlValue(purgeControlKey(accountId));
+  } catch {
+    // 权威键没删掉就保留镜像，让下次还能重试，不能在 UI 上假装已经清完。
+    return false;
+  }
+  const list = readPendingPurgeMirror();
+  if (list.includes(accountId)) writeDurableState(PENDING_CANVAS_PURGE_KEY, list.filter((item) => item !== accountId));
+  return true;
 }
 
-/** 测试 / 诊断用：还没删掉的画布库归属账号。 */
-export function pendingCanvasPurges() {
-  return readPendingPurges();
+/** 测试 / 诊断用：还没删掉的画布库归属账号；顺便把旧 localStorage 队列迁进账号独立键。 */
+export async function pendingCanvasPurges(): Promise<string[]> {
+  const result = new Set(readPendingPurgeMirror());
+  try {
+    const db = await openControlDatabase();
+    const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+      let value: IDBValidKey[] = [];
+      const tx = db.transaction(CONTROL_STORE, "readonly");
+      const request = tx.objectStore(CONTROL_STORE).getAllKeys();
+      request.onsuccess = () => {
+        value = request.result;
+      };
+      request.onerror = () => reject(request.error ?? new Error("读取画布待清列表失败"));
+      tx.oncomplete = () => {
+        db.close();
+        resolve(value);
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error ?? new Error("读取画布待清列表失败"));
+      };
+      tx.onabort = tx.onerror;
+    });
+    for (const key of keys) {
+      if (typeof key !== "string" || !key.startsWith(PURGE_CONTROL_PREFIX)) continue;
+      try {
+        result.add(decodeURIComponent(key.slice(PURGE_CONTROL_PREFIX.length)));
+      } catch {
+        // 坏键不参与删除
+      }
+    }
+    // 上一版本的整数组镜像逐个迁入权威控制库；各账号独立 key，不会再跨标签丢更新。
+    await Promise.all([...result].map((accountId) => writeControlValue(purgeControlKey(accountId), true)));
+  } catch (error) {
+    reportClientError({ scope: "canvas", message: `读取画布待清状态失败：${error instanceof Error ? error.message : String(error)}` });
+  }
+  return [...result];
 }
 
 /* ── IndexedDB 基本操作 ─────────────────────────────────────────────────── */
@@ -111,20 +313,43 @@ function deleteDatabase(name: string, timeoutMs = DELETE_TIMEOUT_MS) {
   });
 }
 
-async function databaseExists(name: string) {
+type DatabasePresence = "exists" | "missing" | "unknown";
+
+/** 不依赖 tldraw 的易丢 localStorage 索引；缺 databases() 时用一次会 abort 的 open 权威探测。 */
+async function databasePresence(name: string): Promise<DatabasePresence> {
   try {
     if (typeof window.indexedDB.databases === "function") {
-      return (await window.indexedDB.databases()).some((db) => db.name === name);
+      return (await window.indexedDB.databases()).some((db) => db.name === name) ? "exists" : "missing";
     }
   } catch {
-    // 下面退回 tldraw 自己维护的库名索引
+    // 下面做权威 open 探测；不再信任可能丢写的 TLDRAW_DB_NAME_INDEX_v2
   }
-  try {
-    const index: unknown = JSON.parse(window.localStorage.getItem("TLDRAW_DB_NAME_INDEX_v2") || "[]");
-    return Array.isArray(index) && index.includes(name);
-  } catch {
-    return false;
-  }
+  return new Promise((resolve) => {
+    let created = false;
+    let settled = false;
+    const finish = (value: DatabasePresence) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = window.setTimeout(() => finish("unknown"), DELETE_TIMEOUT_MS);
+    try {
+      const request = window.indexedDB.open(name);
+      request.onupgradeneeded = () => {
+        created = true;
+        request.transaction?.abort();
+      };
+      request.onsuccess = () => {
+        request.result.close();
+        finish("exists");
+      };
+      request.onerror = () => finish(created ? "missing" : "unknown");
+      request.onblocked = () => finish("unknown");
+    } catch {
+      finish("unknown");
+    }
+  });
 }
 
 function openCanvasDatabase(name: string) {
@@ -212,23 +437,22 @@ async function copyLegacyInto(targetName: string) {
 export async function adoptLegacyCanvasStore(accountId: string | null | undefined): Promise<boolean> {
   if (!accountId || typeof window === "undefined" || !window.indexedDB) return false;
   try {
-    let migration = readMigration();
-    if (!(await databaseExists(legacyDatabaseName))) {
-      // 旧库已经没了：标记也没意义了
-      if (migration) writeMigration(null);
+    const presence = await databasePresence(legacyDatabaseName);
+    const existing = await readMigrationState();
+    if (presence === "missing") {
+      // 只有权威确认旧库不存在才清 owner；探测不确定时宁可保留，也不能把真实旧库让给下一个账号。
+      if (existing) await setMigrationStateForOwner(existing.accountId, null);
       return false;
     }
+    if (presence === "unknown") return false;
+    const migration = existing ?? (await claimLegacyMigration(accountId));
     // 别人认领过（拷完没删掉 / 拷到一半关页）：只有归属账号能继续或删，别的账号碰都别碰
-    if (migration && migration.accountId !== accountId) return false;
-    if (!migration) {
-      // 先把归属写进 localStorage 再动数据；写不进去就不接（旧库留着没人读，只是不接管，不会串号）
-      migration = { accountId, stage: "copy" };
-      if (!writeMigration(migration)) return false;
-    }
+    if (migration.accountId !== accountId) return false;
     if (migration.stage === "copy") {
       // 重试也是整库再拷一遍（put 同键覆盖）：上次拷到一半关页留下的半截库会被补全
       await copyLegacyInto(accountDatabaseName(accountId));
-      writeMigration({ accountId, stage: "delete" });
+      // stage=delete 必须先在权威控制库落定，才能删唯一旧库；写不成就保留旧库下次重试。
+      if (!(await setMigrationStateForOwner(accountId, { accountId, stage: "delete" }))) return false;
     }
     if (!(await deleteDatabase(legacyDatabaseName))) {
       // 删不掉（被别的标签页占着）：标记留在 stage=delete，这个账号下次登录 / 退出再删；别的账号不会来接
@@ -239,7 +463,7 @@ export async function adoptLegacyCanvasStore(accountId: string | null | undefine
       });
       return true;
     }
-    writeMigration(null);
+    await setMigrationStateForOwner(accountId, null);
     return true;
   } catch (error) {
     reportClientError({
@@ -261,17 +485,25 @@ const reportedPurgeFailures = new Set<string>();
 export async function purgeCanvasStore(accountId: string | null | undefined): Promise<boolean> {
   if (!accountId) return true;
   if (typeof window === "undefined" || !window.indexedDB) return true;
-  const migration = readMigration();
+  let migration: LegacyMigration | null = null;
+  try {
+    migration = await readMigrationState();
+  } catch (error) {
+    reportClientError({ scope: "canvas", message: `读取旧画布归属失败，暂不删除：${error instanceof Error ? error.message : String(error)}`, detail: { accountId } });
+    return false;
+  }
   const ownsLegacy = migration?.accountId === accountId;
   const [ownDeleted, legacyDeleted] = await Promise.all([
     deleteDatabase(accountDatabaseName(accountId)),
     ownsLegacy ? deleteDatabase(legacyDatabaseName) : Promise.resolve(true),
   ]);
-  if (ownsLegacy && legacyDeleted) writeMigration(null);
+  if (ownsLegacy && legacyDeleted) await setMigrationStateForOwner(accountId, null);
   if (ownDeleted && legacyDeleted) {
-    unmarkCanvasPurgePending(accountId);
-    reportedPurgeFailures.delete(accountId);
-    return true;
+    const unmarked = await unmarkCanvasPurgePending(accountId);
+    if (unmarked) {
+      reportedPurgeFailures.delete(accountId);
+      return true;
+    }
   }
   if (!reportedPurgeFailures.has(accountId)) {
     reportedPurgeFailures.add(accountId);
@@ -293,8 +525,16 @@ let pendingPurgeRun: Promise<boolean> | null = null;
 export function purgePendingCanvasStores(): Promise<boolean> {
   if (pendingPurgeRun) return pendingPurgeRun;
   pendingPurgeRun = (async () => {
-    const results = await Promise.all(readPendingPurges().map((accountId) => purgeCanvasStore(accountId)));
-    return results.every(Boolean);
+    const attempted = new Set<string>();
+    let allDone = true;
+    while (true) {
+      const pending = (await pendingCanvasPurges()).filter((accountId) => !attempted.has(accountId));
+      if (!pending.length) break;
+      pending.forEach((accountId) => attempted.add(accountId));
+      const results = await Promise.all(pending.map((accountId) => purgeCanvasStore(accountId)));
+      if (results.some((result) => !result)) allDone = false;
+    }
+    return allDone;
   })().finally(() => {
     pendingPurgeRun = null;
   });
@@ -306,9 +546,21 @@ export function purgePendingCanvasStores(): Promise<boolean> {
  * 清完要重新加载页面，编辑器才会重新建库。
  */
 export async function resetCanvasStore(accountId: string | null | undefined = activeStorageAccount()) {
-  const names = [legacyDatabaseName];
-  if (accountId) names.unshift(accountDatabaseName(accountId));
+  const names: string[] = [];
+  if (accountId) names.push(accountDatabaseName(accountId));
+  let migration: LegacyMigration | null = null;
+  let migrationKnown = true;
+  try {
+    migration = await readMigrationState();
+  } catch (error) {
+    migrationKnown = false;
+    reportClientError({ scope: "canvas", message: `读取旧画布归属失败，只清当前账号画布：${error instanceof Error ? error.message : String(error)}`, detail: { accountId } });
+  }
+  const mayDeleteLegacy = migrationKnown && (!migration || Boolean(accountId && migration.accountId === accountId));
+  if (mayDeleteLegacy) names.push(legacyDatabaseName);
+  if (!names.length) return;
   // 别的标签页占着库时会 blocked，等它也没意义（有超时），直接返回让用户刷新
   const results = await Promise.all(names.map((name) => deleteDatabase(name)));
-  if (results[names.length - 1]) writeMigration(null);
+  const legacyIndex = names.indexOf(legacyDatabaseName);
+  if (legacyIndex >= 0 && results[legacyIndex] && migration && accountId) await setMigrationStateForOwner(accountId, null);
 }
