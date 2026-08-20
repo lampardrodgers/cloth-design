@@ -75,7 +75,7 @@ import {
   writeStoredState,
 } from "./lib/storedState";
 import { storedStateKeyForAccount } from "./lib/storageNamespace";
-import { adoptLegacyCanvasStore, purgeCanvasStore } from "./lib/canvasStore";
+import { adoptLegacyCanvasStore, markCanvasPurgePending, purgePendingCanvasStores } from "./lib/canvasStore";
 import { reportClientError } from "./lib/clientErrors";
 import { forgetDeletedResults, markDeletedResultsDone, pendingDeletedResultIds, pruneDeletedResults, recentlyDeletedResultIds, rememberDeletedResults } from "./lib/deletedResults";
 import { flushDurableWrites, hydrateDurableState } from "./lib/durableState";
@@ -319,8 +319,6 @@ function App() {
     lastError: null,
   });
   const localFolderRef = useRef<FileSystemDirectoryHandle | null>(null);
-  /** 退出登录后要删画布库的账号（等画布卸载后那次 effect 里删）。 */
-  const canvasPurgeRef = useRef<string | null>(null);
   const localFolderAutoSaveRef = useRef(true);
   const [apiConfig, setApiConfig] = useState<ApiConfig | null>(null);
   const [providerTesting, setProviderTesting] = useState(false);
@@ -501,7 +499,8 @@ function App() {
     try {
       // 上次 localStorage 写不进去时落在 IndexedDB 里的偏好暂存 / 删除墓碑先捞回来，下面的落地 / 过滤 / 补删才看得到。
       const [data] = await Promise.all([fetchMe(), hydrateDurableState()]);
-      // 升级前所有账号共用一座画布库：第一个登录的账号接过来（拷进自己的库、删旧库），要在画布挂载之前做完。
+      // 上次退出时没删成的画布库（退出后马上关页 / 被别的标签页占着）先补删，再接管升级前共用的旧库——都要在画布挂载之前做完。
+      await purgePendingCanvasStores();
       await adoptLegacyCanvasStore(data.account.id);
       // 服务端那份偏好先落到这个账号的本地命名空间，再切命名空间渲染，提示词库 / 设置 / 草稿就跨设备一致了。
       seedAccountPreferences(data.account.id, data.preferences);
@@ -538,9 +537,12 @@ function App() {
     void loadAccount();
   }, []);
 
-  // 过期的偏好暂存 / 墓碑：补水完先清一次（不管登没登录），之后每小时一次
+  // 过期的偏好暂存 / 墓碑：补水完先清一次（不管登没登录），之后每小时一次；上次退出没删成的画布库也在这时补删
   useEffect(() => {
-    void hydrateDurableState().then(pruneExpiredDeviceState);
+    void hydrateDurableState().then(() => {
+      pruneExpiredDeviceState();
+      void purgePendingCanvasStores();
+    });
     const timer = window.setInterval(pruneExpiredDeviceState, DEVICE_STATE_PRUNE_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, []);
@@ -1010,6 +1012,7 @@ function App() {
     const cleanup = Promise.all([clearStoredStateAccount(signedOutAccountId), forgetLocalFolder(signedOutAccountId)]).then(
       ([stateCleared, folderCleared]) => stateCleared && folderCleared,
     );
+    // 三种结果：true 全清了；false 有一项失败（clearStoredStateAccount / forgetLocalFolder 各自已上报具体原因）；null 超时。
     const cleaned = await Promise.race([cleanup, cleanupTimeout]);
     if (cleaned === null) {
       reportClientError({
@@ -1022,8 +1025,9 @@ function App() {
     setLocalFolderHandle(null);
     setLocalFolderPermission(null);
     setLocalFolderStats({ savedCount: 0, lastSavedPath: null, lastError: null });
-    // 画布库（tldraw 的 IndexedDB）要等画布组件卸载、tldraw 关掉连接之后才删得掉：记下来，切到登录页的那次 effect 里删。
-    canvasPurgeRef.current = signedOutAccountId ?? null;
+    // 画布库（tldraw 的 IndexedDB）要等画布组件卸载、tldraw 关掉连接之后才删得掉：先持久化记成「待清」，切到登录页的那次 effect 里删，
+    // 删成功才划掉；退出后马上关页也不怕，下次启动 / 登录挂画布前会补删。
+    markCanvasPurgePending(signedOutAccountId);
     pruneExpiredDeviceState();
     setStoredStateAccount(null);
     setCurrentUser(null);
@@ -1191,19 +1195,10 @@ function App() {
     };
   }, [currentUserId]);
 
-  // 退出登录：画布组件已经卸载、tldraw 关了连接，这时才删得掉这个账号的画布库。
+  // 退出登录：画布组件已经卸载、tldraw 关了连接，这时才删得掉待清的画布库（删不掉的留在列表里并上报，下次再删）。
   useEffect(() => {
-    if (currentUserId || !canvasPurgeRef.current) return;
-    const accountId = canvasPurgeRef.current;
-    canvasPurgeRef.current = null;
-    void purgeCanvasStore(accountId).then((purged) => {
-      if (purged) return;
-      reportClientError({
-        scope: "canvas",
-        message: "退出时没能删掉这个账号的画布库（可能别的标签页还开着画布），它只对这个账号可见，下次退出再删",
-        detail: { accountId },
-      });
-    });
+    if (currentUserId) return;
+    void purgePendingCanvasStores();
   }, [currentUserId]);
 
   const handlePickFolder = async (): Promise<string | void> => {

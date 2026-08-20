@@ -4,8 +4,10 @@
  * 退出登录时这个账号的句柄一起清掉（和其它本地数据「退出即清」一个口径），下次登录要重新选。
  * 权限可能要重新点一次确认。目前只有 Chrome / Edge 支持，Safari / Firefox 走普通下载。
  *
- * 升级前句柄是所有账号共用的一个键（`folder`）：升级后第一个登录的账号接管它（搬到自己的键下、删掉旧键），只接一次。
+ * 升级前句柄是所有账号共用的一个键（`folder`）：升级后第一个登录的账号接管它（搬到自己的键下、删掉旧键），只接一次——
+ * 「写新键 + 删旧键」在同一个读写事务里，中途关页也不会留下两份让别的账号再接一次。
  */
+import { reportClientError } from "./clientErrors";
 
 const DB_NAME = "clothdesign-local-folder";
 const STORE = "handles";
@@ -44,17 +46,6 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-async function idbGet<T>(key: string): Promise<T | undefined> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readonly");
-    const request = tx.objectStore(STORE).get(key);
-    request.onsuccess = () => resolve(request.result as T | undefined);
-    request.onerror = () => reject(request.error);
-    tx.oncomplete = () => db.close();
-  });
-}
-
 async function idbSet(key: string, value: unknown) {
   const db = await openDb();
   return new Promise<void>((resolve, reject) => {
@@ -81,6 +72,44 @@ async function idbDelete(key: string) {
   });
 }
 
+/**
+ * 读这个账号的句柄；没有就看升级前共用的旧键，有的话在同一个事务里「写到账号键 + 删旧键」原子地接过来。
+ * 账号键和旧键同时存在（比如老版本的标签页在新版本之后又写了旧键）：账号键为准，旧键顺手删掉——旧键留着只会被下一个账号接走。
+ */
+async function idbTakeHandle(accountKey: string): Promise<FileSystemDirectoryHandle | null> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    let result: FileSystemDirectoryHandle | null = null;
+    const ownRequest = store.get(accountKey);
+    ownRequest.onsuccess = () => {
+      const own = ownRequest.result as FileSystemDirectoryHandle | undefined;
+      const legacyRequest = store.get(LEGACY_KEY);
+      legacyRequest.onsuccess = () => {
+        const legacy = legacyRequest.result as FileSystemDirectoryHandle | undefined;
+        if (own) {
+          result = own;
+          if (legacy) store.delete(LEGACY_KEY);
+          return;
+        }
+        if (!legacy) return;
+        result = legacy;
+        store.put(legacy, accountKey);
+        store.delete(LEGACY_KEY);
+      };
+      legacyRequest.onerror = () => reject(legacyRequest.error);
+    };
+    ownRequest.onerror = () => reject(ownRequest.error);
+    tx.oncomplete = () => {
+      db.close();
+      resolve(result);
+    };
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error("读取文件夹句柄的事务被中止"));
+  });
+}
+
 /** 弹系统目录选择框，选中的句柄记在这个账号名下；用户取消返回 null。 */
 export async function pickLocalFolder(accountId: string): Promise<FileSystemDirectoryHandle | null> {
   if (!localFolderSupported() || !window.showDirectoryPicker || !accountId) return null;
@@ -94,30 +123,28 @@ export async function pickLocalFolder(accountId: string): Promise<FileSystemDire
   }
 }
 
-/** 这个账号上次选的目录；没有的话，升级前共用的那个句柄（若还在）由它接管。 */
+/** 这个账号上次选的目录；没有的话，升级前共用的那个句柄（若还在）由它原子地接管。 */
 export async function loadSavedFolder(accountId: string): Promise<FileSystemDirectoryHandle | null> {
   if (!localFolderSupported() || !accountId) return null;
   try {
-    const own = await idbGet<FileSystemDirectoryHandle>(handleKey(accountId));
-    if (own) return own;
-    const legacy = await idbGet<FileSystemDirectoryHandle>(LEGACY_KEY);
-    if (!legacy) return null;
-    await idbSet(handleKey(accountId), legacy);
-    await idbDelete(LEGACY_KEY);
-    return legacy;
+    return await idbTakeHandle(handleKey(accountId));
   } catch {
     return null;
   }
 }
 
-/** 忘掉这个账号选的目录（用户点「不再存本地」、或退出登录时清理）。返回是否清成功。 */
+/** 忘掉这个账号选的目录（用户点「不再存本地」、或退出登录时清理）。失败上报并返回 false，不静默。 */
 export async function forgetLocalFolder(accountId: string | null | undefined): Promise<boolean> {
   if (!accountId) return true;
   try {
     await idbDelete(handleKey(accountId));
     return true;
-  } catch {
-    // IndexedDB 不可用时也没什么可清的
+  } catch (error) {
+    reportClientError({
+      scope: "storage",
+      message: `清理本地文件夹句柄失败（这个账号选的目录可能还记在这台设备上）：${error instanceof Error ? error.message : String(error)}`,
+      detail: { accountId },
+    });
     return false;
   }
 }
