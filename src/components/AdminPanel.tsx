@@ -28,6 +28,7 @@ import {
 import type { AdminOverviewResponse, AdminPaymentEvent, AdminSummary, ImageProviderSettings, StorageAdminOverview } from "../lib/api";
 import { usePagedList } from "../lib/paging";
 import { Metric, Pager, Section } from "./ui";
+import { AdminSeedance } from "./AdminSeedance";
 import { AdminShortVideo } from "./AdminShortVideo";
 
 function formatBytes(bytes: number) {
@@ -332,6 +333,7 @@ export function AdminPanel({
         </Section>
       ) : null}
 
+      <AdminSeedance />
       <AdminShortVideo />
 
       <Section title="模型路由（仅本机备忘）" action={<Settings2 size={17} />}>

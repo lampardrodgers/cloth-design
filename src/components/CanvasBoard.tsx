@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowToolbarItem,
   AssetRecordType,
@@ -34,6 +35,7 @@ import {
   startEditingShapeWithRichText,
   stopEventPropagation,
   toRichText,
+  useContainer,
   useEditor,
   useValue,
   type Editor,
@@ -1012,13 +1014,34 @@ function CanvasSharePanel() {
 }
 
 /**
+ * 右上角这些抽屉挂到画布容器的根节点上。
+ * tldraw 把 InFrontOfTheCanvas 那层焊死在 z-index 250，整层 UI（.tlui-layout，300：
+ * 工具栏、样式面板…）永远压在它上面 —— 写在里面的成片抽屉和说明，一选中形状就会被
+ * 右上角弹出的样式面板盖掉。挂到 .tl-container 下面，它们的 z-index 才排得上号。
+ */
+function CanvasTopLayer({ children }: { children: ReactNode }) {
+  const container = useContainer();
+  return createPortal(children, container);
+}
+
+/** 成片抽屉一页放几张：3 × 3 正好铺满面板，不用滚动就能看全一页。 */
+const LIBRARY_PAGE_SIZE = 9;
+
+/**
  * 成片抽屉：把已经生成过的图直接放到画布上。
  * 正在编辑画框时，放上去的图同时链接为这次生成的引用图，省掉一次点选。
+ * 本地最多留 200 张，一次全铺出来既要滚半天也要拉 200 个缩略图，所以分页。
  */
 function ResultLibrary({ onClose }: { onClose: () => void }) {
   const editor = useEditor();
   const api = useCanvasApi();
   const [placingId, setPlacingId] = useState("");
+  const [page, setPage] = useState(0);
+
+  const pageCount = Math.max(1, Math.ceil(api.results.length / LIBRARY_PAGE_SIZE));
+  // 抽屉开着的时候又出了新图，列表会从头顶长出来、页数跟着变；这里收口一下，别停在空页上。
+  const current = Math.min(page, pageCount - 1);
+  const visible = api.results.slice(current * LIBRARY_PAGE_SIZE, (current + 1) * LIBRARY_PAGE_SIZE);
 
   const place = async (result: GeneratedResult) => {
     if (placingId) return;
@@ -1052,7 +1075,7 @@ function ResultLibrary({ onClose }: { onClose: () => void }) {
         </button>
       </header>
       <div className="canvas-library-grid">
-        {api.results.map((result) => (
+        {visible.map((result) => (
           <button
             type="button"
             key={result.id}
@@ -1067,6 +1090,27 @@ function ResultLibrary({ onClose }: { onClose: () => void }) {
           </button>
         ))}
       </div>
+      <footer className="canvas-library-pager">
+        <span>共 {api.results.length} 张</span>
+        {pageCount > 1 ? (
+          <div className="canvas-library-pages">
+            <button type="button" aria-label="上一页" disabled={current === 0} onClick={() => setPage(current - 1)}>
+              ‹
+            </button>
+            <span>
+              {current + 1} / {pageCount}
+            </span>
+            <button
+              type="button"
+              aria-label="下一页"
+              disabled={current >= pageCount - 1}
+              onClick={() => setPage(current + 1)}
+            >
+              ›
+            </button>
+          </div>
+        ) : null}
+      </footer>
     </div>
   );
 }
@@ -1462,8 +1506,16 @@ function CanvasOverlay({
         />
       ) : null}
 
-      {ui.libraryOpen ? <ResultLibrary onClose={ui.closeLibrary} /> : null}
-      {ui.helpOpen ? <CanvasGuide onClose={ui.closeHelp} /> : null}
+      {ui.libraryOpen ? (
+        <CanvasTopLayer>
+          <ResultLibrary onClose={ui.closeLibrary} />
+        </CanvasTopLayer>
+      ) : null}
+      {ui.helpOpen ? (
+        <CanvasTopLayer>
+          <CanvasGuide onClose={ui.closeHelp} />
+        </CanvasTopLayer>
+      ) : null}
       <EmptyCanvasGuide />
     </>
   );

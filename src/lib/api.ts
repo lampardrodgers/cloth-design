@@ -28,6 +28,16 @@ import type {
   ShortVideoAdminSettings,
   ShortVideoEngineConfig,
   ShortVideoMetadata,
+  SeedanceAdminOverview,
+  SeedanceGroup,
+  SeedanceModelAccess,
+  SeedanceAdminSettings,
+  SeedanceArkModel,
+  SeedanceOptions,
+  SeedanceRef,
+  SeedanceRequest,
+  SeedanceStatusInfo,
+  SeedanceTask,
 } from "../types";
 
 export interface ApiConfig {
@@ -713,6 +723,11 @@ export async function fetchShortVideoTasks(query: { page?: number; pageSize?: nu
   return parseJson<{ tasks: ShortVideoTask[]; pagination?: PageInfo; activeCount?: number }>(response);
 }
 
+export async function archiveShortVideoTask(id: string) {
+  const response = await fetch(`/api/shortvideo/tasks/${encodeURIComponent(id)}/archive`, { method: "POST", credentials: "include" });
+  return parseJson<{ ok: boolean; task: ShortVideoTask }>(response);
+}
+
 export async function fetchShortVideoTask(id: string) {
   const response = await fetch(`/api/shortvideo/tasks/${encodeURIComponent(id)}`, { credentials: "include" });
   return parseJson<{ task: ShortVideoTask }>(response);
@@ -819,4 +834,120 @@ export async function restartShortVideoEngine(force = false) {
     body: JSON.stringify({ force }),
   });
   return parseJson<{ engine: ShortVideoAdminOverview["engine"] }>(response);
+}
+
+/* ── Seedance（火山方舟视频生成） ─────────────────────────────────────────── */
+
+export interface SeedanceOverview {
+  status: SeedanceStatusInfo;
+  options: SeedanceOptions;
+  refs: SeedanceRef[];
+  tasks: SeedanceTask[];
+  pagination: PageInfo;
+  activeCount: number;
+  /** 真在方舟那边排队 / 生成的条数（占并发的只有这些；本站排队的不算）。 */
+  arkActiveCount?: number;
+}
+
+export async function fetchSeedanceOverview(params: { page?: number } = {}) {
+  const query = new URLSearchParams();
+  if (params.page) query.set("page", String(params.page));
+  const suffix = query.toString() ? `?${query}` : "";
+  const response = await fetch(`/api/seedance/overview${suffix}`, { credentials: "include" });
+  return parseJson<SeedanceOverview>(response);
+}
+
+export async function testSeedance() {
+  const response = await fetch("/api/seedance/test", { method: "POST", credentials: "include" });
+  return parseJson<{ status: SeedanceStatusInfo }>(response);
+}
+
+export async function fetchSeedanceTasks(params: { page?: number; pageSize?: number } = {}) {
+  const query = new URLSearchParams();
+  if (params.page) query.set("page", String(params.page));
+  if (params.pageSize) query.set("pageSize", String(params.pageSize));
+  const suffix = query.toString() ? `?${query}` : "";
+  const response = await fetch(`/api/seedance/tasks${suffix}`, { credentials: "include" });
+  return parseJson<{ tasks: SeedanceTask[]; pagination: PageInfo; activeCount: number; arkActiveCount?: number }>(response);
+}
+
+export async function createSeedanceTasks(input: Partial<SeedanceRequest>) {
+  const response = await fetch("/api/seedance/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ tasks: SeedanceTask[]; group?: SeedanceGroup | null; warning: string | null; activeCount: number; arkActiveCount?: number }>(response);
+}
+
+export async function deleteSeedanceTask(taskId: string, { force = false } = {}) {
+  const response = await fetch(`/api/seedance/tasks/${encodeURIComponent(taskId)}${force ? "?force" : ""}`, { method: "DELETE", credentials: "include" });
+  return parseJson<{ ok: boolean; activeCount: number; arkActiveCount?: number }>(response);
+}
+
+/** 手动把成片推到账号的 WebDAV（和生成图的「归档」一样）。 */
+export async function archiveSeedanceTask(taskId: string) {
+  const response = await fetch(`/api/seedance/tasks/${encodeURIComponent(taskId)}/archive`, { method: "POST", credentials: "include" });
+  return parseJson<{ ok: boolean; task: SeedanceTask }>(response);
+}
+
+export async function fetchSeedanceGroup(groupId: string) {
+  const response = await fetch(`/api/seedance/groups/${encodeURIComponent(groupId)}`, { credentials: "include" });
+  return parseJson<{ group: SeedanceGroup; tasks: SeedanceTask[] }>(response);
+}
+
+/** 合并失败后再试一次。 */
+export async function retrySeedanceGroupMerge(groupId: string) {
+  const response = await fetch(`/api/seedance/groups/${encodeURIComponent(groupId)}/merge`, { method: "POST", credentials: "include" });
+  return parseJson<{ group: SeedanceGroup }>(response);
+}
+
+export async function createSeedanceLastFrameRef(taskId: string) {
+  const response = await fetch(`/api/seedance/tasks/${encodeURIComponent(taskId)}/last-frame-ref`, { method: "POST", credentials: "include" });
+  return parseJson<{ ref: SeedanceRef }>(response);
+}
+
+export async function fetchSeedanceRefs() {
+  const response = await fetch("/api/seedance/refs", { credentials: "include" });
+  return parseJson<{ refs: SeedanceRef[] }>(response);
+}
+
+export async function uploadSeedanceRef(file: File) {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const response = await fetch("/api/seedance/refs", { method: "POST", credentials: "include", body: form });
+  return parseJson<{ ref: SeedanceRef }>(response);
+}
+
+export async function deleteSeedanceRef(refId: string) {
+  const response = await fetch(`/api/seedance/refs/${encodeURIComponent(refId)}`, { method: "DELETE", credentials: "include" });
+  return parseJson<{ ok: boolean }>(response);
+}
+
+export async function fetchSeedanceAdmin() {
+  const response = await fetch("/api/admin/seedance", { credentials: "include" });
+  return parseJson<SeedanceAdminOverview>(response);
+}
+
+export async function saveSeedanceSettings(input: {
+  apiKey?: string;
+  baseUrl?: string;
+  defaultModel?: string;
+  maxActivePerUser?: number | string;
+  publicBaseUrl?: string;
+  enabledModels?: string[] | "";
+}) {
+  const response = await fetch("/api/admin/seedance/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ settings: SeedanceAdminSettings; status: SeedanceStatusInfo }>(response);
+}
+
+export async function testSeedanceAdmin() {
+  const response = await fetch("/api/admin/seedance/test", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ probeModels: true }) });
+  return parseJson<{ ok: boolean; latencyMs: number; total: number; models: SeedanceArkModel[]; modelsError?: string; modelAccess: SeedanceModelAccess[]; status: SeedanceStatusInfo }>(response);
 }

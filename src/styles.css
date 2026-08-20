@@ -2311,12 +2311,17 @@ a.stage-tool {
 
 /* ============================================================================
  * 任务抽屉 / 全局提示
+ *
+ * 层级说明：画布（tldraw）自带一整层 z-index: 300 的 UI —— 工具栏、右上角的样式面板、
+ * 提示条都在里面，而且它挂在 .tl-container 下面、不受这边容器的层级约束。所以凡是
+ * 要盖在画布之上的全局浮层（任务面板、底部提示）都必须排到 300 以上，否则一进画布
+ * 就会被样式面板压掉半截。
  * ========================================================================== */
 
 .task-scrim {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: 900;
   background: rgba(26, 25, 23, 0.28);
 }
 
@@ -2324,7 +2329,7 @@ a.stage-tool {
   position: fixed;
   top: 66px;
   right: 16px;
-  z-index: 41;
+  z-index: 901;
   width: 344px;
   max-height: 72vh;
   overflow: auto;
@@ -2477,13 +2482,14 @@ a.stage-tool {
   line-height: 1.5;
 }
 
+/* 底部居中，正对着画布那条工具栏；层级同样要高过画布 UI（300）。 */
 .global-notice,
 .auth-error {
   position: fixed;
   left: 50%;
   bottom: 26px;
   transform: translateX(-50%);
-  z-index: 70;
+  z-index: 920;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -5814,13 +5820,19 @@ a.stage-tool {
   border-color: #2f80ed;
 }
 
-/* 成片库 */
+/*
+ * 成片库
+ * 挂在 .tl-container 根节点上（见 CanvasBoard 的 CanvasTopLayer）：tldraw 把
+ * InFrontOfTheCanvas 那层焊死在 z-index 250，写在里面的话右上角的样式面板（300）
+ * 一定压在上面。400 让抽屉稳稳排在画布 UI 之上。
+ */
 .canvas-library {
   position: absolute;
   top: 56px;
   right: 12px;
-  z-index: 300;
+  z-index: 400;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 10px;
   width: min(360px, calc(100% - 24px));
   max-height: min(70vh, 560px);
@@ -5893,6 +5905,47 @@ a.stage-tool {
   white-space: nowrap;
 }
 
+/* 成片翻页条 */
+.canvas-library-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: #9aa3b0;
+}
+
+.canvas-library-pages {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #6f7784;
+}
+
+.canvas-library-pager button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #e3e7ee;
+  border-radius: 6px;
+  background: #fff;
+  color: #55606e;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.canvas-library-pager button:hover:not(:disabled) {
+  border-color: #2f80ed;
+  color: #2f80ed;
+}
+
+.canvas-library-pager button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* 空画布上的用法说明 */
 .canvas-guide {
   position: absolute;
@@ -5913,12 +5966,13 @@ a.stage-tool {
   box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
 }
 
+/* 从右上角「?」调出来的那份，和成片库一样挂在容器根节点上，排在画布 UI 之上。 */
 .canvas-guide-pinned {
   left: auto;
   right: 12px;
   top: 56px;
   transform: none;
-  z-index: 300;
+  z-index: 400;
   pointer-events: all;
 }
 
@@ -8162,4 +8216,457 @@ a.stage-tool {
   margin-bottom: 0;
   border-bottom: 0;
   padding-bottom: 0;
+}
+
+/* ── Seedance（火山方舟直出）：沿用短视频那套，只补槽位 / 素材库 / 高级参数这几块 ── */
+.shortvideo-mode-strip {
+  margin-bottom: 2px;
+}
+
+.shortvideo-module {
+  display: grid;
+  gap: 14px;
+}
+
+.seedance-model-hint code {
+  font-size: 11px;
+}
+
+.seedance-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.seedance-slot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: var(--card);
+}
+
+.seedance-slot.active {
+  border-color: var(--gold);
+  border-style: solid;
+}
+
+.seedance-slot.filled {
+  border-style: solid;
+}
+
+.seedance-slot-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.seedance-slot-body img {
+  width: 52px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 8px;
+  flex: none;
+}
+
+.seedance-slot-body > svg {
+  color: var(--faint);
+  flex: none;
+}
+
+.seedance-slot-body span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.seedance-slot-body strong {
+  font-size: 12px;
+}
+
+.seedance-slot-body small {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seedance-ref-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.seedance-ref-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.seedance-ref-item img {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.seedance-ref-item > svg {
+  color: var(--faint);
+}
+
+.seedance-ref-item span {
+  flex: 1;
+  display: grid;
+  min-width: 0;
+}
+
+.seedance-ref-item small {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seedance-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.seedance-url-row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 240px;
+}
+
+.seedance-url-row input,
+.seedance-url-row select {
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+
+.seedance-url-row input {
+  flex: 1;
+}
+
+.seedance-library summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.seedance-ref-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.seedance-ref-card {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--card);
+}
+
+.seedance-ref-card.in-use {
+  border-color: var(--gold);
+}
+
+.seedance-ref-thumb {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 84px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(32, 31, 29, 0.05);
+  color: var(--faint);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.seedance-ref-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.seedance-ref-meta {
+  display: grid;
+  min-width: 0;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seedance-ref-meta small {
+  color: var(--muted);
+}
+
+.seedance-duration,
+.seedance-frames {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.seedance-advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.seedance-advanced-body {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.seedance-checks {
+  display: grid;
+  gap: 8px;
+}
+
+.seedance-progress span {
+  width: 40%;
+  animation: seedance-indeterminate 1.6s ease-in-out infinite;
+}
+
+@keyframes seedance-indeterminate {
+  0% {
+    margin-left: 0;
+    width: 20%;
+  }
+  50% {
+    margin-left: 40%;
+    width: 45%;
+  }
+  100% {
+    margin-left: 100%;
+    width: 20%;
+  }
+}
+
+.seedance-last-frame img {
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  background: rgba(32, 31, 29, 0.05);
+  border-radius: 8px;
+}
+
+.admin-seedance-models {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px 14px;
+  margin-top: 6px;
+}
+
+.admin-seedance-arkmodels {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.admin-seedance-arkmodels ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+}
+
+@media (max-width: 720px) {
+  .seedance-url-row {
+    min-width: 100%;
+  }
+}
+
+.seedance-submit-status {
+  display: grid;
+  gap: 2px;
+}
+
+/* Seedance：拖放 / 中间帧 / 分段接力组 / 保留期 */
+.seedance-slot.drop-active,
+.seedance-slots.drop-active,
+.seedance-ref-list.drop-active {
+  border-color: var(--gold);
+  border-style: solid;
+  background: var(--gold-tint);
+}
+
+.seedance-slots.drop-active,
+.seedance-ref-list.drop-active {
+  outline: 1px dashed var(--gold);
+  outline-offset: 4px;
+  border-radius: 10px;
+}
+
+.seedance-slot-add {
+  justify-content: flex-start;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.seedance-slot-add > svg {
+  color: var(--faint);
+  flex: none;
+}
+
+.seedance-slot-add span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.seedance-slot-add strong {
+  font-size: 12px;
+}
+
+.seedance-slot-add small {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.seedance-keyframe-strategy {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.seedance-group {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.seedance-group.merged {
+  border-color: var(--gold);
+}
+
+.seedance-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.seedance-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.seedance-group-title strong {
+  font-size: 13px;
+}
+
+.seedance-group-title small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.seedance-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.seedance-group .shortvideo-task {
+  background: var(--paper);
+}
+
+.seedance-merged video {
+  max-height: 360px;
+}
+
+.seedance-storage-line {
+  margin: 0;
+}
+
+.seedance-cluster {
+  display: contents;
+}
+
+.admin-seedance-access {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.admin-seedance-access li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.admin-seedance-access li strong {
+  color: var(--muted);
+}
+
+.admin-seedance-access li.access-ok strong {
+  color: var(--good);
+}
+
+.admin-seedance-access li.access-unauthorized strong,
+.admin-seedance-access li.access-not_open strong {
+  color: var(--bad);
+}
+
+.admin-seedance-access li small {
+  color: var(--muted);
 }

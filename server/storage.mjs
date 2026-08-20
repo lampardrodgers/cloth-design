@@ -22,8 +22,28 @@ import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
 
 export const SERVER_RETENTION_DAYS = 3;
 export const SERVER_RETENTION_MS = SERVER_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+/**
+ * 用户上传到服务器上的东西（参考图 / 素材 / 音乐）最多留这么久：
+ * 上传的是用户自己的文件，本站只是代传给模型 / 引擎，用完就该清，不能在服务器上越积越多。
+ * 各模块（Seedance 参考素材、文案成片的本地素材 / 音乐）都按这一个数来，别各写各的。
+ */
+export const UPLOAD_RETENTION_HOURS = 24;
+export const UPLOAD_RETENTION_MS = UPLOAD_RETENTION_HOURS * 60 * 60 * 1000;
 /** 数据库里已经没人引用的孤儿文件，超过这个时长就清掉。 */
 const ORPHAN_FILE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 其他模块（Seedance 成片 / 文案成片 / 各自的上传）把自己的到期清理挂进来，
+ * 跟成片图一起每小时跑一次，后台也只看一份巡检结果。
+ * 钩子签名：async ({ now, dryRun }) => summary（随便什么对象，会原样放进 summary.modules[name]）。
+ */
+const maintenanceHooks = new Map();
+
+export function registerStorageMaintenanceHook(name, hook) {
+  if (typeof hook !== "function") throw new TypeError("storage maintenance hook must be a function");
+  maintenanceHooks.set(String(name), hook);
+  return () => maintenanceHooks.delete(String(name));
+}
 const WEBDAV_TIMEOUT_MS = timeoutMsFromEnv("WEBDAV_TIMEOUT_MS", 30_000);
 const DEFAULT_DIRECTORY = "ClothDesign";
 
@@ -94,7 +114,7 @@ export function userStorageSettings(userId) {
 }
 
 /** 服务端内部用：带明文密码，只在真正连云盘的一刻解开。 */
-function userWebdavCredentials(userId) {
+export function userWebdavCredentials(userId) {
   const row = readStorageRow(userId);
   if (!row) return null;
   return {
@@ -164,7 +184,7 @@ export function saveUserStorageSettings(userId, input = {}) {
   return { settings: userStorageSettings(userId) };
 }
 
-function recordWebdavError(userId, message) {
+export function recordWebdavError(userId, message) {
   const timestamp = nowIso();
   sqlite
     .prepare("UPDATE user_storage SET last_error = ?, last_error_at = ?, updated_at = updated_at WHERE user_id = ?")
@@ -208,7 +228,7 @@ function describeDavFailure(status, action) {
 }
 
 /** 逐级 MKCOL：201 新建、405 已存在都算成功；其余当错误。 */
-async function ensureRemoteDirectory(credentials, directory) {
+export async function ensureRemoteDirectory(credentials, directory) {
   const segments = String(directory).split("/").filter(Boolean);
   let current = "";
   for (const segment of segments) {
@@ -222,7 +242,7 @@ async function ensureRemoteDirectory(credentials, directory) {
   }
 }
 
-async function putRemoteFile(credentials, remotePath, buffer, mimeType) {
+export async function putRemoteFile(credentials, remotePath, buffer, mimeType) {
   const response = await davRequest(credentials, "PUT", remotePath, {
     body: buffer,
     headers: { "Content-Type": mimeType || "application/octet-stream", "Content-Length": String(buffer.length) },
@@ -259,7 +279,7 @@ export async function testWebdavConnection(userId, override = {}) {
 
 // ---------- 归档 ----------
 
-function safeFileStem(title) {
+export function safeFileStem(title) {
   const cleaned = String(title || "image")
     .replace(/[\\/:*?"<>|\u0000-\u001f ]/g, "-")
     .replace(/-+/g, "-")
@@ -283,6 +303,44 @@ async function loadResultFile(row) {
   const file = await readManagedGeneratedImage(row.image_url);
   const extension = path.extname(row.image_url).replace(/^\./, "").toLowerCase() || "png";
   return { ...file, extension };
+}
+
+/**
+ * 给其他模块用的通用归档：把一个本地文件推到该账号的云盘，路径规则和成片图一致
+ * （<目录>/<YYYY-MM-DD>/<标题>-<id 尾 6 位>.<ext>）。成功返回 { archivedAt, archivePath }，失败返回 { error, status }。
+ * 不碰调用方自己的表——状态怎么记由调用方决定。
+ */
+export async function archiveFileToUserWebdav(userId, { filePath, title, id, createdAt, extension, mimeType, subdirectory = "" }) {
+  const credentials = userWebdavCredentials(userId);
+  if (!credentials?.enabled) return { error: "还没有启用 WebDAV，先到文件管理里填好云盘再试。", status: 400 };
+  if (!credentials.password) return { error: "WebDAV 密码读不出来（可能是服务端密钥换过），请重新保存一次。", status: 400 };
+  let buffer;
+  try {
+    buffer = await fs.readFile(filePath);
+  } catch {
+    return { error: "服务器上的文件已经不在了，没法归档。", status: 409 };
+  }
+  const directory = subdirectory ? `${credentials.directory}/${String(subdirectory).replace(/^\/+|\/+$/g, "")}` : credentials.directory;
+  const remotePath = archiveRemotePath({ id, title, created_at: createdAt }, directory, String(extension || "bin").replace(/^\./, ""));
+  try {
+    await ensureRemoteDirectory(credentials, path.posix.dirname(remotePath));
+    await putRemoteFile(credentials, remotePath, buffer, mimeType);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "归档失败。";
+    recordWebdavError(userId, message);
+    return { error: message, status: 502 };
+  }
+  const timestamp = nowIso();
+  sqlite
+    .prepare("UPDATE user_storage SET last_archived_at = ?, last_error = NULL, last_error_at = NULL WHERE user_id = ?")
+    .run(timestamp, userId);
+  return { archivedAt: timestamp, archivePath: remotePath };
+}
+
+/** 这个账号开了「生成完自动归档」吗（云盘启用 + 自动归档勾上）。 */
+export function userAutoArchiveEnabled(userId) {
+  const credentials = userWebdavCredentials(userId);
+  return Boolean(credentials?.enabled && credentials.autoArchive && credentials.password);
 }
 
 /**
@@ -437,6 +495,17 @@ export async function runStorageMaintenance({ now = Date.now(), dryRun = false }
     summary.bytesFreed += stats.size;
   }
 
+  // 其他模块的到期清理：一个挂钩出错不影响别的，错误记进 summary 里。
+  summary.modules = {};
+  for (const [name, hook] of maintenanceHooks) {
+    try {
+      summary.modules[name] = (await hook({ now, dryRun })) ?? {};
+    } catch (error) {
+      summary.modules[name] = { error: error instanceof Error ? error.message : String(error) };
+      console.error(`[storage] maintenance hook ${name} failed`, error);
+    }
+  }
+
   lastMaintenance = summary;
   return summary;
 }
@@ -475,6 +544,7 @@ export async function storageAdminOverview() {
   const webdavUsers = sqlite.prepare("SELECT COUNT(*) AS count FROM user_storage WHERE webdav_enabled = 1").get().count;
   return {
     retentionDays: SERVER_RETENTION_DAYS,
+    uploadRetentionHours: UPLOAD_RETENTION_HOURS,
     directory,
     fileCount,
     diskBytes,
@@ -501,6 +571,7 @@ export function storageOverviewForUser(userId) {
     .get(userId);
   return {
     retentionDays: SERVER_RETENTION_DAYS,
+    uploadRetentionHours: UPLOAD_RETENTION_HOURS,
     active: Number(counts?.active || 0),
     archived: Number(counts?.archived || 0),
     expired: Number(counts?.expired || 0),
@@ -516,6 +587,10 @@ export function scheduleStorageMaintenance({ intervalMs = 60 * 60 * 1000, initia
       .then((summary) => {
         if (summary.expired || summary.orphansDeleted) {
           console.log(`[storage] maintenance: expired ${summary.expired}, files ${summary.filesDeleted}, orphans ${summary.orphansDeleted}`);
+        }
+        for (const [name, detail] of Object.entries(summary.modules || {})) {
+          const touched = Object.values(detail || {}).some((value) => typeof value === "number" && value > 0) || detail?.error;
+          if (touched) console.log(`[storage] maintenance ${name}: ${JSON.stringify(detail)}`);
         }
       })
       .catch((error) => console.error("[storage] maintenance failed", error));

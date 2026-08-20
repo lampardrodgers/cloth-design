@@ -86,7 +86,7 @@ import { FreeStudio, type FreeGenerationInput, type FreeLayout } from "./compone
 import { ReferencePanel } from "./components/ReferencePanel";
 import { StoragePanel, type LocalFolderState } from "./components/StoragePanel";
 import { isAdminRole } from "./lib/accounts";
-import { ShortVideoStudio } from "./components/ShortVideoStudio";
+import { ShortVideoHub } from "./components/ShortVideoHub";
 import { StudioWorkspace } from "./components/StudioWorkspace";
 import { TaskRail } from "./components/TaskRail";
 import { WorkflowCenter } from "./components/WorkflowCenter";
@@ -1144,7 +1144,7 @@ function App() {
     // 短视频只对开了权限的账号（默认 admin）渲染；权限被收回时视图跟着消失，服务端每个接口也各自把关。
     if (view === "shortvideo") {
       if (!currentUser.features?.shortVideo) return null;
-      return <ShortVideoStudio />;
+      return <ShortVideoHub />;
     }
 
     return (

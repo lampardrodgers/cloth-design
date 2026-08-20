@@ -15,6 +15,7 @@ import { imageProviderHealth, summarizeProviderErrorText } from "./provider-heal
 import { generatedVideoStaticMount } from "./video-provider.mjs";
 import { migrateWorkflowDatabase, registerWorkflowRoutes } from "./workflows.mjs";
 import { migrateShortVideoDatabase, registerShortVideoRoutes, resumeShortVideoPolling } from "./shortvideo.mjs";
+import { migrateSeedanceDatabase, registerSeedanceRoutes, resumeSeedancePolling } from "./seedance.mjs";
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
 import { resolveProviderApiKey } from "./user-keys.mjs";
 import { clampResolution, imageApiUrl, imageProviderSettings, imageProviderSettingsList, normalizeResolution } from "./provider-config.mjs";
@@ -41,6 +42,7 @@ await runAuthMigrations();
 migrateBusinessDatabase();
 migrateWorkflowDatabase();
 migrateShortVideoDatabase();
+migrateSeedanceDatabase();
 assertPaymentProductionReady();
 if (isProduction && process.env.PAYMENT_DEMO_MODE !== "false") {
   console.warn("Payment demo mode is active in production. Set PAYMENT_DEMO_MODE=false after configuring Alipay and WeChat Pay credentials.");
@@ -564,6 +566,7 @@ app.get("/api/config", (_req, res) => {
 registerBusinessRoutes(app);
 registerWorkflowRoutes(app);
 registerShortVideoRoutes(app);
+registerSeedanceRoutes(app);
 
 app.post("/api/generate", upload.array("images", 16), async (req, res) => {
   let taskId = "";
@@ -741,6 +744,7 @@ function failInterruptedTasks() {
 failInterruptedTasks();
 // 短视频任务跑在独立引擎里，本站重启不影响它继续渲染：把没跑完的重新纳入轮询。
 resumeShortVideoPolling();
+resumeSeedancePolling();
 
 app.listen(port, host, () => {
   console.log(`ClothDesign AI running at http://${host}:${port}/ (${isDemoMode() ? "demo" : "live"} mode)`);

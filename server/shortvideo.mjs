@@ -25,6 +25,16 @@ import {
 import { ENGINE_CONFIG_FIELDS, engineConfigEditable, engineRestartAvailable, readEngineConfig, restartEngine, writeEngineConfig } from "./shortvideo-engine-config.mjs";
 import { saveShortVideoSettings, shortVideoSettings, shortVideoSettingsView } from "./shortvideo-settings.mjs";
 import {
+  SERVER_RETENTION_DAYS,
+  SERVER_RETENTION_MS,
+  UPLOAD_RETENTION_HOURS,
+  UPLOAD_RETENTION_MS,
+  archiveFileToUserWebdav,
+  registerStorageMaintenanceHook,
+  resultExpiresAt,
+  userAutoArchiveEnabled,
+} from "./storage.mjs";
+import {
   MAX_SCRIPT_CHARS,
   generateShortVideoMetadata,
   generateShortVideoScript,
@@ -183,6 +193,8 @@ function limits() {
     materialMaxBytes: MATERIAL_MAX_BYTES,
     musicMaxBytes: MUSIC_MAX_BYTES,
     maxScriptPromptChars: 500,
+    // 服务器上的保留期：上传的素材 / 音乐 24 小时，成片和生成图一样 3 天。
+    retention: { uploadHours: UPLOAD_RETENTION_HOURS, outputDays: SERVER_RETENTION_DAYS },
   };
 }
 
@@ -258,7 +270,26 @@ export function migrateShortVideoDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_shortvideo_task_user ON shortvideo_task(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_shortvideo_task_status ON shortvideo_task(status);
+    CREATE TABLE IF NOT EXISTS shortvideo_upload (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('material', 'music')),
+      file TEXT NOT NULL,
+      original_name TEXT NOT NULL DEFAULT '',
+      bytes INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_shortvideo_upload_created ON shortvideo_upload(created_at);
   `);
+  // 老表补列：成片的保留 / 归档状态，和 generated_result 一个路子。
+  const columns = new Set(sqlite.prepare("PRAGMA table_info(shortvideo_task)").all().map((column) => column.name));
+  const add = (name, ddl) => {
+    if (!columns.has(name)) sqlite.exec(`ALTER TABLE shortvideo_task ADD COLUMN ${name} ${ddl}`);
+  };
+  add("storage_status", "TEXT NOT NULL DEFAULT 'cloud-temp'");
+  add("archived_at", "TEXT");
+  add("archive_path", "TEXT");
+  add("expired_at", "TEXT");
 }
 
 function parseJson(text, fallback) {
@@ -277,11 +308,21 @@ function fileUrl(taskId, name) {
 export function serializeShortVideoTask(row) {
   if (!row) return null;
   const result = parseJson(row.result_json, {});
-  const videos = Array.isArray(result.videos)
-    ? result.videos.map((video) => ({ name: video.name, bytes: Number(video.bytes || 0), url: fileUrl(row.id, video.name) }))
-    : [];
+  const filesGone = Boolean(row.expired_at);
+  const videos =
+    Array.isArray(result.videos) && !filesGone
+      ? result.videos.map((video) => ({ name: video.name, bytes: Number(video.bytes || 0), url: fileUrl(row.id, video.name) }))
+      : [];
   return {
     id: row.id,
+    storage: {
+      status: row.storage_status || "cloud-temp",
+      expiresAt: row.status === "completed" && row.finished_at ? resultExpiresAt(row.finished_at) : null,
+      archivedAt: row.archived_at || null,
+      archivePath: row.archive_path || null,
+      expiredAt: row.expired_at || null,
+      retentionDays: SERVER_RETENTION_DAYS,
+    },
     status: row.status,
     progress: Number(row.progress || 0),
     stage: row.stage,
@@ -292,7 +333,7 @@ export function serializeShortVideoTask(row) {
     params: parseJson(row.params_json, {}),
     result: {
       videos,
-      subtitle: result.subtitle ? fileUrl(row.id, result.subtitle) : null,
+      subtitle: result.subtitle && !filesGone ? fileUrl(row.id, result.subtitle) : null,
       audioDuration: result.audioDuration ?? null,
       warnings: result.warnings ?? null,
     },
@@ -696,7 +737,158 @@ async function importFinishedTask(row, engineTask) {
     failure_source: null,
     finished_at: nowIso(),
   });
+  // 成片已经拉回本站，引擎那边的整个任务目录（下载的素材、配音、字幕、成片副本）就是多余的，顺手清掉。
+  if (row.engine_task_id && engineConfigured()) {
+    void deleteEngineTask(row.engine_task_id).catch((error) => console.warn(`[shortvideo] 清理引擎任务 ${row.engine_task_id} 失败：`, error?.message || error));
+  }
+  void autoArchiveShortVideoTask(getTaskRow(row.id)).catch((error) => console.warn(`[shortvideo] 自动归档 ${row.id} 失败：`, error?.message || error));
 }
+
+/* ── 成片归档 / 到期清理（和生成图同一套规则：服务器暂存 3 天，可推 WebDAV） ── */
+
+export async function archiveShortVideoTask(row) {
+  if (!row || row.status !== "completed") return { error: "只有完成的成片能归档。", status: 400 };
+  if (row.expired_at) return { error: "服务器上的文件已经过期清理，没法再归档。", status: 409 };
+  const result = parseJson(row.result_json, {});
+  const videos = Array.isArray(result.videos) ? result.videos : [];
+  if (!videos.length) return { error: "这条任务没有成片文件。", status: 400 };
+  let last = null;
+  for (const [index, video] of videos.entries()) {
+    const outcome = await archiveFileToUserWebdav(row.user_id, {
+      filePath: path.join(taskAssetDir(row.id), video.name),
+      title: `shortvideo-${String(row.subject || "video").slice(0, 40) || "video"}${videos.length > 1 ? `-${index + 1}` : ""}`,
+      id: row.id,
+      createdAt: row.created_at,
+      extension: "mp4",
+      mimeType: "video/mp4",
+      subdirectory: "短视频",
+    });
+    if (outcome.error) return outcome;
+    last = outcome;
+  }
+  updateTask(row.id, { storage_status: "webdav", archived_at: last.archivedAt, archive_path: last.archivePath });
+  return last;
+}
+
+async function autoArchiveShortVideoTask(row) {
+  if (!row || !userAutoArchiveEnabled(row.user_id)) return { skipped: true };
+  const outcome = await archiveShortVideoTask(row);
+  if (outcome.error) console.warn(`[shortvideo] auto archive failed for ${row.id}: ${outcome.error}`);
+  return outcome;
+}
+
+/** 引擎装在本机时它的根目录（上传的素材 / 音乐就落在这里面）；不在本机就返回空，清理只能靠引擎自己。 */
+export function engineLocalDir() {
+  const explicit = String(process.env.SHORTVIDEO_ENGINE_DIR || "").trim();
+  if (explicit) return path.resolve(explicit);
+  const config = String(process.env.SHORTVIDEO_ENGINE_CONFIG || "").trim();
+  return config ? path.dirname(path.resolve(config)) : "";
+}
+
+function recordUpload({ userId, kind, file, originalName, bytes }) {
+  sqlite
+    .prepare("INSERT INTO shortvideo_upload (id, user_id, kind, file, original_name, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(randomUUID(), userId, kind, file, String(originalName || "").slice(0, 200), Number(bytes || 0), nowIso());
+}
+
+/** 上传记录按文件名查：列素材 / 音乐时标出「这是谁什么时候传的、几点会清」。 */
+function uploadIndex() {
+  const rows = sqlite.prepare("SELECT kind, file, user_id, original_name, created_at FROM shortvideo_upload").all();
+  const index = new Map();
+  for (const row of rows) {
+    index.set(`${row.kind}:${row.file}`, { userId: row.user_id, originalName: row.original_name, createdAt: row.created_at, expiresAt: new Date(Date.parse(row.created_at) + UPLOAD_RETENTION_MS).toISOString() });
+  }
+  return index;
+}
+
+function annotateFiles(files, kind, userId) {
+  const index = uploadIndex();
+  return files.map((file) => {
+    const upload = index.get(`${kind}:${file.name}`);
+    return upload ? { ...file, uploadedAt: upload.createdAt, expiresAt: upload.expiresAt, mine: upload.userId === userId, originalName: upload.originalName || undefined } : file;
+  });
+}
+
+/**
+ * 每小时跟成片图一起巡检：
+ *   - 完成 / 失败超过 3 天的任务：删本站的成片目录，记录标 expired；
+ *   - 上传超过 24 小时的素材 / 音乐：引擎在本机就直接删文件（素材在 storage/local_videos，音乐在 resource/songs 里只删我们登记过的那些——自带歌曲不动），然后删登记；
+ *   - 引擎 storage/local_videos 里没登记、放了超过 24 小时的文件（只会是上传进去的）一并清；
+ *   - 引擎 storage/tasks 里超过 24 小时、又不属于任何在跑任务的目录（成片早已拉回本站）。
+ */
+export async function runShortVideoMaintenance({ now = Date.now(), dryRun = false } = {}) {
+  const summary = { expiredTasks: 0, uploadsDeleted: 0, uploadsUntracked: 0, engineTaskDirsDeleted: 0, bytesFreed: 0, engineLocal: Boolean(engineLocalDir()), dryRun };
+  const outputCutoff = new Date(now - SERVER_RETENTION_MS).toISOString();
+  const rows = sqlite
+    .prepare("SELECT * FROM shortvideo_task WHERE expired_at IS NULL AND status IN ('completed', 'failed', 'cancelled') AND COALESCE(finished_at, updated_at) < ? ORDER BY finished_at ASC LIMIT 500")
+    .all(outputCutoff);
+  for (const row of rows) {
+    const dir = taskAssetDir(row.id);
+    summary.bytesFreed += await directoryBytes(dir);
+    if (!dryRun) {
+      await fs.rm(dir, { recursive: true, force: true });
+      updateTask(row.id, { storage_status: "expired", expired_at: new Date(now).toISOString() });
+    }
+    summary.expiredTasks += 1;
+  }
+
+  const uploadCutoff = new Date(now - UPLOAD_RETENTION_MS).toISOString();
+  const root = engineLocalDir();
+  const uploads = sqlite.prepare("SELECT * FROM shortvideo_upload WHERE created_at < ? ORDER BY created_at ASC LIMIT 500").all(uploadCutoff);
+  for (const upload of uploads) {
+    if (root) {
+      const file = path.join(root, upload.kind === "music" ? "resource/songs" : "storage/local_videos", path.basename(upload.file));
+      const stats = await fs.stat(file).catch(() => null);
+      if (stats) {
+        summary.bytesFreed += stats.size;
+        if (!dryRun) await fs.rm(file, { force: true });
+      }
+    }
+    if (!dryRun) sqlite.prepare("DELETE FROM shortvideo_upload WHERE id = ?").run(upload.id);
+    summary.uploadsDeleted += 1;
+  }
+  if (root) {
+    const tracked = new Set(sqlite.prepare("SELECT file FROM shortvideo_upload WHERE kind = 'material'").all().map((row) => row.file));
+    const materialsDir = path.join(root, "storage", "local_videos");
+    for (const entry of await fs.readdir(materialsDir, { withFileTypes: true }).catch(() => [])) {
+      if (!entry.isFile() || tracked.has(entry.name)) continue;
+      const file = path.join(materialsDir, entry.name);
+      const stats = await fs.stat(file).catch(() => null);
+      if (!stats || now - stats.mtimeMs < UPLOAD_RETENTION_MS) continue;
+      if (!dryRun) await fs.rm(file, { force: true });
+      summary.uploadsUntracked += 1;
+      summary.bytesFreed += stats.size;
+    }
+    const busy = new Set(activeTaskRows().map((row) => row.engine_task_id).filter(Boolean));
+    const tasksDir = path.join(root, "storage", "tasks");
+    for (const entry of await fs.readdir(tasksDir, { withFileTypes: true }).catch(() => [])) {
+      if (!entry.isDirectory() || busy.has(entry.name)) continue;
+      const dir = path.join(tasksDir, entry.name);
+      const stats = await fs.stat(dir).catch(() => null);
+      if (!stats || now - stats.mtimeMs < UPLOAD_RETENTION_MS) continue;
+      summary.bytesFreed += await directoryBytes(dir);
+      if (!dryRun) await fs.rm(dir, { recursive: true, force: true });
+      summary.engineTaskDirsDeleted += 1;
+    }
+  }
+  return summary;
+}
+
+async function directoryBytes(dir) {
+  let total = 0;
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) total += await directoryBytes(file);
+    else if (entry.isFile()) {
+      const stats = await fs.stat(file).catch(() => null);
+      if (stats) total += stats.size;
+    }
+  }
+  return total;
+}
+
+registerStorageMaintenanceHook("shortvideo", runShortVideoMaintenance);
 
 /* ── 创建任务 ─────────────────────────────────────────────────────────────── */
 
@@ -794,6 +986,8 @@ export function registerShortVideoRoutes(app) {
         listEngineMaterials().catch(() => []),
       ]);
     }
+    musics = annotateFiles(musics, "music", account.user.id);
+    materials = annotateFiles(materials, "material", account.user.id);
     const taskPage = listShortVideoTaskPage(account.user.id, { page: 1 });
     res.json({
       engine,
@@ -914,6 +1108,10 @@ export function registerShortVideoRoutes(app) {
       res.status(404).json({ error: "文件不存在。" });
       return;
     }
+    if (row.expired_at) {
+      res.status(410).json({ error: `成片在服务器上只保留 ${SERVER_RETENTION_DAYS} 天，已经清理${row.archive_path ? `；云盘里还有一份：${row.archive_path}` : ""}。` });
+      return;
+    }
     const filePath = path.join(taskAssetDir(row.id), name);
     try {
       await fs.access(filePath);
@@ -931,11 +1129,25 @@ export function registerShortVideoRoutes(app) {
     });
   });
 
+  // 手动推云盘（和成片图的「归档」一个意思）。
+  app.post("/api/shortvideo/tasks/:id/archive", async (req, res) => {
+    const account = await requireShortVideoAccount(req, res);
+    if (!account) return;
+    const row = ownedTaskOr404(req, res, account);
+    if (!row) return;
+    const outcome = await archiveShortVideoTask(row);
+    if (outcome.error) {
+      res.status(outcome.status || 400).json({ error: outcome.error });
+      return;
+    }
+    res.json({ ok: true, task: serializeShortVideoTask(getTaskRow(row.id)) });
+  });
+
   app.get("/api/shortvideo/materials", async (req, res) => {
     const account = await requireShortVideoAccount(req, res);
     if (!account) return;
     try {
-      res.json({ files: await listEngineMaterials() });
+      res.json({ files: annotateFiles(await listEngineMaterials(), "material", account.user.id) });
     } catch (error) {
       sendError(res, error, "读取素材列表失败。");
     }
@@ -962,7 +1174,8 @@ export function registerShortVideoRoutes(app) {
     const stored = `${Date.now().toString(36)}-${randomUUID().slice(0, 6)}.${extension}`;
     try {
       const name = await uploadEngineMaterial({ buffer: file.buffer, fileName: stored, mimeType: file.mimetype });
-      res.json({ file: name, originalName: original, size: file.size });
+      recordUpload({ userId: account.user.id, kind: "material", file: name, originalName: original, bytes: file.size });
+      res.json({ file: name, originalName: original, size: file.size, expiresAt: new Date(Date.now() + UPLOAD_RETENTION_MS).toISOString() });
     } catch (error) {
       sendError(res, error, "上传素材失败。");
     }
@@ -1001,7 +1214,8 @@ export function registerShortVideoRoutes(app) {
     try {
       // 引擎那边会把文件名换成 UUID，这里只要保证扩展名对得上。
       const name = await uploadEngineMusic({ buffer: file.buffer, fileName: `${Date.now().toString(36)}.${extension}`, mimeType: file.mimetype });
-      res.json({ file: name, originalName: original, size: file.size });
+      recordUpload({ userId: account.user.id, kind: "music", file: name, originalName: original, bytes: file.size });
+      res.json({ file: name, originalName: original, size: file.size, expiresAt: new Date(Date.now() + UPLOAD_RETENTION_MS).toISOString() });
     } catch (error) {
       sendError(res, error, "上传音乐失败。");
     }
@@ -1011,7 +1225,7 @@ export function registerShortVideoRoutes(app) {
     const account = await requireShortVideoAccount(req, res);
     if (!account) return;
     try {
-      res.json({ files: await listEngineMusics() });
+      res.json({ files: annotateFiles(await listEngineMusics(), "music", account.user.id) });
     } catch (error) {
       sendError(res, error, "读取音乐列表失败。");
     }

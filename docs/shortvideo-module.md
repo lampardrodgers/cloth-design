@@ -1,5 +1,7 @@
 # 短视频模块（MoneyPrinterTurbo 集成）设计
 
+> 2026-08-19 起，「短视频」入口下分两个子模块：「AI 直出」（Seedance，火山方舟，见 [seedance-module.md](seedance-module.md)）排第一，本文描述的「文案成片」（MoneyPrinterTurbo）排第二；两者共用 `shortvideo_enabled` 这把权限开关。页壳在 `src/components/ShortVideoHub.tsx`。
+
 > 状态：已实现第一版（仅 admin 可见 / 可用），本文是 API 与架构的权威说明。
 > 上游：<https://github.com/harry0703/MoneyPrinterTurbo>（MIT，v1.3.x）。
 
@@ -37,6 +39,7 @@ MPT 收到现成文案就不再调它自己的 LLM，因此 MPT 侧 `config.toml
   所以本站在 MPT 报「完成」时立刻把 `final-*.mp4`、`subtitle.srt` 拉回 `SHORTVIDEO_ASSET_DIR/<taskId>/`，之后播放、下载都只碰本站文件；MPT 那边查不到任务时先试探成片是否已落盘，落了就照常收工，没落才判失败。
 - **轮询在服务端**。`shortvideo.mjs` 里一个惰性启动的 `setInterval`，只要有 `queued/running` 的任务就每 `SHORTVIDEO_POLL_INTERVAL_MS`（默认 3s）问一次 MPT；本站重启后会把库里未完成的任务重新纳入轮询，不会像 `/api/generate` 那样一刀切标失败。
 - **权限**：服务端 `canUseShortVideo(profile)` = `isAdminRole(role) || shortvideo_enabled = 1`。第一版只有 admin（`owner`）能过；后台可以按账号打开 `shortvideo_enabled` 给别人用（默认关）。前端只在 `account.features.shortVideo === true` 时渲染导航入口和视图，别的账号连入口都看不见。
+- **保留期和生成图一套**（`storage.mjs` 的每小时巡检，`registerStorageMaintenanceHook("shortvideo", runShortVideoMaintenance)`）：成片在本站留 3 天，到期删 `SHORTVIDEO_ASSET_DIR/<taskId>/`、`shortvideo_task.storage_status = expired`（记录和文案留着，取文件回 410）；开了 WebDAV 自动归档的账号完成即推云盘（`<目录>/短视频/<日期>/shortvideo-<主题>-<id>.mp4`），也可 `POST /api/shortvideo/tasks/:id/archive` 手动推。成片拉回本站后立刻 `DELETE` 引擎那边的任务（整个 `storage/tasks/<id>/` 目录，含下载的素材 / 配音 / 成片副本）。上传的素材 / 音乐登记在 `shortvideo_upload`，24 小时后删：引擎在本机（`SHORTVIDEO_ENGINE_DIR`，默认取 `SHORTVIDEO_ENGINE_CONFIG` 所在目录）就直接删 `storage/local_videos/<file>` / `resource/songs/<file>`（只删登记过的音乐，引擎自带的歌不动；`local_videos` 里没登记的旧文件也清），引擎 `storage/tasks` 里超过 24 小时、不属于在跑任务的目录一并清。
 - **积分**：第一版不扣费（admin 自己用）。任务行上记 `credits = 0`，将来要收费的话在 `estimateShortVideoCredits()` 里给数、创建时调 `consumeCredits`，失败时 `refundCredits`，和图片生成同一套账本。
 
 ## 3. 数据表
@@ -156,9 +159,9 @@ MPT 收到现成文案就不再调它自己的 LLM，因此 MPT 侧 `config.toml
 
 ### 4.4 素材与音乐
 
-`GET /api/shortvideo/materials` → `{ "files": [{ "name", "size" }] }`（MPT `storage/local_videos/` 目录）
-`POST /api/shortvideo/materials`（multipart，字段 `file`；mp4/mov/avi/flv/mkv/jpg/jpeg/png，≤ 100 MB）→ `{ "file": "xxx.mp4" }`
-`GET /api/shortvideo/musics` → `{ "files": [...] }`
+`GET /api/shortvideo/materials` → `{ "files": [{ "name", "size", "uploadedAt"?, "expiresAt"?, "mine"?, "originalName"? }] }`（MPT `storage/local_videos/` 目录；本站上传的带着上传时间 / 几点清理）
+`POST /api/shortvideo/materials`（multipart，字段 `file`；mp4/mov/avi/flv/mkv/jpg/jpeg/png，≤ 100 MB）→ `{ "file": "xxx.mp4", "expiresAt" }`（24 小时后自动清）
+`GET /api/shortvideo/musics` → `{ "files": [...] }`（同样标注本站上传的）
 
 第一版不做 BGM 上传（MPT 自带 4 首，`random` 够用）。
 

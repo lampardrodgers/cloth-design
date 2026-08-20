@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 
 const app = await fs.readFile("src/App.tsx", "utf8");
 const studio = await fs.readFile("src/components/ShortVideoStudio.tsx", "utf8");
+const hub = await fs.readFile("src/components/ShortVideoHub.tsx", "utf8");
 const admin = await fs.readFile("src/components/AdminPanel.tsx", "utf8");
 const adminShortVideo = await fs.readFile("src/components/AdminShortVideo.tsx", "utf8");
 const api = await fs.readFile("src/lib/api.ts", "utf8");
@@ -22,7 +23,9 @@ assert(railEntry > 0, "侧栏要有短视频入口");
 const guardBefore = app.lastIndexOf("{canUseShortVideo ? (", railEntry);
 assert(guardBefore > 0 && railEntry - guardBefore < 400, "短视频入口必须包在 canUseShortVideo 分支里");
 assert(app.includes('if (view === "shortvideo") {') && app.includes("if (!currentUser.features?.shortVideo) return null;"), "视图本身也要守一次：权限收回时不能靠旧 state 继续显示");
-assert(app.includes("<ShortVideoStudio />"), "视图渲染 ShortVideoStudio");
+assert(app.includes("<ShortVideoHub />"), "视图渲染 ShortVideoHub（里面再分 AI 直出 / 文案成片两个子模块）");
+assert(hub.includes("<ShortVideoStudio />") && hub.includes("<SeedanceStudio />"), "Hub 挂两个子模块");
+assert(hub.includes('className="mode-strip shortvideo-mode-strip"') && hub.includes("mode-pill"), "子模块切换沿用「开始创作」的 mode-strip 样式");
 assert(app.includes('view === "shortvideo"\n      ? { id: "shortvideo" as const'), "顶栏当前位置要有短视频的文案");
 
 /* ── 组件：自取数据、轮询、引擎状态、成片播放 ─────────────────────────────── */
@@ -35,7 +38,8 @@ assert(studio.includes("?download"), "要有下载入口");
 assert(studio.includes("useStoredState<ShortVideoRequest>(FORM_STORAGE_KEY"), "表单记在本地，切页面回来还在");
 assert(studio.includes('source === "local"') && studio.includes("uploadShortVideoMaterial(file)"), "本地素材要能上传");
 assert(studio.includes("generateShortVideoScript(") && studio.includes("generateShortVideoTerms("), "AI 写文案 / 抽关键词");
-assert(studio.includes('className="single-view panel-scroll shortvideo-view"'), "沿用 single-view 布局壳");
+assert(hub.includes('className="single-view panel-scroll shortvideo-view"'), "沿用 single-view 布局壳（在 Hub 上）");
+assert(studio.includes('className="shortvideo-module" data-module="compose"'), "文案成片模块不再自带页面壳");
 assert(studio.includes('className="simple-card shortvideo-form"'), "表单卡片沿用 simple-card");
 assert(studio.includes("<ChipGroup") && studio.includes("<NumberStepper"), "控件沿用 ui.tsx 的药丸和步进器");
 assert(!studio.includes("isAdminRole("), "组件不自己判 admin：谁能用由服务端下发的开关和接口决定");
@@ -84,5 +88,10 @@ assert(block.length > 1000, "短视频样式块存在");
 const hexColors = block.match(/#[0-9a-fA-F]{6}\b/g) || [];
 assert(hexColors.length <= 3, `短视频样式尽量用 var(--*) token，别再发明新颜色（现在有 ${hexColors.length} 处硬编码）`);
 assert(/@media \(max-width: 1080px\)/.test(block), "窄屏要收成一列");
+
+/* ── 保留期：上传的素材 / 音乐 24 小时，成片 3 天，可推云盘 ────────────────── */
+assert(studio.includes("retention?.uploadHours") && studio.includes("retention?.outputDays"), "保留期从服务端下发的数字显示");
+assert(studio.includes("archiveShortVideoTask(") && studio.includes("推到云盘"), "成片能手动推 WebDAV");
+assert(studio.includes("file.expiresAt") || studio.includes("expiresAt"), "上传的素材标出几点清理");
 
 console.log(JSON.stringify({ checks: "passed" }, null, 2));

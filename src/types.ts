@@ -576,7 +576,19 @@ export interface ShortVideoOptions {
     materialMaxBytes: number;
     musicMaxBytes: number;
     maxScriptPromptChars: number;
+    /** 服务器上的保留期：上传的素材 / 音乐按小时、成片按天（和生成图一致）。 */
+    retention?: { uploadHours: number; outputDays: number };
   };
+}
+
+/** 成片在服务器上的去留，和生成图一套词：cloud-temp（暂存）/ webdav（已推云盘）/ expired（已到期清理）。 */
+export interface MediaStorageInfo {
+  status: "cloud-temp" | "webdav" | "expired" | string;
+  expiresAt: string | null;
+  archivedAt: string | null;
+  archivePath: string | null;
+  expiredAt: string | null;
+  retentionDays: number;
 }
 
 export interface ShortVideoMetadata {
@@ -604,6 +616,11 @@ export interface ShortVideoLlmStatus {
 export interface ShortVideoFile {
   name: string;
   size: number;
+  /** 本站上传的文件会带上：什么时候传的、几点自动清理、是不是我传的。引擎自带的没有。 */
+  uploadedAt?: string;
+  expiresAt?: string;
+  mine?: boolean;
+  originalName?: string;
 }
 
 /** 创建任务的请求体；服务端会再规范化一遍。 */
@@ -648,6 +665,7 @@ export interface ShortVideoRequest {
 
 export interface ShortVideoTask {
   id: string;
+  storage?: MediaStorageInfo;
   status: ShortVideoStatus;
   progress: number;
   stage: string;
@@ -715,5 +733,247 @@ export interface ShortVideoAdminOverview {
   llm: ShortVideoLlmStatus;
   settings: ShortVideoAdminSettings;
   engineConfig: ShortVideoEngineConfig;
+  activeTasks: number;
+}
+
+/* ── Seedance（火山方舟视频生成） ─────────────────────────────────────────── */
+
+export type SeedanceMode = "text" | "image" | "omni";
+export type SeedanceStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "expired";
+export type SeedanceRefKind = "image" | "video" | "audio";
+
+export interface SeedanceOption {
+  id: string;
+  label: string;
+  hint: string;
+}
+
+export interface SeedanceRatioOption extends SeedanceOption {
+  w: number;
+  h: number;
+}
+
+/** 服务端下发的模型能力矩阵：界面按它决定哪些参数能调、哪些藏起来。 */
+export interface SeedanceModel {
+  id: string;
+  name: string;
+  family: string;
+  status: "active" | "retiring";
+  blurb: string;
+  priceHint: string;
+  resolutions: string[];
+  defaultResolution: string;
+  duration: { min: number; max: number; smart: boolean };
+  frames: boolean;
+  audio: boolean;
+  seed: boolean;
+  cameraFixed: boolean;
+  draft: boolean;
+  serviceTiers: string[];
+  priority: boolean;
+  outputFormats: string[];
+  webSearch: boolean;
+  omniTaskType: boolean;
+  modes: SeedanceMode[];
+  lastFrame: boolean;
+  textAdaptive: boolean;
+  imageAdaptiveOnly: boolean;
+  omni: { images: number; videos: number; audios: number; audioOnly: boolean; videoSeconds: number; audioSeconds: number; clipSeconds: [number, number] } | null;
+}
+
+export interface SeedanceOptions {
+  modes: SeedanceOption[];
+  models: SeedanceModel[];
+  defaultModel: string;
+  ratios: SeedanceRatioOption[];
+  resolutions: SeedanceOption[];
+  outputFormats: SeedanceOption[];
+  serviceTiers: SeedanceOption[];
+  omniTaskTypes: SeedanceOption[];
+  /** 中间帧的两种落地法：reference（2.x 参考图一镜到底）/ segments（分段接力 + 自动合并）。 */
+  keyframeStrategies: SeedanceOption[];
+  statusLabels: Record<string, string>;
+  limits: {
+    maxActivePerUser: number;
+    maxPromptChars: number;
+    maxCount: number;
+    /** 首帧 + 中间帧 + 尾帧最多几张。 */
+    maxKeyframes: number;
+    retention: { uploadHours: number; outputDays: number };
+    expiresAfter: [number, number];
+    frames: [number, number];
+    seedMax: number;
+    priority: [number, number];
+    refMaxBytes: Record<SeedanceRefKind, number>;
+    refExts: Record<SeedanceRefKind, string[]>;
+    imagePx: [number, number];
+    imageRatio: [number, number];
+  };
+}
+
+export interface SeedanceStatusInfo {
+  configured: boolean;
+  online: boolean;
+  latencyMs?: number;
+  error: string;
+  baseUrl: string;
+  keySource: "admin" | "env" | "none";
+  /** 参考视频 / 音频要靠公网地址给方舟；没配就只能用图片（走 base64）。 */
+  publicMediaReady: boolean;
+}
+
+export interface SeedanceRef {
+  id: string;
+  kind: SeedanceRefKind;
+  ext: string;
+  mime: string;
+  name: string;
+  bytes: number;
+  width: number | null;
+  height: number | null;
+  durationSeconds: number | null;
+  source: "upload" | "last_frame";
+  url: string;
+  createdAt: string;
+}
+
+/** 一个素材槽位：要么是已上传素材的编号，要么是一个公网链接。 */
+export interface SeedanceMediaSlot {
+  refId?: string;
+  url?: string;
+  kind?: SeedanceRefKind;
+  name?: string | null;
+}
+
+export interface SeedanceRequest {
+  model: string;
+  mode: SeedanceMode;
+  prompt: string;
+  firstFrame: SeedanceMediaSlot | null;
+  lastFrame: SeedanceMediaSlot | null;
+  /** 中间帧（按时间顺序）；方舟本身只认首尾帧，靠 keyframeStrategy 落地。 */
+  middleFrames: SeedanceMediaSlot[];
+  keyframeStrategy: "reference" | "segments";
+  references: Array<SeedanceMediaSlot & { kind: SeedanceRefKind }>;
+  omniTaskType: string;
+  ratio: string;
+  resolution: string;
+  /** -1 = 智能时长（模型自己定）。 */
+  duration: number;
+  /** 只有 1.0 系列支持；填了就按帧数算、忽略秒数。 */
+  frames: number | null;
+  generateAudio: boolean;
+  watermark: boolean;
+  seed: number;
+  cameraFixed: boolean;
+  returnLastFrame: boolean;
+  outputFormat: string;
+  serviceTier: string;
+  priority: number;
+  draft: boolean;
+  webSearch: boolean;
+  expiresAfter: number;
+  count: number;
+  draftTaskId?: string | null;
+}
+
+export interface SeedanceTaskFile {
+  name: string;
+  bytes: number;
+  url: string;
+  format?: string;
+}
+
+export interface SeedanceGroup {
+  id: string;
+  strategy: string;
+  total: number;
+  /** 这条任务是第几段（从任务卡上看时才有）。 */
+  index: number | null;
+  completed: number;
+  failed: number;
+  present: number;
+  status: "pending" | "merging" | "merged" | "failed" | "partial";
+  error: string | null;
+  merged: { name: string; bytes: number; url: string; durationSeconds: number | null } | null;
+  mergedExpiredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SeedanceTask {
+  id: string;
+  arkTaskId: string | null;
+  /** 还没交给方舟、在本站排队（分段接力超出并发的那几段）。 */
+  pendingSubmit: boolean;
+  model: string;
+  modelName: string;
+  mode: SeedanceMode;
+  status: SeedanceStatus;
+  statusLabel: string;
+  prompt: string;
+  group: SeedanceGroup | null;
+  storage: MediaStorageInfo;
+  params: Partial<SeedanceRequest> & { ratioLocked?: boolean; modelName?: string };
+  content: Array<{ type: string; role?: string; refId?: string | null; url?: string | null; name?: string | null; text?: string; id?: string }>;
+  result: {
+    video: SeedanceTaskFile | null;
+    lastFrame: SeedanceTaskFile | null;
+    remoteVideoUrl: string | null;
+    duration: number | null;
+    frames: number | null;
+    fps: number | null;
+    resolution: string | null;
+    ratio: string | null;
+    seed: number | null;
+    generateAudio: boolean | null;
+    outputFormat: string | null;
+    draft: boolean | null;
+    usage: { completionTokens: number; totalTokens: number; webSearch: number | null } | null;
+    arkModel: string | null;
+  };
+  error: string | null;
+  errorCode: string | null;
+  credits: number;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+}
+
+export interface SeedanceAdminSettings {
+  apiKeyConfigured: boolean;
+  apiKeyHint: string;
+  apiKeySource: "admin" | "env" | "none";
+  baseUrl: string;
+  defaultModel: string;
+  maxActivePerUser: number;
+  publicBaseUrl: string;
+  enabledModels: string[];
+  sources: Record<"baseUrl" | "defaultModel" | "maxActivePerUser" | "publicBaseUrl" | "enabledModels", "admin" | "env">;
+  updatedAt: string | null;
+}
+
+export interface SeedanceArkModel {
+  id: string;
+  name: string;
+  status: string;
+  version: string;
+  taskTypes: string[];
+  inputs: string[];
+  inCatalog: boolean;
+}
+
+export interface SeedanceModelAccess {
+  model: string;
+  /** ok = 能调；unauthorized = Key 没这个模型的权限；not_open = 没开通；unknown = 方舟不认识；error = 没探到。 */
+  access: "ok" | "unauthorized" | "not_open" | "unknown" | "error";
+  detail: string;
+  latencyMs: number;
+}
+
+export interface SeedanceAdminOverview {
+  status: SeedanceStatusInfo;
+  settings: SeedanceAdminSettings;
+  models: SeedanceModel[];
   activeTasks: number;
 }
