@@ -6,6 +6,9 @@
 // 5) 第二轮补漏：后台模板真的进出图链路、规则定时刷新；刷新页面时软删除本地也要同步；
 //    改密 / 建工作流任务也走统一的会话失效；偏好同步失败会重试、退出前先推；过期成片不能再加入参考 / 放到画布；
 //    画布里老的服务器地址资产补转；「全部推云盘」也有 N/M 进度和停止。
+// 6) 第三轮补漏：缺失的成片路径明确 404（不再掉进 SPA 回退变成 index.html + 200）、画布只认 image/*；
+//    创作台 / 画布成片库也挡过期成片；退出时偏好推不出去暂存到本机、下次登录补推；退出时删不掉的留 pending 墓碑、下次登录补删；
+//    整批推云盘按当前错误判断是否整批失败；短视频回传断流不留 .part。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -45,7 +48,7 @@ assert(app.includes("window.history.pushState({}, \"\", nextPath);\n    setPath(
 assert(app.includes("window.addEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)"), "App 要监听会话失效事件");
 assert(app.includes("登录已失效"), "回登录页时要说明原因");
 assert(app.includes("const handleDeleteResult = (id: string) => {") && app.includes("}, 5000);") && app.includes("handleUndoDeletes"), "删除成片是 5 秒软删除 + 撤销");
-assert(app.includes('keepalive: true }).catch'), "页面关掉前没到点的删除要 keepalive 发出去");
+assert(app.includes("void sendPendingDeletes(accountId, ids, { keepalive: true, attempts: 1 });"), "页面关掉前没到点的删除要 keepalive 发出去（卸载中只发一次，失败的下次登录补）");
 assert(app.includes('className="view-keepalive" hidden={view !== "workflows"}'), "功能中心保活不卸载");
 assert(app.includes("handleAbandonTask") && app.includes("new AbortController()"), "运行中的任务能放弃等待");
 assert(app.includes("saveAllProgress={saveAllProgress}") && app.includes("onCancelSaveAll={handleCancelSaveAll}"), "全部存到本地有进度和停止");
@@ -73,9 +76,10 @@ assert(api.includes("export async function fetchAppSettings()"), "要有轻量�
 const storedState = await fs.readFile("src/lib/storedState.ts", "utf8");
 assert(storedState.includes("export async function flushPreferenceSync(") && storedState.includes("PREFERENCE_RETRY_DELAYS_MS"), "偏好同步失败要放回队列按退避重试");
 assert(storedState.includes("if (!pendingPreferencePatch.has(key)) pendingPreferencePatch.set(key, value);"), "重试时期间用户又改过的键以新值为准");
-assert(app.includes("await Promise.all([flushPreferenceSync().catch(() => undefined), commitPendingDeletesNow()]);"), "退出前先把没推的偏好推掉、撤销期内的删除提交掉");
+assert(app.includes("flushPreferenceSync({ final: true }).catch(() => undefined), commitPendingDeletesNow()"), "退出前先把没推的偏好推掉（final：原地重试、再不行暂存）、撤销期内的删除提交掉");
+assert(app.includes("Promise.race([Promise.all([flushPreferenceSync") && app.includes("SIGN_OUT_SYNC_TIMEOUT_MS"), "服务器僵住也不能让退出卡死");
 assert(app.includes("const flushPendingDeletes = () => {") && app.includes('storedStateKeyForAccount("clothdesign:results", accountId)'), "关页 / 刷新时软删除要同步改 localStorage，不能只发请求");
-assert(app.includes("const tombstones = recentlyDeletedResultIds(data.account.id);") && app.includes("rememberDeletedResults(accountId, ids);"), "keepalive 的 DELETE 可能比新页面的 /api/me 晚到：刚删的 id 要有墓碑，合并时过滤掉");
+assert(app.includes("const tombstones = recentlyDeletedResultIds(data.account.id);") && app.includes("rememberDeletedResults(accountId, ids, { pending: true });"), "keepalive 的 DELETE 可能比新页面的 /api/me 晚到：刚删的 id 要有墓碑，合并时过滤掉");
 assert(app.includes("archiveAllProgress={archiveAllProgress}") && app.includes("onCancelArchiveAll={handleCancelArchiveAll}"), "全部推云盘也有进度和停止");
 assert(app.includes("const { result } = await archiveGenerationResult(item.id);") && !app.includes("archiveAllGenerationResults("), "全部推云盘改成客户端逐张推，才有得进度可报、有得停");
 assert(simple.includes("EXPIRED_ACTION_HINT") && (simple.match(/disabled=\{(selected|result)\.storageStatus === "expired"\}/g) || []).length >= 4, "过期成片的加入参考 / 放到画布要禁用");
@@ -83,6 +87,27 @@ assert(canvas.includes("async function migrateManagedAssets(editor: Editor)") &&
 assert(canvas.includes("这张成片已在服务器上清理，没法再放到画布。"), "文件已清理就报错，不往画布放注定裂掉的图");
 const shortVideoServer = await fs.readFile("server/shortvideo.mjs", "utf8");
 assert(shortVideoServer.includes("AND status IN ('queued', 'running')\" : \"\"") && (shortVideoServer.match(/\{ onlyActive: true \}/g) || []).length >= 4, "轮询写回只认还在跑的行，取消不会被引擎回包改回去");
+
+/* ── 第三轮补漏的静态检查 ─────────────────────────────────────────────────── */
+const serverIndex = await fs.readFile("server/index.mjs", "utf8");
+assert(serverIndex.includes("const missingManagedAsset = ") && serverIndex.includes("app.use(generatedImages.publicPath, missingManagedAsset);") && serverIndex.includes("app.use(generatedVideos.publicPath, missingManagedAsset);"), "缺失的成片 / 视频路径要明确 404，不能掉进 SPA 回退");
+assert(serverIndex.indexOf("missingManagedAsset") < serverIndex.indexOf("app.get(/.*/, (_req, res) => {"), "404 兜底得排在 SPA 回退前面");
+assert(canvas.includes('response.headers.get("content-type")') && canvas.includes("throw goneError()"), "画布拉成片只认 image/*：回了 HTML 也当文件没了，不能把网页存进资产");
+assert(canvas.includes("const liveResults = useMemo(() => results.filter((item) => item.storageStatus !== \"expired\"), [results]);") && canvas.includes("results: liveResults"), "画布成片库 / 画框引用选择器不列过期成片");
+const gallery = await fs.readFile("src/components/OutputGallery.tsx", "utf8");
+assert(gallery.includes("EXPIRED_REFERENCE_HINT") && gallery.includes('disabled={!selected || selected.storageStatus === "expired"}') && gallery.includes('disabled={result.storageStatus === "expired"}'), "创作台的加入参考（舞台 + 网格）也要挡过期成片");
+assert(app.includes("fatal = /WebDAV|未启用|未配置|401|403|认证/.test(message);"), "整批推云盘：按这一张的错误判断是否整批失败，不是第一条");
+assert(storedState.includes("export async function flushPreferenceSync(options: { keepalive?: boolean; final?: boolean } = {}): Promise<boolean>"), "flushPreferenceSync 要有 final 模式并回报是否推成");
+assert(storedState.includes("export function stashUnsyncedPreferences(") && storedState.includes("export function takeUnsyncedPreferences(") && storedState.includes("const unsynced = takeUnsyncedPreferences(accountId);"), "推不出去的偏好暂存到设备上，下次登录补推");
+assert(storedState.includes("if (pendingPreferencePatch.get(key) === value) {") && storedState.includes("if (pendingPreferencePatch.size) schedulePreferenceSync(PREFERENCE_SYNC_DELAY_MS);"), "三次重试都失败只放弃这一批的键，请求期间新改的照常排队");
+assert(storedState.includes("if (pendingPreferencePatch.size && preferenceSyncAccount) stashUnsyncedPreferences("), "掉线时没推出去的也暂存，不是直接作废");
+const deletedResults = await fs.readFile("src/lib/deletedResults.ts", "utf8");
+assert(deletedResults.includes("export function pendingDeletedResultIds(") && deletedResults.includes("export function markDeletedResultsDone(") && deletedResults.includes("PENDING_TTL_MS"), "没确认删掉的要记成 pending 墓碑");
+assert(app.includes("const replayPendingDeletes = async (accountId: string) => {") && app.includes("void replayPendingDeletes(data.account.id);"), "登录后补发上次没删成的删除");
+assert(api.includes("export async function deleteGenerationResultQuietly(") && api.includes("response.status === 404 || response.status === 410"), "关页 / 退出前的删除要有不抛错的版本，404 算删成");
+const shortVideoEngine = await fs.readFile("server/shortvideo-engine.mjs", "utf8");
+assert(shortVideoEngine.includes("await fs.rm(temp, { force: true }).catch(() => undefined);"), "回传断流要把 .part 删掉");
+assert((shortVideoServer.match(/await fs\.rm\(directory, \{ recursive: true, force: true \}\)\.catch\(\(\) => undefined\);/g) || []).length >= 3, "成片拉到一半失败 / 取消要把任务目录清掉");
 
 /* ── 真浏览器：地址栏视图 / 软删除撤销 / 会话失效 / 功能中心保活 ─────────── */
 function waitForOutput(child, pattern) {
@@ -312,7 +337,124 @@ try {
   assert("clothdesign:railCollapsed" in (preferencePuts[1].preferences || {}), "重试那次要带上没推成功的键");
   assert.equal(preferencePuts[1].preferences["clothdesign:railCollapsed"], true);
 
-  console.log(JSON.stringify({ checks: "passed", deleteCalls, generateRequests: generateBodies.length, preferencePuts: preferencePuts.length }, null, 2));
+  await page.unroute("**/api/me/preferences");
+
+  /* 缺失的成片 / 视频路径要 404，不能掉进 SPA 回退变成 index.html + 200（画布会把 HTML 当图片存进去） */
+  const missingImage = await page.evaluate(async () => {
+    const response = await fetch("/generated-images/not-there-" + Date.now() + ".png", { credentials: "include" });
+    return { status: response.status, contentType: response.headers.get("content-type") || "" };
+  });
+  assert.equal(missingImage.status, 404, "缺失的成片路径要 404");
+  assert(!/text\/html/.test(missingImage.contentType), "缺失的成片不能回 HTML");
+  const missingVideo = await page.evaluate(async () => (await fetch("/generated-videos/not-there.mp4", { credentials: "include" })).status);
+  assert.equal(missingVideo, 404, "缺失的视频路径要 404");
+  const realImage = await page.evaluate(async () => {
+    const img = document.querySelector(".simple-result-card:not(.simple-result-card-pending) img");
+    if (!img) return null;
+    const response = await fetch(img.getAttribute("src"), { credentials: "include" });
+    return { status: response.status, contentType: response.headers.get("content-type") || "" };
+  });
+  if (realImage) assert(realImage.status === 200 && /^image\//.test(realImage.contentType), `真成片照常 image/*（${JSON.stringify(realImage)}）`);
+
+  /* 退出时偏好推不出去：不能丢——暂存到本机，下次这个账号登录时补推 */
+  const accountId = await page.evaluate(() => localStorage.getItem("clothdesign:active-account"));
+  assert(accountId, "登录态下要有 active-account");
+  const signOutPuts = [];
+  await page.route("**/api/me/preferences", async (route) => {
+    signOutPuts.push(route.request().postDataJSON());
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "模拟退出时服务端挂了" }) });
+  });
+  await page.locator(".rail button[aria-label='展开侧边栏']").click(); // railCollapsed: true → false
+  await page.waitForFunction(() => document.querySelector(".rail:not(.collapsed)") !== null);
+  await page.locator(".signout-button").click();
+  await page.locator("#auth-email").waitFor({ state: "visible", timeout: 20000 });
+  assert(signOutPuts.length >= 2, `退出前推不出去要原地再试（实际 PUT ${signOutPuts.length} 次）`);
+  const stash = await page.evaluate(() => JSON.parse(localStorage.getItem("clothdesign:unsynced-preferences") || "{}"));
+  assert(stash[accountId] && stash[accountId].patch && stash[accountId].patch["clothdesign:railCollapsed"] === false, `没推出去的偏好要暂存在本机（${JSON.stringify(stash)}）`);
+  assert.equal(await page.evaluate((id) => localStorage.getItem(`clothdesign:${encodeURIComponent(id)}:railCollapsed`), accountId), null, "退出仍然会清掉这个账号的本地命名空间");
+  await page.unroute("**/api/me/preferences");
+
+  const replayPuts = [];
+  await page.route("**/api/me/preferences", async (route) => {
+    replayPuts.push(route.request().postDataJSON());
+    await route.continue();
+  });
+  await page.locator(".auth-tab", { hasText: "登录" }).click();
+  await page.locator("#auth-email").fill("review-fixes@example.test");
+  await page.locator("input[autocomplete='current-password']").fill("clothdesign123");
+  await page.locator(".auth-shell button[type='submit'], form button[type='submit']").first().click();
+  await page.locator(".rail-nav").waitFor({ state: "visible", timeout: 15000 });
+  const replayDeadline = Date.now() + 9000;
+  while (!replayPuts.some((body) => body?.preferences && "clothdesign:railCollapsed" in body.preferences) && Date.now() < replayDeadline) await page.waitForTimeout(200);
+  const replayed = replayPuts.find((body) => body?.preferences && "clothdesign:railCollapsed" in body.preferences);
+  assert(replayed, `重新登录后要把暂存的偏好补推上去（实际 PUT：${JSON.stringify(replayPuts)}）`);
+  assert.equal(replayed.preferences["clothdesign:railCollapsed"], false, "补推的是退出前没推出去的那个值");
+  await page.waitForFunction(() => {
+    const rail = document.querySelector(".rail");
+    return rail && !rail.classList.contains("collapsed");
+  }, null, { timeout: 5000 });
+  await page.waitForFunction(
+    (id) => !(JSON.parse(localStorage.getItem("clothdesign:unsynced-preferences") || "{}")[id]),
+    accountId,
+    { timeout: 9000 },
+  );
+  await page.unroute("**/api/me/preferences");
+
+  /* 退出时删除请求失败：成片不能下次登录又回来——留 pending 墓碑，重新登录后补删 */
+  await page.locator(".rail-nav button[aria-label='自由创作']").click();
+  await page.waitForFunction(() => window.location.pathname === "/free");
+  await page.getByRole("button", { name: "简易", exact: true }).click();
+  if ((await page.locator(".simple-result-card:not(.simple-result-card-pending)").count()) === 0) {
+    const box = page.locator(".simple-card textarea").first();
+    await box.waitFor({ state: "visible", timeout: 10000 });
+    await box.fill("一条藏青色半身裙");
+    await page.locator(".simple-submit button.btn-primary").click();
+    await page.locator(".simple-result-card:not(.simple-result-card-pending) img").first().waitFor({ state: "visible", timeout: 20000 });
+  }
+  const meBeforeFailedDelete = (await fetchJson("/api/me")).json;
+  const cardsBeforeFailedDelete = await page.locator(".simple-result-card:not(.simple-result-card-pending)").count();
+  let failedDeleteCalls = 0;
+  await page.route("**/api/generation-results/*", async (route) => {
+    if (route.request().method() !== "DELETE") return route.continue();
+    failedDeleteCalls += 1;
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "模拟删除时服务端挂了" }) });
+  });
+  await page.locator(".simple-result-card .simple-result-actions button", { hasText: "删除" }).first().click();
+  await page.locator(".undo-notice").waitFor({ state: "visible" });
+  await page.locator(".signout-button").click(); // 撤销期内就退出：删除要立刻提交，失败了也不能丢
+  await page.locator("#auth-email").waitFor({ state: "visible", timeout: 20000 });
+  assert(failedDeleteCalls >= 2, `退出前删除失败要原地再试一次（实际 DELETE ${failedDeleteCalls} 次）`);
+  const tombstones = await page.evaluate(() => JSON.parse(localStorage.getItem("clothdesign:deleted-results") || "{}"));
+  const pendingTombstones = (tombstones[accountId] || []).filter((item) => item.pending);
+  assert.equal(pendingTombstones.length, 1, `没删成的要留 pending 墓碑（${JSON.stringify(tombstones)}）`);
+  await page.unroute("**/api/generation-results/*");
+
+  let replayDeleteCalls = 0;
+  await page.route("**/api/generation-results/*", async (route) => {
+    if (route.request().method() === "DELETE") replayDeleteCalls += 1;
+    await route.continue();
+  });
+  await page.locator(".auth-tab", { hasText: "登录" }).click();
+  await page.locator("#auth-email").fill("review-fixes@example.test");
+  await page.locator("input[autocomplete='current-password']").fill("clothdesign123");
+  await page.locator(".auth-shell button[type='submit'], form button[type='submit']").first().click();
+  await page.locator(".rail-nav").waitFor({ state: "visible", timeout: 15000 });
+  const deleteReplayDeadline = Date.now() + 9000;
+  while (replayDeleteCalls < 1 && Date.now() < deleteReplayDeadline) await page.waitForTimeout(200);
+  assert(replayDeleteCalls >= 1, "重新登录后要补发没删成的删除");
+  await page.waitForFunction(
+    (id) => !(JSON.parse(localStorage.getItem("clothdesign:deleted-results") || "{}")[id] || []).some((item) => item.pending),
+    accountId,
+    { timeout: 9000 },
+  );
+  const meAfterReplay = (await fetchJson("/api/me")).json;
+  assert.equal(meAfterReplay.generationResults.length, meBeforeFailedDelete.generationResults.length - 1, "补删之后服务器上真的没了");
+  assert(!meAfterReplay.generationResults.some((item) => item.id === pendingTombstones[0].id), "补删的就是退出前没删成的那张");
+  await page.getByRole("button", { name: "简易", exact: true }).click();
+  await page.waitForFunction((expected) => document.querySelectorAll(".simple-result-card:not(.simple-result-card-pending)").length === expected, cardsBeforeFailedDelete - 1, { timeout: 10000 });
+  await page.unroute("**/api/generation-results/*");
+
+  console.log(JSON.stringify({ checks: "passed", deleteCalls, generateRequests: generateBodies.length, preferencePuts: preferencePuts.length, signOutPuts: signOutPuts.length, replayDeleteCalls }, null, 2));
 } finally {
   await browser?.close();
   appProcess.kill("SIGTERM");

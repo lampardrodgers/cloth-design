@@ -250,7 +250,7 @@ const fakeEngine = http.createServer(async (req, res) => {
     const body = JSON.parse((await readBody(req)).toString("utf8"));
     const id = `mpt-${engineTasks.size + 1}`;
     const subject = String(body.video_subject || "");
-    const mode = subject.includes("FAIL") ? "fail" : subject.includes("SLOW") ? "slow" : subject.includes("LOST") ? "lost" : subject.includes("HOLD") ? "hold" : "ok";
+    const mode = subject.includes("FAIL") ? "fail" : subject.includes("SLOW") ? "slow" : subject.includes("LOST") ? "lost" : subject.includes("HOLD") ? "hold" : subject.includes("BROKEN") ? "broken" : "ok";
     engineTasks.set(id, { body, ticks: 0, mode });
     engineJson(res, 200, { task_id: id });
     return;
@@ -314,6 +314,13 @@ const fakeEngine = http.createServer(async (req, res) => {
     }
     if (name.endsWith(".mp4")) {
       res.setHeader("content-type", "video/mp4");
+      if (engineTasks.get(taskId)?.mode === "broken" && req.method === "GET") {
+        // 声称很长、只给一半就掐线：服务端拉到一半会断流，半截的 .part 不能留下。
+        res.setHeader("content-length", String(fakeMp4.length * 4));
+        res.write(fakeMp4.subarray(0, Math.floor(fakeMp4.length / 2)));
+        setTimeout(() => res.destroy(), 50);
+        return;
+      }
       res.setHeader("content-length", String(fakeMp4.length));
       res.end(req.method === "HEAD" ? undefined : fakeMp4);
       return;
@@ -659,6 +666,17 @@ try {
   assert.match(failed.error, /配音阶段失败：TTS request timed out/);
   assert.equal([...engineTasks.values()].at(-1).body.video_source, "local");
   assert.deepEqual([...engineTasks.values()].at(-1).body.video_materials, [{ provider: "local", url: "clip-1.mp4", duration: 0 }]);
+
+  /* ── 回传断流：标失败，半截的 .part 和任务目录都不留 ───────────────────── */
+  response = await request(baseUrl, admin, "/api/shortvideo/tasks", { method: "POST", ...jsonBody({ subject: "BROKEN 回传断流", script: "文案", terms: ["b"] }) });
+  await assertOk(response, 202);
+  const broken = (await response.json()).task;
+  const brokenFailed = await waitForTask(baseUrl, admin, broken.id, (item) => item.status === "failed");
+  assert.equal(brokenFailed.failureSource, "system");
+  assert.match(brokenFailed.error, /回传成片失败/);
+  await assert.rejects(fs.access(path.join(assetDir, broken.id)), "拉到一半失败的任务目录要清掉（包括 .part）");
+  const leftovers = await fs.readdir(assetDir, { recursive: true }).catch(() => []);
+  assert(!leftovers.some((name) => String(name).endsWith(".part")), `不能留下 .part：${leftovers.join(", ")}`);
 
   /* ── 引擎重启丢了任务态，但成片已经落盘：照常收工 ──────────────────────── */
   response = await request(baseUrl, admin, "/api/shortvideo/tasks", { method: "POST", ...jsonBody({ subject: "LOST 引擎重启", script: "文案", terms: ["x"] }) });

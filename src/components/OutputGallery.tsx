@@ -4,6 +4,9 @@ import { isPlaceholderImage } from "../lib/providerMode";
 import { resultFileName } from "../lib/resultFiles";
 import type { GeneratedResult, ReferenceImage, StorageStatus } from "../types";
 
+/** 过期成片文件已经不在服务器上了，再拿去当参考只会让下一次生成报「参考图读不到」。 */
+const EXPIRED_REFERENCE_HINT = "这张成片已在服务器上清理，文件不在了，不能再加入参考。";
+
 const storageStatusLabels: Record<StorageStatus, string> = {
   "local-cache": "服务器暂存",
   "cloud-temp": "服务器暂存",
@@ -169,8 +172,8 @@ export function ResultStage({
             <button
               type="button"
               className="stage-tool stage-tool-primary"
-              disabled={!selected}
-              title="把这张成片放进左栏参考素材，接着往下改"
+              disabled={!selected || selected.storageStatus === "expired"}
+              title={selected?.storageStatus === "expired" ? EXPIRED_REFERENCE_HINT : "把这张成片放进左栏参考素材，接着往下改"}
               onClick={() => selected && onUseAsReference(selected)}
             >
               加入参考
@@ -399,7 +402,14 @@ export function ResultPanelList({
               <span className="sr-only"> {imageQualitySummary({ qualityGate: result.qualityGate, imageInspection: result.imageInspection })}</span>
             </small>
             <div className="result-actions">
-              <button type="button" className="text-button" aria-label="加入参考" onClick={() => onUseAsReference(result)}>
+              <button
+                type="button"
+                className="text-button"
+                aria-label="加入参考"
+                disabled={result.storageStatus === "expired"}
+                title={result.storageStatus === "expired" ? EXPIRED_REFERENCE_HINT : undefined}
+                onClick={() => onUseAsReference(result)}
+              >
                 加入参考
               </button>
               {result.storageStatus === "cloud-temp" || result.storageStatus === "local-cache" ? (

@@ -525,6 +525,23 @@ export async function deleteGenerationResult(id: string) {
   return parseJson<{ deleted: boolean; id: string; file?: { deleted?: boolean; fileName?: string; reason?: string } | null }>(response);
 }
 
+/**
+ * 删成片但不抛错：返回服务端是否已经没有这条了（2xx / 404 / 410 都算「没了」）。
+ * 给关页 / 退出前的批量删除用——那时候没人看得到错误弹窗，失败的要留墓碑等下次登录补删。
+ */
+export async function deleteGenerationResultQuietly(id: string, options: { keepalive?: boolean } = {}) {
+  try {
+    const response = await fetch(`/api/generation-results/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      credentials: "include",
+      keepalive: options.keepalive === true,
+    });
+    return response.ok || response.status === 404 || response.status === 410;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchStorage(query: AdminListQuery = {}) {
   const response = await fetch(`/api/me/storage${pageQuery(query)}`, { credentials: "include" });
   return parseJson<StorageResponse>(response);

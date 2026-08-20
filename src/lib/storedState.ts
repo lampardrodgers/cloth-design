@@ -35,9 +35,64 @@ export const SYNCED_PREFERENCE_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 const PREFERENCE_SYNC_DELAY_MS = 1500;
-/** 推送失败的重试间隔：第 1 次 3 秒、第 2 次 10 秒、第 3 次 30 秒，再失败就放弃并上报。 */
+/** 推送失败的重试间隔：第 1 次 3 秒、第 2 次 10 秒、第 3 次 30 秒，再失败就暂存到设备上等下次登录补推，并上报。 */
 const PREFERENCE_RETRY_DELAYS_MS = [3000, 10000, 30000];
+/** 退出前的最后一次推送（final）：等不了几十秒的退避，失败就原地再试两次，再不行才暂存。 */
+const PREFERENCE_FINAL_RETRY_DELAYS_MS = [800, 1500];
 const pendingPreferencePatch = new Map<string, unknown>();
+
+/* ── 没推出去的偏好：按账号暂存在设备级的键里 ───────────────────────────────
+ * 退出 / 掉线 / 连续重试都失败时，这批改动不再一扔了之：存在这个（不随账号命名空间一起清的）键下，
+ * 下次同一账号在这台设备登录时以它为准落地并补推。只留 24 小时——隔太久再把旧值推上去，反而可能盖掉别处的新改动。
+ * ────────────────────────────────────────────────────────────────────────── */
+export const UNSYNCED_PREFERENCES_KEY = "clothdesign:unsynced-preferences";
+const UNSYNCED_PREFERENCES_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface UnsyncedPreferences {
+  at: number;
+  patch: Record<string, unknown>;
+}
+
+function readUnsyncedPreferences(now = Date.now()): Record<string, UnsyncedPreferences> {
+  const stored = readStoredState<Record<string, UnsyncedPreferences>>(UNSYNCED_PREFERENCES_KEY, {});
+  const live: Record<string, UnsyncedPreferences> = {};
+  for (const [accountId, entry] of Object.entries(stored && typeof stored === "object" ? stored : {})) {
+    if (entry && typeof entry.patch === "object" && entry.patch && now - Number(entry.at || 0) < UNSYNCED_PREFERENCES_TTL_MS) live[accountId] = entry;
+  }
+  return live;
+}
+
+export function stashUnsyncedPreferences(accountId: string, patch: Record<string, unknown>) {
+  const keys = Object.keys(patch);
+  if (!accountId || !keys.length) return;
+  const all = readUnsyncedPreferences();
+  all[accountId] = { at: Date.now(), patch: { ...(all[accountId]?.patch ?? {}), ...patch } };
+  writeStoredState(UNSYNCED_PREFERENCES_KEY, all);
+}
+
+/** 这些键已经成功推到服务端了：暂存里同名的旧值作废，免得下次登录把旧的又推回去。 */
+function clearUnsyncedPreferences(accountId: string, keys: string[]) {
+  const all = readUnsyncedPreferences();
+  const entry = all[accountId];
+  if (!entry) return;
+  for (const key of keys) delete entry.patch[key];
+  if (!Object.keys(entry.patch).length) delete all[accountId];
+  writeStoredState(UNSYNCED_PREFERENCES_KEY, all);
+}
+
+/** 取走这个账号暂存的偏好（取走即删；推不出去会再存回来）。 */
+export function takeUnsyncedPreferences(accountId: string): Record<string, unknown> | null {
+  const all = readUnsyncedPreferences();
+  const entry = all[accountId];
+  if (!entry) return null;
+  delete all[accountId];
+  writeStoredState(UNSYNCED_PREFERENCES_KEY, all);
+  return entry.patch;
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 let preferenceSyncTimer: number | null = null;
 let preferenceSyncAccount: string | null = null;
 let preferenceSyncInFlight: Promise<void> | null = null;
@@ -49,11 +104,12 @@ function schedulePreferenceSync(delay: number) {
 }
 
 /**
- * 把攒着的偏好推到服务端。
+ * 把攒着的偏好推到服务端。返回这一批是否真的推出去了。
  * 以前是「清空队列 → 发请求」，请求一失败这批改动就没了；现在失败会把没被新改动覆盖的键放回队列按退避重试，
- * 退出登录前也会先 await 一次，不再出现「改完设置 1 秒内点退出 = 这次修改彻底丢了」。
+ * 退出登录前也会先 await 一次（final：原地再试两次），实在推不出去就暂存到设备上等下次登录补推——
+ * 不再出现「改完设置 1 秒内点退出 = 这次修改彻底丢了」。
  */
-export async function flushPreferenceSync(options: { keepalive?: boolean } = {}): Promise<void> {
+export async function flushPreferenceSync(options: { keepalive?: boolean; final?: boolean } = {}): Promise<boolean> {
   if (preferenceSyncTimer !== null) {
     window.clearTimeout(preferenceSyncTimer);
     preferenceSyncTimer = null;
@@ -61,46 +117,83 @@ export async function flushPreferenceSync(options: { keepalive?: boolean } = {})
   if (preferenceSyncInFlight) {
     // 上一批还在路上：等它落地再推剩下的，别让两批乱序互相覆盖。
     await preferenceSyncInFlight;
-    if (!pendingPreferencePatch.size) return;
+    if (!pendingPreferencePatch.size) return true;
   }
-  if (!pendingPreferencePatch.size || !preferenceSyncAccount) return;
-  // 推送途中账号换了就别把 A 的偏好写到 B 头上。
-  if (preferenceSyncAccount !== activeStorageAccount()) {
-    pendingPreferencePatch.clear();
-    return;
-  }
+  if (!pendingPreferencePatch.size || !preferenceSyncAccount) return true;
   const account = preferenceSyncAccount;
   const patch = Object.fromEntries(pendingPreferencePatch);
   pendingPreferencePatch.clear();
+  // 推送途中账号换了就别把 A 的偏好写到 B 头上：A 的暂存起来，A 下次登录再补。
+  if (account !== activeStorageAccount()) {
+    stashUnsyncedPreferences(account, patch);
+    return false;
+  }
+  let synced = false;
   preferenceSyncInFlight = (async () => {
-    try {
-      await saveMyPreferences(patch, options);
-      preferenceSyncFailures = 0;
-    } catch (error) {
-      if (account !== activeStorageAccount()) return; // 已经退出 / 掉线：这批作废
-      // 失败的键放回队列（期间用户又改过的键以新值为准），按退避重试。
-      for (const [key, value] of Object.entries(patch)) {
-        if (!pendingPreferencePatch.has(key)) pendingPreferencePatch.set(key, value);
+    const attempts = options.final ? PREFERENCE_FINAL_RETRY_DELAYS_MS.length + 1 : 1;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        await saveMyPreferences(patch, { keepalive: options.keepalive });
+        synced = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        const delay = PREFERENCE_FINAL_RETRY_DELAYS_MS[attempt];
+        if (attempt < attempts - 1 && delay !== undefined) await sleep(delay);
       }
-      preferenceSyncAccount = account;
-      preferenceSyncFailures += 1;
-      const delay = PREFERENCE_RETRY_DELAYS_MS[preferenceSyncFailures - 1];
-      if (delay !== undefined) {
-        schedulePreferenceSync(delay);
-        return;
-      }
-      preferenceSyncFailures = 0;
-      pendingPreferencePatch.clear();
-      reportClientError({
-        scope: "preferences",
-        message: `偏好同步失败（已重试 ${PREFERENCE_RETRY_DELAYS_MS.length} 次）：${error instanceof Error ? error.message : String(error)}`,
-        detail: { keys: Object.keys(patch) },
-      });
-    } finally {
-      preferenceSyncInFlight = null;
     }
-  })();
+    if (synced) {
+      preferenceSyncFailures = 0;
+      clearUnsyncedPreferences(account, Object.keys(patch));
+      return;
+    }
+    const message = lastError instanceof Error ? lastError.message : String(lastError);
+    if (account !== activeStorageAccount()) {
+      // 等回包的这段时间里已经退出 / 掉线：这批暂存起来，下次登录补推。
+      stashUnsyncedPreferences(account, patch);
+      return;
+    }
+    // 失败的键放回队列（期间用户又改过的键以新值为准）。
+    for (const [key, value] of Object.entries(patch)) {
+      if (!pendingPreferencePatch.has(key)) pendingPreferencePatch.set(key, value);
+    }
+    preferenceSyncAccount = account;
+    if (options.final) {
+      // 退出前的最后一搏也没成：没推出去的全部暂存，退出照常进行。
+      stashUnsyncedPreferences(account, Object.fromEntries(pendingPreferencePatch));
+      pendingPreferencePatch.clear();
+      preferenceSyncFailures = 0;
+      reportClientError({ scope: "preferences", message: `退出前偏好同步失败，已暂存到本机等下次登录补推：${message}`, detail: { keys: Object.keys(patch) } });
+      return;
+    }
+    preferenceSyncFailures += 1;
+    const delay = PREFERENCE_RETRY_DELAYS_MS[preferenceSyncFailures - 1];
+    if (delay !== undefined) {
+      schedulePreferenceSync(delay);
+      return;
+    }
+    // 三次都没推出去：这批先放弃（暂存，下次登录补推）；请求期间新改的键不受牵连，照常排队再推。
+    preferenceSyncFailures = 0;
+    const dropped: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(patch)) {
+      if (pendingPreferencePatch.get(key) === value) {
+        pendingPreferencePatch.delete(key);
+        dropped[key] = value;
+      }
+    }
+    stashUnsyncedPreferences(account, dropped);
+    if (pendingPreferencePatch.size) schedulePreferenceSync(PREFERENCE_SYNC_DELAY_MS);
+    reportClientError({
+      scope: "preferences",
+      message: `偏好同步失败（已重试 ${PREFERENCE_RETRY_DELAYS_MS.length} 次，已暂存等下次登录补推）：${message}`,
+      detail: { keys: Object.keys(dropped) },
+    });
+  })().finally(() => {
+    preferenceSyncInFlight = null;
+  });
   await preferenceSyncInFlight;
+  return synced;
 }
 
 /** 偏好有改动：攒一会儿再一起推，连续打字不会一键一请求。 */
@@ -129,11 +222,18 @@ if (typeof window !== "undefined") {
  */
 export function seedAccountPreferences(accountId: string, preferences: Record<string, unknown> | undefined) {
   const remote = preferences && typeof preferences === "object" ? preferences : {};
+  // 上次退出 / 掉线时没推出去的改动：以它为准落地并补推（服务端那份是更早的）。
+  const unsynced = takeUnsyncedPreferences(accountId);
   for (const key of SYNCED_PREFERENCE_KEYS) {
     const storageKey = storedStateKeyForAccount(key, accountId);
     if (!storageKey) continue;
     // 本机刚改、还没推出去的以本机为准；loadAccount 在支付 / 重登时会再跑，别让旧的服务端值把它盖掉。
     if (pendingPreferencePatch.has(key) && preferenceSyncAccount === accountId) continue;
+    if (unsynced && key in unsynced) {
+      writeStoredState(storageKey, unsynced[key]);
+      pendingPreferencePatch.set(key, unsynced[key]);
+      continue;
+    }
     if (key in remote) {
       writeStoredState(storageKey, remote[key]);
       continue;
@@ -160,8 +260,9 @@ export function setStoredStateAccount(accountId: string | null) {
     // The in-memory state still switches below when storage is unavailable.
   }
   if (!accountId) {
-    // 退出 / 掉线：没推出去的偏好作废，别等下个账号登录时推错人。
-    // （主动退出的那条路在调这里之前会先 await flushPreferenceSync()，所以这里清掉的只是掉线时推不出去的。）
+    // 退出 / 掉线：没推出去的偏好按原账号暂存到设备上，下次这个账号登录再补推——既不丢，也不会等下个账号登录时推错人。
+    // （主动退出的那条路在调这里之前会先 await flushPreferenceSync({ final: true })，所以这里兜住的只是掉线 / 超时那批。）
+    if (pendingPreferencePatch.size && preferenceSyncAccount) stashUnsyncedPreferences(preferenceSyncAccount, Object.fromEntries(pendingPreferencePatch));
     pendingPreferencePatch.clear();
     preferenceSyncFailures = 0;
     if (preferenceSyncTimer !== null) {

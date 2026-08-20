@@ -501,14 +501,25 @@ function isManagedResultUrl(url: string) {
   return url.startsWith("/generated-images/");
 }
 
+const GONE_MESSAGE = "这张成片已在服务器上清理，没法再放到画布。";
+
+function goneError(message = GONE_MESSAGE) {
+  const error = new Error(message) as Error & { gone?: boolean };
+  error.gone = true;
+  return error;
+}
+
 async function fetchAsDataUrl(url: string) {
   const response = await fetch(url, { credentials: "include" });
   if (!response.ok) {
-    const error = new Error(response.status === 404 || response.status === 410 ? "这张成片已在服务器上清理，没法再放到画布。" : `拉取图片失败（${response.status}）`);
-    (error as Error & { gone?: boolean }).gone = response.status === 404 || response.status === 410;
-    throw error;
+    if (response.status === 404 || response.status === 410) throw goneError();
+    throw new Error(`拉取图片失败（${response.status}）`);
   }
+  // 老版本服务端 / 某些反代会把缺失文件回退成 index.html + 200：不是图片就当文件没了，绝不能把一页 HTML 存进画布资产。
+  const contentType = response.headers.get("content-type") || "";
+  if (!/^image\//i.test(contentType)) throw goneError();
   const blob = await response.blob();
+  if (blob.type && !/^image\//i.test(blob.type)) throw goneError();
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -2097,10 +2108,12 @@ export function CanvasBoard({
     }),
     [helpOpen, libraryOpen],
   );
-  const [api, setApi] = useState<CanvasApi>(() => ({ costFor, credits, results, onGenerate, onNotice, onSendToSimple }));
+  // 服务器已清理的成片没有文件可放：成片库、画框的引用选择器都不列它们（简易模式那边是按钮禁用）。
+  const liveResults = useMemo(() => results.filter((item) => item.storageStatus !== "expired"), [results]);
+  const [api, setApi] = useState<CanvasApi>(() => ({ costFor, credits, results: liveResults, onGenerate, onNotice, onSendToSimple }));
   useEffect(
-    () => setApi({ costFor, credits, results, onGenerate, onNotice, onSendToSimple }),
-    [costFor, credits, results, onGenerate, onNotice, onSendToSimple],
+    () => setApi({ costFor, credits, results: liveResults, onGenerate, onNotice, onSendToSimple }),
+    [costFor, credits, liveResults, onGenerate, onNotice, onSendToSimple],
   );
 
   // 组件表必须是稳定的：InFrontOfTheCanvas 固定成 CanvasOverlayHost，数据走 context。

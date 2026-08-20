@@ -22,6 +22,7 @@ import {
   completeDemoPayment,
   createPaymentOrder,
   deleteGenerationResult,
+  deleteGenerationResultQuietly,
   fetchAdminOverview,
   fetchApiConfig,
   fetchAppSettings,
@@ -73,7 +74,7 @@ import {
   writeStoredState,
 } from "./lib/storedState";
 import { storedStateKeyForAccount } from "./lib/storageNamespace";
-import { recentlyDeletedResultIds, rememberDeletedResults } from "./lib/deletedResults";
+import { forgetDeletedResults, markDeletedResultsDone, pendingDeletedResultIds, recentlyDeletedResultIds, rememberDeletedResults } from "./lib/deletedResults";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -223,6 +224,9 @@ function mergeResults(existing: GeneratedResult[], incoming: GeneratedResult[] =
     return true;
   });
 }
+
+/** 退出前等偏好 / 删除同步的上限：服务器僵住也不能让「退出」点了没反应。 */
+const SIGN_OUT_SYNC_TIMEOUT_MS = 6000;
 
 function App() {
   // 自由创作排在导航第一位，登录后也直接落在这里。视图由地址栏路径决定，切视图就是 pushState。
@@ -466,6 +470,14 @@ function App() {
       );
   }, []);
 
+  /** 补发上次没得到确认的删除；服务端说「删了 / 本来就没有」就把墓碑转成普通的，还是失败就留着下次再试。 */
+  const replayPendingDeletes = async (accountId: string) => {
+    const ids = pendingDeletedResultIds(accountId);
+    if (!ids.length) return;
+    const done = (await Promise.all(ids.map(async (id) => ((await deleteGenerationResultQuietly(id)) ? id : null)))).filter((id): id is string => Boolean(id));
+    markDeletedResultsDone(accountId, done);
+  };
+
   const loadAccount = async () => {
     setAuthError("");
     try {
@@ -486,6 +498,8 @@ function App() {
       // 刚在关页 / 刷新前删掉的成片：服务端可能还没来得及处理那条 keepalive 的 DELETE，别让它借 /api/me 复活。
       const tombstones = recentlyDeletedResultIds(data.account.id);
       setResults((items) => mergeResults(items, data.generationResults).filter((item) => !tombstones.has(item.id)));
+      // 上次退出 / 关页时没删成的（网络抖动、请求没发出去）：现在补发，别让「已删除」下次登录又回来。
+      void replayPendingDeletes(data.account.id);
       if ("paymentConfig" in data) setPaymentConfig(data.paymentConfig as PaymentConfigStatus);
       return data.account;
     } catch (error) {
@@ -954,8 +968,11 @@ function App() {
 
   const handleSignOut = async () => {
     const signedOutAccountId = currentUser?.id;
-    // 退出前先把还没推出去的偏好推掉、还在撤销期的删除真的删掉——退了之后就没法再替这个账号发请求了。
-    await Promise.all([flushPreferenceSync().catch(() => undefined), commitPendingDeletesNow()]);
+    // 退出前先把还没推出去的偏好推掉（final：失败原地重试、再不行暂存到本机下次登录补推）、还在撤销期的删除真的删掉
+    // （删不掉的留 pending 墓碑，下次登录补删）——退了之后就没法再替这个账号发请求了。
+    // 服务器僵住也不能让「退出」卡死：最多等这么久，没回来的请求在后台继续，结果照样进暂存 / 墓碑。
+    const signOutSyncTimeout = new Promise<void>((resolve) => window.setTimeout(resolve, SIGN_OUT_SYNC_TIMEOUT_MS));
+    await Promise.race([Promise.all([flushPreferenceSync({ final: true }).catch(() => undefined), commitPendingDeletesNow()]), signOutSyncTimeout]);
     await Promise.all([signOut().catch(() => undefined), endDebugSession().catch(() => undefined)]);
     clearStoredStateAccount(signedOutAccountId);
     setStoredStateAccount(null);
@@ -1082,9 +1099,11 @@ function App() {
           applyResultPatch(item.id, result);
         } catch (error) {
           failed += 1;
-          firstError = firstError || (error instanceof Error ? error.message : "推送失败");
-          // WebDAV 没配 / 认证失败这种是整批都会挂的，别一张张报一百次。
-          fatal = /WebDAV|未启用|未配置|401|403|认证/.test(firstError);
+          const message = error instanceof Error ? error.message : "推送失败";
+          firstError = firstError || message;
+          // WebDAV 没配 / 认证失败这种是整批都会挂的，别一张张报一百次——看的是这一张的错误，不是第一条。
+          fatal = /WebDAV|未启用|未配置|401|403|认证/.test(message);
+          if (fatal && firstError !== message) firstError = message;
         }
         setArchiveAllProgress({ done, total: targets.length, label: `${done} / ${targets.length}` });
         if (fatal) break;
@@ -1269,12 +1288,24 @@ function App() {
   };
 
   const commitDeleteResult = async (id: string) => {
+    const accountId = currentUserRef.current?.id;
+    // 先记 pending 墓碑：请求路上刷新 / 掉线也不会让它复活，失败了下次登录还会补删。
+    rememberDeletedResults(accountId, [id], { pending: true });
     try {
       await deleteGenerationResult(id);
-      rememberDeletedResults(currentUserRef.current?.id, [id]);
+      markDeletedResultsDone(accountId, [id]);
       forgetResultLocally(id);
     } catch (error) {
-      setAuthError(error instanceof Error ? error.message : "删除生成结果失败");
+      const message = error instanceof Error ? error.message : "删除生成结果失败";
+      // 服务端说本来就没有：本地也拿掉就完了。
+      if (/404|不存在|找不到/.test(message)) {
+        markDeletedResultsDone(accountId, [id]);
+        forgetResultLocally(id);
+        return;
+      }
+      // 用户当场看得到失败、成片也还在列表里：墓碑撤掉，不然下次登录会被偷偷补删。
+      forgetDeletedResults(accountId, [id]);
+      setAuthError(message);
     }
   };
 
@@ -1286,7 +1317,7 @@ function App() {
    */
   const flushPendingDeletes = () => {
     const ids = [...pendingDeleteTimersRef.current.keys()];
-    if (!ids.length) return ids;
+    if (!ids.length) return { accountId: activeStorageAccount(), ids };
     pendingDeleteTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     pendingDeleteTimersRef.current.clear();
     const accountId = activeStorageAccount();
@@ -1305,26 +1336,44 @@ function App() {
         }
       }
     }
-    rememberDeletedResults(accountId, ids);
+    // 先记成 pending：请求发出去、服务端确认了再转成普通墓碑；没确认的下次登录补删。
+    rememberDeletedResults(accountId, ids, { pending: true });
     ids.forEach((id) => forgetResultLocally(id));
     setPendingDeleteIds([]);
-    return ids;
+    return { accountId, ids };
+  };
+
+  /**
+   * 把一批删除真的发给服务端；确认没了的把墓碑转成普通的，失败的留 pending 等下次登录补。
+   * 退出前有时间原地再试一次（attempts=2）；关页那一下只发一次 keepalive——卸载中没机会重试，失败的靠下次登录补删。
+   */
+  const sendPendingDeletes = async (accountId: string | null | undefined, ids: string[], options: { keepalive?: boolean; attempts?: number } = {}) => {
+    const attempts = Math.max(1, options.attempts ?? 2);
+    const done = (
+      await Promise.all(
+        ids.map(async (id) => {
+          for (let attempt = 0; attempt < attempts; attempt += 1) {
+            if (await deleteGenerationResultQuietly(id, { keepalive: options.keepalive })) return id;
+          }
+          return null;
+        }),
+      )
+    ).filter((id): id is string => Boolean(id));
+    markDeletedResultsDone(accountId, done);
   };
 
   /** 退出登录前：撤销期内的删除立刻提交（等服务端回包）。 */
   const commitPendingDeletesNow = async () => {
-    const ids = flushPendingDeletes();
-    await Promise.all(ids.map((id) => deleteGenerationResult(id).catch(() => undefined)));
+    const { accountId, ids } = flushPendingDeletes();
+    if (ids.length) await sendPendingDeletes(accountId, ids);
   };
 
   const flushPendingDeletesRef = useRef(flushPendingDeletes);
   flushPendingDeletesRef.current = flushPendingDeletes;
   useEffect(() => {
     const onPageHide = () => {
-      const ids = flushPendingDeletesRef.current();
-      ids.forEach((id) => {
-        void fetch(`/api/generation-results/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include", keepalive: true }).catch(() => undefined);
-      });
+      const { accountId, ids } = flushPendingDeletesRef.current();
+      if (ids.length) void sendPendingDeletes(accountId, ids, { keepalive: true, attempts: 1 });
     };
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);

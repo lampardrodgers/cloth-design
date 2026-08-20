@@ -745,6 +745,13 @@ const generatedImages = generatedImageStaticMount();
 app.use(generatedImages.publicPath, express.static(generatedImages.directory));
 const generatedVideos = generatedVideoStaticMount();
 app.use(generatedVideos.publicPath, express.static(generatedVideos.directory));
+// 成片 / 视频路径下找不到文件就明确 404：不然会一路掉进下面的 SPA 回退，返回 index.html + 200——
+// 客户端的「过期检测」整个被打穿，画布还会把这页 HTML 当图片存进资产里。
+const missingManagedAsset = (_req, res) => {
+  res.status(404).type("text/plain").send("文件不存在或已按保留期清理");
+};
+app.use(generatedImages.publicPath, missingManagedAsset);
+app.use(generatedVideos.publicPath, missingManagedAsset);
 
 if (isProduction) {
   const distPath = path.join(root, "dist");

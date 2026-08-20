@@ -715,10 +715,13 @@ async function importFinishedTask(row, engineTask) {
       videos.push({ name, bytes });
     }
   } catch (error) {
+    // 拉到一半挂了（引擎断流、或者取消把目录清了）：拉下来的半截文件不留，标失败（已取消的行不会被改）。
+    await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
     markTaskFailed(row.id, error instanceof Error ? error.message : String(error), "system");
     return;
   }
   if (!videos.length) {
+    await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
     markTaskFailed(row.id, "成片路径无法解析，回传失败。", "system");
     return;
   }

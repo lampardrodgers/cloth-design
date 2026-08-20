@@ -211,8 +211,14 @@ export async function downloadEngineFile(url, destination) {
   }
   await fs.mkdir(path.dirname(destination), { recursive: true });
   const temp = `${destination}.part`;
-  await pipeline(Readable.fromWeb(response.body), createWriteStream(temp));
-  await fs.rename(temp, destination);
+  try {
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(temp));
+    await fs.rename(temp, destination);
+  } catch (error) {
+    // 流断了 / 任务取消把目录删了：半截的 .part 不能留着占地方。
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+    throw new EngineError(`回传成片失败：${error instanceof Error ? error.message : String(error)}`, { status: 502, code: "download" });
+  }
   const stats = await fs.stat(destination);
   return stats.size;
 }
