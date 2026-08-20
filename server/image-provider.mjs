@@ -4,6 +4,15 @@ import path from "node:path";
 import { deflateSync, inflateSync } from "node:zlib";
 import sharp from "sharp";
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
+import { readResponseBufferLimited } from "./safe-outbound.mjs";
+
+function positiveIntegerFromEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+export const MAX_IMAGE_BYTES = positiveIntegerFromEnv("IMAGE_MAX_BYTES", 40 * 1024 * 1024);
+export const MAX_IMAGE_PIXELS = positiveIntegerFromEnv("IMAGE_MAX_PIXELS", 40_000_000);
 
 function normalizedImageMime(mimeType) {
   return String(mimeType || "image/png").split(";")[0].trim() || "image/png";
@@ -108,7 +117,7 @@ function parsePng(buffer) {
     const dataEnd = dataStart + length;
     if (dataEnd + 4 > buffer.length) break;
     const data = buffer.subarray(dataStart, dataEnd);
-    if (type === "IHDR") {
+    if (type === "IHDR" && data.length >= 13) {
       width = data.readUInt32BE(0);
       height = data.readUInt32BE(4);
       bitDepth = data[8];
@@ -124,6 +133,22 @@ function parsePng(buffer) {
   return { width, height, bitDepth, colorType, interlace, idatChunks };
 }
 
+function imageWithinPixelLimit(width, height) {
+  return Number.isSafeInteger(width) && Number.isSafeInteger(height) && width > 0 && height > 0 && width * height <= MAX_IMAGE_PIXELS;
+}
+
+function inflatePngRows(parsed, channels) {
+  if (!imageWithinPixelLimit(parsed.width, parsed.height)) return null;
+  const expected = parsed.height * (parsed.width * channels + 1);
+  if (!Number.isSafeInteger(expected) || expected <= 0 || expected > MAX_IMAGE_PIXELS * 4 + parsed.height) return null;
+  try {
+    const inflated = inflateSync(Buffer.concat(parsed.idatChunks), { maxOutputLength: expected });
+    return inflated.length === expected ? inflated : null;
+  } catch {
+    return null;
+  }
+}
+
 function decodePngRgba(buffer) {
   const parsed = parsePng(buffer);
   if (!parsed || parsed.bitDepth !== 8 || parsed.interlace !== 0 || parsed.width <= 0 || parsed.height <= 0 || parsed.idatChunks.length === 0) return null;
@@ -131,7 +156,8 @@ function decodePngRgba(buffer) {
   const channels = channelsByColorType[parsed.colorType];
   if (!channels) return null;
   const rowLength = parsed.width * channels;
-  const inflated = inflateSync(Buffer.concat(parsed.idatChunks));
+  const inflated = inflatePngRows(parsed, channels);
+  if (!inflated) return null;
   const rgba = Buffer.alloc(parsed.width * parsed.height * 4);
   let cursor = 0;
   let previous = Buffer.alloc(rowLength);
@@ -213,6 +239,7 @@ function fabricStripeTransitions(decoded) {
 }
 
 export function analyzeFabricImageBuffer(buffer) {
+  validateImageBuffer(buffer, "image/png", "面料素材");
   const decoded = decodePngRgba(buffer);
   if (!decoded) return null;
   const buckets = sampledFabricBuckets(decoded);
@@ -414,7 +441,10 @@ function inspectPngAlpha(buffer) {
   }
   const bytesPerPixel = channels;
   const rowLength = parsed.width * bytesPerPixel;
-  const inflated = inflateSync(Buffer.concat(parsed.idatChunks));
+  const inflated = inflatePngRows(parsed, channels);
+  if (!inflated) {
+    return { hasAlphaChannel: true, transparentPixels: null, opaquePixels: null, inspected: false };
+  }
   let cursor = 0;
   let previous = Buffer.alloc(rowLength);
   let transparentPixels = 0;
@@ -766,6 +796,9 @@ export function validateImageBuffer(buffer, mimeType = "image/png", label = "生
   if (!buffer || buffer.length === 0) {
     throw new Error(`${label}为空。`);
   }
+  if (buffer.length > MAX_IMAGE_BYTES) {
+    throw new Error(`${label}超过 ${Math.ceil(MAX_IMAGE_BYTES / 1024 / 1024)}MB 上限。`);
+  }
   const sniffedMime = sniffImageMime(buffer);
   if (!normalizedMime.startsWith("image/") && !sniffedMime) {
     throw new Error(`${label}不是图片格式：${normalizedMime}`);
@@ -776,6 +809,9 @@ export function validateImageBuffer(buffer, mimeType = "image/png", label = "生
   const dimensions = inspectImageDimensions(buffer);
   if (!dimensions) {
     throw new Error(`${label}不是有效图片文件。`);
+  }
+  if (!imageWithinPixelLimit(dimensions.width, dimensions.height)) {
+    throw new Error(`${label}像素过大，最多 ${MAX_IMAGE_PIXELS.toLocaleString("en-US")} 像素。`);
   }
   return { mimeType: sniffedMime, dimensions };
 }
@@ -825,7 +861,12 @@ export async function persistGeneratedImage(item, { fallbackMimeType = "image/pn
     throw new Error(`生成图片下载失败 (${response.status})。`);
   }
   const mimeType = response.headers.get("content-type") || fallbackMimeType;
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await readResponseBufferLimited(response, {
+    maxBytes: MAX_IMAGE_BYTES,
+    timeoutMs: imageDownloadTimeoutMs(),
+    timeoutMessage: "生成图片下载超时。",
+    label: "生成图片",
+  });
   return persistImageBuffer(buffer, mimeType, "url", { targetSize, outputCompression });
 }
 

@@ -180,6 +180,7 @@ const app = spawn(process.execPath, ["server/index.mjs"], {
     OPENAI_BASE_URL: `http://127.0.0.1:${fakeImagesPort}`,
     OPENAI_IMAGE_MODEL: "gpt-image-2",
     WEBDAV_TIMEOUT_MS: "5000",
+    ALLOW_PRIVATE_OUTBOUND_URLS: "true",
   },
 });
 

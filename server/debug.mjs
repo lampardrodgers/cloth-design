@@ -12,15 +12,23 @@ const DEBUG_COOKIE_MAX_AGE = 180 * 24 * 60 * 60;
 const SEAT_PATTERN = /^[a-f0-9]{12}$/;
 
 /**
- * 调试账号默认只在非生产环境可用。
- * `DEBUG_UNLIMITED=true` 是显式开关：内部部署（NODE_ENV=production）也照样放开；
- * `DEBUG_UNLIMITED=false` 永远关闭，优先级最高。
+ * 调试账号只在非生产环境可用；生产环境即使误配 true 也保持关闭，并由启动断言报错。
+ * `DEBUG_UNLIMITED=false` 在开发/测试环境同样可以显式关闭。
  */
 export function debugUnlimitedAvailable() {
   const flag = String(process.env.DEBUG_UNLIMITED || "").trim().toLowerCase();
+  if (process.env.NODE_ENV === "production") return false;
   if (flag === "false") return false;
   if (flag === "true") return true;
-  return process.env.NODE_ENV !== "production";
+  return true;
+}
+
+/** 调试认证是本地开发能力，生产环境显式开启属于配置错误，直接拒绝启动。 */
+export function assertDebugProductionReady() {
+  const enabled = String(process.env.DEBUG_UNLIMITED || "").trim().toLowerCase() === "true";
+  if (process.env.NODE_ENV === "production" && enabled) {
+    throw new Error("DEBUG_UNLIMITED cannot be enabled in production.");
+  }
 }
 
 export function isDebugUserId(userId) {

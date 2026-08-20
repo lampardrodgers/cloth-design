@@ -85,7 +85,8 @@ try {
   await page.locator(".result-card").first().waitFor({ state: "visible", timeout: 120000 });
 
   const alignment = await page.evaluate(async () => {
-    const localResults = JSON.parse(window.localStorage.getItem("clothdesign:results") || "[]");
+    const accountId = window.localStorage.getItem("clothdesign:active-account");
+    const localResults = JSON.parse(window.localStorage.getItem(`clothdesign:${encodeURIComponent(accountId)}:results`) || "[]");
     const me = await fetch("/api/me", { credentials: "include" }).then((response) => response.json());
     return {
       localTaskId: localResults[0]?.taskId,
@@ -100,7 +101,8 @@ try {
 
   // 成片一出来两边都是「服务器暂存」；没配云盘时点「推到云盘」要明确报错，状态不动
   const storageAlignment = await page.evaluate(async () => {
-    const localResults = JSON.parse(window.localStorage.getItem("clothdesign:results") || "[]");
+    const accountId = window.localStorage.getItem("clothdesign:active-account");
+    const localResults = JSON.parse(window.localStorage.getItem(`clothdesign:${encodeURIComponent(accountId)}:results`) || "[]");
     const me = await fetch("/api/me", { credentials: "include" }).then((response) => response.json());
     return {
       localStorageStatus: localResults[0]?.storageStatus,
@@ -132,7 +134,10 @@ try {
   assert((await page.locator(".storage-notice-error").textContent()).includes("合法"), "WebDAV 地址不合法要有明确提示");
   await clickAndWait(page, page.locator(".rail button[title='生成']"));
 
-  const generatedImageUrl = await page.evaluate(() => JSON.parse(window.localStorage.getItem("clothdesign:results") || "[]")[0]?.imageUrl);
+  const generatedImageUrl = await page.evaluate(() => {
+    const accountId = window.localStorage.getItem("clothdesign:active-account");
+    return JSON.parse(window.localStorage.getItem(`clothdesign:${encodeURIComponent(accountId)}:results`) || "[]")[0]?.imageUrl;
+  });
   await page.locator(".result-card").first().getByRole("button", { name: "加入参考" }).click();
   await page.waitForFunction(
     (imageUrl) => [...document.querySelectorAll(".reference-card img")].some((item) => item.getAttribute("src") === imageUrl),
@@ -143,7 +148,10 @@ try {
     (imageUrl) => ![...document.querySelectorAll(".reference-card img")].some((item) => item.getAttribute("src") === imageUrl),
     generatedImageUrl,
   );
-  const tasksAfterDelete = await page.evaluate(() => JSON.parse(window.localStorage.getItem("clothdesign:tasks") || "[]"));
+  const tasksAfterDelete = await page.evaluate(() => {
+    const accountId = window.localStorage.getItem("clothdesign:active-account");
+    return JSON.parse(window.localStorage.getItem(`clothdesign:${encodeURIComponent(accountId)}:tasks`) || "[]");
+  });
   assert.equal(tasksAfterDelete.some((task) => task.id === alignment.serverTaskId), false);
 } finally {
   if (browser) await browser.close();

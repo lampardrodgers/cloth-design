@@ -1051,6 +1051,11 @@ export function registerBusinessRoutes(app) {
       }
       nextMaxResolution = raw || null;
     }
+    // 先撤销会话再落锁；即使后续数据库写入失败，也不能让已要求锁定的账号继续保持登录。
+    if (nextStatus === "locked") {
+      const ctx = await auth.$context;
+      await ctx.internalAdapter.deleteSessions(req.params.id);
+    }
     sqlite
       .prepare(
         "UPDATE user_profile SET display_name = ?, role = ?, plan = ?, status = ?, approved = ?, unlimited = ?, api_provider_id = ?, max_resolution = ?, updated_at = ? WHERE user_id = ?",
@@ -1203,6 +1208,7 @@ export function registerBusinessRoutes(app) {
     }
     try {
       const ctx = await auth.$context;
+      await ctx.internalAdapter.deleteSessions(req.params.id);
       await ctx.internalAdapter.updatePassword(req.params.id, await ctx.password.hash(password));
       insertAudit({
         actorUserId: account.user.id,

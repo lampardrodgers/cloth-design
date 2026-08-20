@@ -125,9 +125,13 @@ export function isAdminRole(role) {
 }
 
 export async function requireAccount(req, res) {
+  if (req.clothdesignAccount) return req.clothdesignAccount;
   // 每个调试座位是独立账号，成片和用量按座位隔离。
   const debugUserId = debugUserIdFromRequest(req);
-  if (debugUserId) return debugAccount(debugUserId);
+  if (debugUserId) {
+    req.clothdesignAccount = debugAccount(debugUserId);
+    return req.clothdesignAccount;
+  }
 
   const session = await getAuthSession(req);
   if (!session?.user) {
@@ -143,7 +147,8 @@ export async function requireAccount(req, res) {
     res.status(403).json({ error: PENDING_APPROVAL_MESSAGE, pendingApproval: true });
     return null;
   }
-  return { session, user: session.user, profile };
+  req.clothdesignAccount = { session, user: session.user, profile };
+  return req.clothdesignAccount;
 }
 
 export async function requireAdmin(req, res) {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ const {
   DEBUG_UNLIMITED_CREDITS,
   DEBUG_USER_ID,
   DEBUG_USER_PREFIX,
+  assertDebugProductionReady,
   debugAccount,
   debugCookieHeader,
   debugSeatFromRequest,
@@ -85,7 +87,7 @@ const maxAge = Number(setCookie.match(/Max-Age=(\d+)/)[1]);
 assert(maxAge > 30 * 24 * 60 * 60, `Max-Age ${maxAge} 太短`);
 assert.match(debugCookieHeader({ clear: true }), /Max-Age=0/);
 
-/* ── 开关：显式打开时生产环境也可用 ─────────────────────────────────────── */
+/* ── 开关：生产环境永远不可用，误开时拒绝启动 ───────────────────────────── */
 
 process.env.NODE_ENV = "production";
 delete process.env.DEBUG_UNLIMITED;
@@ -93,10 +95,12 @@ assert.equal(debugUnlimitedAvailable(), false, "生产环境默认仍然关闭")
 assert.equal(hasDebugCookie({ headers: { cookie: `clothdesign_debug=${seatA}` } }), false);
 
 process.env.DEBUG_UNLIMITED = "true";
-assert.equal(debugUnlimitedAvailable(), true, "内部部署显式打开后，NODE_ENV=production 也要能用");
-assert.equal(debugUserIdFromRequest({ headers: { cookie: `clothdesign_debug=${seatA}` } }), userA);
+assert.equal(debugUnlimitedAvailable(), false, "生产环境不能打开调试认证");
+assert.equal(debugUserIdFromRequest({ headers: { cookie: `clothdesign_debug=${seatA}` } }), "");
+assert.throws(() => assertDebugProductionReady(), /cannot be enabled in production/);
 
 process.env.DEBUG_UNLIMITED = "false";
+assert.doesNotThrow(() => assertDebugProductionReady());
 process.env.NODE_ENV = "test";
 assert.equal(debugUnlimitedAvailable(), false, "显式关闭的优先级最高");
 delete process.env.DEBUG_UNLIMITED;
@@ -108,6 +112,26 @@ assert(api.includes("debugSeatFromRequest(req) || newDebugSeat()"), "已有座�
 assert(api.includes("account.user.id === DEBUG_USER_ID"), "只有早期共用账号不能存 Key，独立座位可以");
 const auth = await fs.readFile("server/auth.mjs", "utf8");
 assert(auth.includes("debugUserIdFromRequest(req)") && auth.includes("debugAccount(debugUserId)"), "登录旁路要按座位取账号");
+
+// 不只测纯函数：真实生产启动也必须在监听端口前失败。
+const productionApp = spawn(process.execPath, ["server/index.mjs"], {
+  cwd: process.cwd(),
+  env: {
+    ...process.env,
+    NODE_ENV: "production",
+    DEBUG_UNLIMITED: "true",
+    AUTH_SECRET: "debug-production-refusal-secret-1234567890",
+    DATABASE_URL: `file:${path.join(tmpDir, "production-refusal.db")}`,
+    PUBLIC_APP_URL: "http://127.0.0.1:23999",
+    HOST: "127.0.0.1",
+    PORT: "23999",
+  },
+});
+let productionError = "";
+productionApp.stderr.on("data", (chunk) => (productionError += String(chunk)));
+const productionExit = await new Promise((resolve) => productionApp.once("exit", resolve));
+assert.notEqual(productionExit, 0, "危险调试配置不能启动生产服务");
+assert.match(productionError, /DEBUG_UNLIMITED cannot be enabled in production/);
 
 sqlite.close();
 await fs.rm(tmpDir, { recursive: true, force: true });

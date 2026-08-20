@@ -9,7 +9,8 @@ import {
 } from "./image-provider.mjs";
 import { referencedGeneratedImageUrls } from "./image-cleanup.mjs";
 import { decryptApiKey, encryptApiKey } from "./user-keys.mjs";
-import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
+import { timeoutMsFromEnv } from "./timeouts.mjs";
+import { safeOutboundFetch } from "./safe-outbound.mjs";
 
 /**
  * 成片文件的生命周期，三层各管各的：
@@ -213,10 +214,10 @@ function davHeaders(credentials, extra = {}) {
 }
 
 async function davRequest(credentials, method, remotePath, { body, headers } = {}) {
-  return fetchWithTimeout(
+  return safeOutboundFetch(
     davUrl(credentials, remotePath),
     { method, headers: davHeaders(credentials, headers), body },
-    { timeoutMs: WEBDAV_TIMEOUT_MS, timeoutMessage: "连接 WebDAV 超时。" },
+    { timeoutMs: WEBDAV_TIMEOUT_MS, timeoutMessage: "连接 WebDAV 超时。", label: "WebDAV 地址" },
   );
 }
 

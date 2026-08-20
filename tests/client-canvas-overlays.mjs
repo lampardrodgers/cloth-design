@@ -100,7 +100,8 @@ try {
       imageUrl: dot,
       createdAt: new Date(2026, 0, 1 + index).toISOString(),
     }));
-    window.localStorage.setItem("clothdesign:results", JSON.stringify(results));
+    const accountId = window.localStorage.getItem("clothdesign:active-account");
+    window.localStorage.setItem(`clothdesign:${encodeURIComponent(accountId)}:results`, JSON.stringify(results));
   }, 14);
   await page.reload({ waitUntil: "networkidle" });
   await page.locator(".task-menu-button").waitFor({ state: "visible", timeout: 20000 });

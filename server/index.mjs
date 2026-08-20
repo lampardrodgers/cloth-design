@@ -7,8 +7,8 @@ import { createServer as createViteServer } from "vite";
 import { authHandler, requireAccount, runAuthMigrations, selfSignupAllowed } from "./auth.mjs";
 import { registerBusinessRoutes, serializeAccount } from "./api.mjs";
 import { migrateBusinessDatabase, nowIso, sqlite } from "./db.mjs";
-import { debugUnlimitedAvailable } from "./debug.mjs";
-import { generatedImageStaticMount, persistGeneratedImage, readManagedGeneratedImage, validateImageBuffer } from "./image-provider.mjs";
+import { assertDebugProductionReady, debugUnlimitedAvailable } from "./debug.mjs";
+import { MAX_IMAGE_BYTES, generatedImageStaticMount, persistGeneratedImage, readManagedGeneratedImage, validateImageBuffer } from "./image-provider.mjs";
 import { imageQualityGate } from "./image-quality.mjs";
 import { assertPaymentProductionReady, consumeCredits, handleAlipayNotify, handleWechatNotify, refundCredits } from "./payments.mjs";
 import { imageProviderHealth, summarizeProviderErrorText } from "./provider-health.mjs";
@@ -17,6 +17,7 @@ import { migrateWorkflowDatabase, registerWorkflowRoutes } from "./workflows.mjs
 import { migrateShortVideoDatabase, registerShortVideoRoutes, resumeShortVideoPolling } from "./shortvideo.mjs";
 import { migrateSeedanceDatabase, registerSeedanceRoutes, resumeSeedancePolling } from "./seedance.mjs";
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
+import { readResponseBufferLimited, safeOutboundFetch } from "./safe-outbound.mjs";
 import { resolveProviderApiKey, serverApiKey } from "./user-keys.mjs";
 import { clampResolution, imageApiUrl, imageProviderSettings, imageProviderSettingsList, normalizeResolution } from "./provider-config.mjs";
 import { SERVER_RETENTION_DAYS, autoArchiveTaskResults, scheduleStorageMaintenance } from "./storage.mjs";
@@ -30,7 +31,7 @@ const host = process.env.HOST || "127.0.0.1";
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024,
+    fileSize: MAX_IMAGE_BYTES,
     files: 16,
   },
 });
@@ -38,6 +39,7 @@ const upload = multer({
 const app = express();
 app.disable("x-powered-by");
 
+assertDebugProductionReady();
 await runAuthMigrations();
 migrateBusinessDatabase();
 migrateWorkflowDatabase();
@@ -75,7 +77,34 @@ app.post("/api/payments/wechat/notify", express.raw({ type: "application/json", 
   }
 });
 
-app.use(express.json({ limit: "25mb" }));
+const protectedJson = express.json({ limit: "25mb" });
+const smallPublicJson = express.json({ limit: "64kb" });
+
+function publicApiRequest(req) {
+  const pathname = String(req.originalUrl || req.url || "").split("?", 1)[0];
+  if (pathname.startsWith("/api/auth/")) return true;
+  if (pathname === "/api/config" && req.method === "GET") return true;
+  if (pathname === "/api/packages" && req.method === "GET") return true;
+  if (pathname === "/api/debug/config" && req.method === "GET") return true;
+  if (pathname === "/api/debug/session" && ["POST", "DELETE"].includes(req.method)) return true;
+  // 火山方舟必须能回源读取随机 ID 素材；路由自身还会校验 ID、扩展名和文件归属状态。
+  if (pathname.startsWith("/api/seedance/refs/public/") && req.method === "GET") return true;
+  return pathname === "/api/client-errors" && req.method === "POST";
+}
+
+// 两个公开 POST 只接受很小的 JSON；其余 API 必须先完成认证，再解析大 JSON 或 multipart。
+app.use("/api/client-errors", smallPublicJson);
+app.use("/api/debug/session", smallPublicJson);
+app.use("/api", async (req, res, next) => {
+  if (publicApiRequest(req)) return next();
+  const account = await requireAccount(req, res);
+  if (!account) return;
+  next();
+});
+app.use("/api", (req, res, next) => {
+  if (publicApiRequest(req)) return next();
+  protectedJson(req, res, next);
+});
 
 function hasServerImageKey() {
   return imageProviderSettingsList().some((provider) => Boolean(serverApiKey(provider.id)));
@@ -234,9 +263,10 @@ async function fetchReferenceSource(reference) {
       originalname: `${reference.label || "reference"}.png`,
     });
   }
-  const response = await fetchWithTimeout(sourceUrl, {}, {
+  const response = await safeOutboundFetch(sourceUrl, {}, {
     timeoutMs: imageRequestTimeoutMs(),
     timeoutMessage: `参考图${reference.label || ""}下载超时。`,
+    label: `参考图${reference.label || ""}地址`,
   });
   if (!response.ok) {
     throw new Error(`参考图${reference.label || ""}下载失败 (${response.status})`);
@@ -245,8 +275,14 @@ async function fetchReferenceSource(reference) {
   if (!mime.startsWith("image/")) {
     throw new Error(`参考图${reference.label || ""}不是图片资源`);
   }
+  const buffer = await readResponseBufferLimited(response, {
+    maxBytes: MAX_IMAGE_BYTES,
+    timeoutMs: imageRequestTimeoutMs(),
+    timeoutMessage: `参考图${reference.label || ""}下载超时。`,
+    label,
+  });
   return assertValidReference({
-    buffer: Buffer.from(await response.arrayBuffer()),
+    buffer,
     mimetype: mime,
     originalname: `${reference.label || "reference"}.png`,
   });

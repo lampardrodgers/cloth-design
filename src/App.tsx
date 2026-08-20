@@ -57,7 +57,7 @@ import {
   buildSubmissionRecord,
   MAX_SUBMISSION_RECORDS,
 } from "./lib/freeStudio";
-import { useCappedStoredState, useStoredState } from "./lib/storedState";
+import { clearStoredStateAccount, setStoredStateAccount, useCappedStoredState, useStoredState } from "./lib/storedState";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -423,6 +423,7 @@ function App() {
     setAuthError("");
     try {
       const data = await fetchMe();
+      setStoredStateAccount(data.account.id);
       setCurrentUser(data.account);
       setDebugUnlimited(Boolean(data.debugUnlimited));
       setPackages(data.packages);
@@ -434,6 +435,7 @@ function App() {
       if ("paymentConfig" in data) setPaymentConfig(data.paymentConfig as PaymentConfigStatus);
       return data.account;
     } catch (error) {
+      setStoredStateAccount(null);
       setCurrentUser(null);
       setDebugUnlimited(false);
       setAuthError(error instanceof Error ? error.message : "请先登录");
@@ -811,7 +813,10 @@ function App() {
   };
 
   const handleSignOut = async () => {
+    const signedOutAccountId = currentUser?.id;
     await Promise.all([signOut().catch(() => undefined), endDebugSession().catch(() => undefined)]);
+    clearStoredStateAccount(signedOutAccountId);
+    setStoredStateAccount(null);
     setCurrentUser(null);
     setDebugUnlimited(false);
     setAdminOverview(null);

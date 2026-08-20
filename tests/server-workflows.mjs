@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { deflateSync } from "node:zlib";
@@ -1423,28 +1424,35 @@ globalThis.fetch = async () => {
 await assert.rejects(() => materializeLiveImages(corruptAssetJob), /素材不是有效图片文件/);
 globalThis.fetch = originalFetch;
 
+const hangingAssetServer = http.createServer((_req, res) => {
+  res.writeHead(200, { "content-type": "image/png" });
+  res.write(Buffer.from([0x89]));
+});
 function hangingResponse(init = {}) {
   return new Promise((_, reject) => {
     init.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
   });
 }
+await new Promise((resolve) => hangingAssetServer.listen(0, "127.0.0.1", resolve));
+const hangingAssetPort = hangingAssetServer.address().port;
 
 const assetTimeoutJob = createWorkflowJob({
   userId,
   type: "fabric-to-style",
   title: "素材下载超时",
   prompt: "外部素材下载不能无限挂起。",
-  assets: [{ kind: "fabric", name: "remote-hangs.png", mimeType: "image/png", sourceUrl: "https://asset.example.test/hangs.png" }],
+  assets: [{ kind: "fabric", name: "remote-hangs.png", mimeType: "image/png", sourceUrl: `http://127.0.0.1:${hangingAssetPort}/hangs.png` }],
   options: { variants: 1 },
 });
 process.env.WORKFLOW_ASSET_DOWNLOAD_TIMEOUT_MS = "100";
-globalThis.fetch = async (url, init = {}) => {
-  assert.equal(String(url), "https://asset.example.test/hangs.png");
-  return hangingResponse(init);
-};
+process.env.ALLOW_PRIVATE_OUTBOUND_URLS = "true";
 await assert.rejects(() => materializeLiveImages(assetTimeoutJob), /素材图片下载超时/);
-globalThis.fetch = originalFetch;
 delete process.env.WORKFLOW_ASSET_DOWNLOAD_TIMEOUT_MS;
+delete process.env.ALLOW_PRIVATE_OUTBOUND_URLS;
+await new Promise((resolve) => {
+  hangingAssetServer.close(resolve);
+  hangingAssetServer.closeAllConnections();
+});
 
 const segmentationTimeoutJob = createWorkflowJob({
   userId,

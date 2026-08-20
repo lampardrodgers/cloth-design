@@ -4,6 +4,7 @@ import { resolveProviderApiKey } from "./user-keys.mjs";
 import { imageApiUrl } from "./provider-config.mjs";
 import { nowIso, runTransaction, sqlite } from "./db.mjs";
 import {
+  MAX_IMAGE_BYTES,
   generatedImageStaticMount,
   analyzeFabricImageBuffer,
   persistGeneratedImage,
@@ -14,6 +15,7 @@ import {
 import { imageProviderHealth, summarizeProviderErrorText } from "./provider-health.mjs";
 import { createMotionPreviewMp4, persistGeneratedVideo } from "./video-provider.mjs";
 import { fetchWithTimeout, timeoutMsFromEnv } from "./timeouts.mjs";
+import { readResponseBufferLimited, safeOutboundFetch } from "./safe-outbound.mjs";
 
 export const WORKFLOW_DEFINITIONS = [
   {
@@ -591,9 +593,10 @@ async function workflowAssetToBlob(asset, index) {
     const managed = await readManagedGeneratedImage(sourceUrl, safeAssetName(asset, index));
     image = { buffer: managed.buffer, mimeType: managed.mimetype };
   } else if (/^https?:\/\//.test(sourceUrl)) {
-    const response = await fetchWithTimeout(sourceUrl, {}, {
+    const response = await safeOutboundFetch(sourceUrl, {}, {
       timeoutMs: workflowAssetDownloadTimeoutMs(),
       timeoutMessage: `素材图片下载超时：${asset.name || sourceUrl}`,
+      label: `素材图片地址：${asset.name || "未命名素材"}`,
     });
     if (!response.ok) {
       throw new Error(`素材图片下载失败 (${response.status})：${asset.name || sourceUrl}`);
@@ -602,7 +605,15 @@ async function workflowAssetToBlob(asset, index) {
     if (!mimeType.startsWith("image/")) {
       throw new Error(`素材不是图片格式：${asset.name || sourceUrl}`);
     }
-    image = { buffer: Buffer.from(await response.arrayBuffer()), mimeType };
+    image = {
+      buffer: await readResponseBufferLimited(response, {
+        maxBytes: MAX_IMAGE_BYTES,
+        timeoutMs: workflowAssetDownloadTimeoutMs(),
+        timeoutMessage: `素材图片下载超时：${asset.name || sourceUrl}`,
+        label: `素材图片：${asset.name || "未命名素材"}`,
+      }),
+      mimeType,
+    };
   }
   if (!image) return null;
   const validation = validateImageBuffer(image.buffer, image.mimeType || asset.mimeType || "image/png", "素材");
