@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { saveMyPreferences } from "./api";
 import { reportClientError } from "./clientErrors";
+import { readDurableState, registerDurableKey, writeDurableState } from "./durableState";
 import { idbDeletePrefix } from "./idbStore";
 import {
   ACTIVE_STORAGE_ACCOUNT_KEY,
@@ -42,10 +43,13 @@ const PREFERENCE_FINAL_RETRY_DELAYS_MS = [800, 1500];
 const pendingPreferencePatch = new Map<string, unknown>();
 
 /* ── 没推出去的偏好：按账号暂存在设备级的键里 ───────────────────────────────
- * 退出 / 掉线 / 连续重试都失败时，这批改动不再一扔了之：存在这个（不随账号命名空间一起清的）键下，
+ * 这份暂存是「先写后发」的日志：每批偏好在发请求之前就先落到这里，服务端确认了才划掉。
+ * 于是退出等不到回包（6 秒超时）、请求一直挂着、关页时 keepalive 发没发到——不管哪种，改动都还在设备上，
  * 下次同一账号在这台设备登录时以它为准落地并补推。只留 24 小时——隔太久再把旧值推上去，反而可能盖掉别处的新改动。
+ * 存不进 localStorage 时退到内存 + IndexedDB（见 durableState），并回报 false，不再假装「已暂存」。
  * ────────────────────────────────────────────────────────────────────────── */
 export const UNSYNCED_PREFERENCES_KEY = "clothdesign:unsynced-preferences";
+registerDurableKey(UNSYNCED_PREFERENCES_KEY);
 const UNSYNCED_PREFERENCES_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface UnsyncedPreferences {
@@ -54,7 +58,7 @@ interface UnsyncedPreferences {
 }
 
 function readUnsyncedPreferences(now = Date.now()): Record<string, UnsyncedPreferences> {
-  const stored = readStoredState<Record<string, UnsyncedPreferences>>(UNSYNCED_PREFERENCES_KEY, {});
+  const stored = readDurableState<Record<string, UnsyncedPreferences>>(UNSYNCED_PREFERENCES_KEY, {});
   const live: Record<string, UnsyncedPreferences> = {};
   for (const [accountId, entry] of Object.entries(stored && typeof stored === "object" ? stored : {})) {
     if (entry && typeof entry.patch === "object" && entry.patch && now - Number(entry.at || 0) < UNSYNCED_PREFERENCES_TTL_MS) live[accountId] = entry;
@@ -62,22 +66,36 @@ function readUnsyncedPreferences(now = Date.now()): Record<string, UnsyncedPrefe
   return live;
 }
 
-export function stashUnsyncedPreferences(accountId: string, patch: Record<string, unknown>) {
+/** 暂存一批没（还没）推出去的偏好。返回是否写进了 localStorage（false = 只留在内存 / IndexedDB 里）。 */
+export function stashUnsyncedPreferences(accountId: string, patch: Record<string, unknown>): boolean {
   const keys = Object.keys(patch);
-  if (!accountId || !keys.length) return;
+  if (!accountId || !keys.length) return true;
   const all = readUnsyncedPreferences();
   all[accountId] = { at: Date.now(), patch: { ...(all[accountId]?.patch ?? {}), ...patch } };
-  writeStoredState(UNSYNCED_PREFERENCES_KEY, all);
+  return writeDurableState(UNSYNCED_PREFERENCES_KEY, all);
 }
 
-/** 这些键已经成功推到服务端了：暂存里同名的旧值作废，免得下次登录把旧的又推回去。 */
-function clearUnsyncedPreferences(accountId: string, keys: string[]) {
+function sameValue(left: unknown, right: unknown) {
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 这批键已经成功推到服务端了：暂存里同名同值的划掉，免得下次登录把旧的又推回去。
+ * 只划同值的——请求在路上时用户又改过（退出 / 掉线时那份新值已经并进暂存）的要留着。
+ */
+function clearUnsyncedPreferences(accountId: string, patch: Record<string, unknown>) {
   const all = readUnsyncedPreferences();
   const entry = all[accountId];
   if (!entry) return;
-  for (const key of keys) delete entry.patch[key];
+  for (const [key, value] of Object.entries(patch)) {
+    if (key in entry.patch && sameValue(entry.patch[key], value)) delete entry.patch[key];
+  }
   if (!Object.keys(entry.patch).length) delete all[accountId];
-  writeStoredState(UNSYNCED_PREFERENCES_KEY, all);
+  writeDurableState(UNSYNCED_PREFERENCES_KEY, all);
 }
 
 /** 取走这个账号暂存的偏好（取走即删；推不出去会再存回来）。 */
@@ -86,7 +104,7 @@ export function takeUnsyncedPreferences(accountId: string): Record<string, unkno
   const entry = all[accountId];
   if (!entry) return null;
   delete all[accountId];
-  writeStoredState(UNSYNCED_PREFERENCES_KEY, all);
+  writeDurableState(UNSYNCED_PREFERENCES_KEY, all);
   return entry.patch;
 }
 
@@ -123,11 +141,11 @@ export async function flushPreferenceSync(options: { keepalive?: boolean; final?
   const account = preferenceSyncAccount;
   const patch = Object.fromEntries(pendingPreferencePatch);
   pendingPreferencePatch.clear();
-  // 推送途中账号换了就别把 A 的偏好写到 B 头上：A 的暂存起来，A 下次登录再补。
-  if (account !== activeStorageAccount()) {
-    stashUnsyncedPreferences(account, patch);
-    return false;
-  }
+  // 先写后发：这批还没得到服务端确认之前先落在设备上。请求一直挂着、退出等过了超时、关页时 keepalive 有没有送到——
+  // 这些情形都等不到失败回包，没有这一步改动就凭空没了；服务端确认了再划掉。
+  stashUnsyncedPreferences(account, patch);
+  // 推送途中账号换了就别把 A 的偏好写到 B 头上：A 的留在暂存里，A 下次登录再补。
+  if (account !== activeStorageAccount()) return false;
   let synced = false;
   preferenceSyncInFlight = (async () => {
     const attempts = options.final ? PREFERENCE_FINAL_RETRY_DELAYS_MS.length + 1 : 1;
@@ -145,26 +163,30 @@ export async function flushPreferenceSync(options: { keepalive?: boolean; final?
     }
     if (synced) {
       preferenceSyncFailures = 0;
-      clearUnsyncedPreferences(account, Object.keys(patch));
+      clearUnsyncedPreferences(account, patch);
       return;
     }
     const message = lastError instanceof Error ? lastError.message : String(lastError);
     if (account !== activeStorageAccount()) {
-      // 等回包的这段时间里已经退出 / 掉线：这批暂存起来，下次登录补推。
-      stashUnsyncedPreferences(account, patch);
+      // 等回包的这段时间里已经退出 / 掉线：这批已经在暂存里（先写后发），下次登录补推。
       return;
     }
-    // 失败的键放回队列（期间用户又改过的键以新值为准）。
+    // 失败的键放回队列（期间用户又改过的键以新值为准），暂存也跟上队列里最新的值——
+    // 请求路上改出的新值也得在设备上，这时页面被杀掉才不会让下次打开用路上那份旧值盖掉它。
     for (const [key, value] of Object.entries(patch)) {
       if (!pendingPreferencePatch.has(key)) pendingPreferencePatch.set(key, value);
     }
     preferenceSyncAccount = account;
+    const stashed = stashUnsyncedPreferences(account, Object.fromEntries(pendingPreferencePatch));
     if (options.final) {
-      // 退出前的最后一搏也没成：没推出去的全部暂存，退出照常进行。
-      stashUnsyncedPreferences(account, Object.fromEntries(pendingPreferencePatch));
+      // 退出前的最后一搏也没成：没推出去的已经全在暂存里，退出照常进行。
       pendingPreferencePatch.clear();
       preferenceSyncFailures = 0;
-      reportClientError({ scope: "preferences", message: `退出前偏好同步失败，已暂存到本机等下次登录补推：${message}`, detail: { keys: Object.keys(patch) } });
+      reportClientError({
+        scope: "preferences",
+        message: `退出前偏好同步失败，${stashed ? "已暂存到本机等下次登录补推" : "本机 localStorage 也写不进去（只留在内存 / IndexedDB 里）"}：${message}`,
+        detail: { keys: Object.keys(patch), stashed },
+      });
       return;
     }
     preferenceSyncFailures += 1;
@@ -182,12 +204,11 @@ export async function flushPreferenceSync(options: { keepalive?: boolean; final?
         dropped[key] = value;
       }
     }
-    stashUnsyncedPreferences(account, dropped);
     if (pendingPreferencePatch.size) schedulePreferenceSync(PREFERENCE_SYNC_DELAY_MS);
     reportClientError({
       scope: "preferences",
-      message: `偏好同步失败（已重试 ${PREFERENCE_RETRY_DELAYS_MS.length} 次，已暂存等下次登录补推）：${message}`,
-      detail: { keys: Object.keys(dropped) },
+      message: `偏好同步失败（已重试 ${PREFERENCE_RETRY_DELAYS_MS.length} 次，${stashed ? "已暂存等下次登录补推" : "本机 localStorage 也写不进去，只留在内存 / IndexedDB 里"}）：${message}`,
+      detail: { keys: Object.keys(dropped), stashed },
     });
   })().finally(() => {
     preferenceSyncInFlight = null;
@@ -211,8 +232,14 @@ export function hasPendingPreferenceSync() {
 }
 
 // 关页前把还没推出去的那一批推掉（keepalive：页面卸载后请求也能发完），不然刚改的设置只留在这台机器上。
+// 上一批还挂在路上时这批轮不到发：先同步落进暂存，下次打开补推——卸载之后就没有「稍后」了。
 if (typeof window !== "undefined") {
-  window.addEventListener("pagehide", () => void flushPreferenceSync({ keepalive: true }));
+  window.addEventListener("pagehide", () => {
+    if (preferenceSyncInFlight && pendingPreferencePatch.size && preferenceSyncAccount) {
+      stashUnsyncedPreferences(preferenceSyncAccount, Object.fromEntries(pendingPreferencePatch));
+    }
+    void flushPreferenceSync({ keepalive: true });
+  });
 }
 
 /**
@@ -261,7 +288,8 @@ export function setStoredStateAccount(accountId: string | null) {
   }
   if (!accountId) {
     // 退出 / 掉线：没推出去的偏好按原账号暂存到设备上，下次这个账号登录再补推——既不丢，也不会等下个账号登录时推错人。
-    // （主动退出的那条路在调这里之前会先 await flushPreferenceSync({ final: true })，所以这里兜住的只是掉线 / 超时那批。）
+    // （主动退出的那条路在调这里之前会先 await flushPreferenceSync({ final: true })；正在路上的那批已经先写后发地在暂存里，
+    //   这里兜住的是掉线、以及退出等过了超时之后还排在队列里的那批。）
     if (pendingPreferencePatch.size && preferenceSyncAccount) stashUnsyncedPreferences(preferenceSyncAccount, Object.fromEntries(pendingPreferencePatch));
     pendingPreferencePatch.clear();
     preferenceSyncFailures = 0;

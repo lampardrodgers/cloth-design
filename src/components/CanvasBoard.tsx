@@ -528,11 +528,13 @@ async function fetchAsDataUrl(url: string) {
   });
 }
 
+const FETCH_RETRY_MESSAGE = "成片暂时拉取失败（网络不稳），请稍后重试；这张成片仍在成片库里。";
+
 /**
  * 服务器托管的成片（/generated-images/…）只保留 3 天，到期文件就没了。
  * 放进画布的图要一直在，所以落盘前先把字节拉下来转成 data URL 存进 tldraw 的资产里。
  * 文件已经清理（404）就直接报错，不往画布里放一张注定裂掉的图；网络抖动先重试一次，
- * 还不行才按地址落下——这种资产会在下次打开画布时由 migrateManagedAssets 再补转一次。
+ * 还不行也报错让用户稍后再放——绝不把服务器地址写进画布：那种资产一旦没赶上补转，三天后就是一张裂图。
  */
 async function canvasAssetSource(url: string) {
   if (!isManagedResultUrl(url)) return url;
@@ -545,12 +547,12 @@ async function canvasAssetSource(url: string) {
       if ((error as { gone?: boolean }).gone) throw error;
     }
   }
-  console.warn("[canvas] 成片暂时拉不下来，先按地址放进画布，下次打开画布时再补转：", lastError);
-  return url;
+  console.warn("[canvas] 成片暂时拉不下来，这次不放进画布：", lastError);
+  throw new Error(FETCH_RETRY_MESSAGE);
 }
 
 /**
- * 升级前放进画布的成片资产还是服务器地址（以及上面网络抖动时退回地址的那些）：
+ * 升级前放进画布的成片资产还是服务器地址：
  * 打开画布时后台把它们逐个转成 data URL 写回资产，文件已经清理的就保持原样（没东西可救）。
  */
 async function migrateManagedAssets(editor: Editor) {

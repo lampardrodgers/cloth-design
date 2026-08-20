@@ -9,6 +9,9 @@
 // 6) 第三轮补漏：缺失的成片路径明确 404（不再掉进 SPA 回退变成 index.html + 200）、画布只认 image/*；
 //    创作台 / 画布成片库也挡过期成片；退出时偏好推不出去暂存到本机、下次登录补推；退出时删不掉的留 pending 墓碑、下次登录补删；
 //    整批推云盘按当前错误判断是否整批失败；短视频回传断流不留 .part。
+// 7) 第四轮补漏：偏好暂存改成「先写后发」（退出等过超时 / 请求一直挂着 / 关页都不丢）；偏好暂存和删除墓碑写不进 localStorage 时
+//    退到内存 + IndexedDB、刷新后补水，不再假装「已暂存」；画布拉不到成片就报错让用户重试，不再把服务器地址写进画布；
+//    创作台过期成片的放大 / 下载 / 缩略胶片也收掉。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -108,6 +111,25 @@ assert(api.includes("export async function deleteGenerationResultQuietly(") && a
 const shortVideoEngine = await fs.readFile("server/shortvideo-engine.mjs", "utf8");
 assert(shortVideoEngine.includes("await fs.rm(temp, { force: true }).catch(() => undefined);"), "回传断流要把 .part 删掉");
 assert((shortVideoServer.match(/await fs\.rm\(directory, \{ recursive: true, force: true \}\)\.catch\(\(\) => undefined\);/g) || []).length >= 3, "成片拉到一半失败 / 取消要把任务目录清掉");
+
+/* ── 第四轮补漏的静态检查 ─────────────────────────────────────────────────── */
+const durable = await fs.readFile("src/lib/durableState.ts", "utf8");
+assert(durable.includes("export function writeDurableState(key: string, value: unknown): boolean") && durable.includes("memory.set(key, value);") && durable.includes("idbSet(IDB_PREFIX + key"), "设备级补偿数据写不进 localStorage 时退到内存 + IndexedDB，并回报 false");
+assert(durable.includes("export function hydrateDurableState(): Promise<void>") && durable.includes("if (touched.has(key)) return;"), "启动时从 IndexedDB 补水，但别用旧副本盖掉这次会话写过的");
+assert(storedState.includes("registerDurableKey(UNSYNCED_PREFERENCES_KEY);") && storedState.includes("return writeDurableState(UNSYNCED_PREFERENCES_KEY, all);"), "偏好暂存走 durableState");
+assert(storedState.indexOf("  stashUnsyncedPreferences(account, patch);\n  // 推送途中账号换了") < storedState.indexOf("preferenceSyncInFlight = (async () => {"), "先写后发：发请求之前这批先进暂存，服务端确认了再划掉");
+assert(storedState.includes("function clearUnsyncedPreferences(accountId: string, patch: Record<string, unknown>)") && storedState.includes("sameValue(entry.patch[key], value)"), "确认后只划掉同值的键，请求路上又改过的新值要留着");
+assert(storedState.includes("if (preferenceSyncInFlight && pendingPreferencePatch.size && preferenceSyncAccount) {"), "关页时上一批还挂在路上，排着的这批先同步落进暂存");
+assert(storedState.includes("export function stashUnsyncedPreferences(accountId: string, patch: Record<string, unknown>): boolean") && storedState.includes("const stashed = stashUnsyncedPreferences("), "暂存要回报有没有写进去，上报时说实话");
+assert(deletedResults.includes("registerDurableKey(TOMBSTONE_KEY);") && deletedResults.includes("return writeDurableState(TOMBSTONE_KEY, all);"), "删除墓碑也走 durableState");
+assert(app.includes("await Promise.all([fetchMe(), hydrateDurableState()])"), "登录 / 启动先把 IndexedDB 里的补偿数据捞回来再落偏好、过滤墓碑");
+assert(canvas.includes("throw new Error(FETCH_RETRY_MESSAGE);") && !canvas.includes("先按地址放进画布"), "画布拉不到成片（网络）就报错让用户重试，不再把服务器地址写进画布");
+assert(gallery.includes("EXPIRED_FILE_HINT") && (gallery.match(/disabled=\{!selected \|\| selected\.storageStatus === "expired"\}/g) || []).length >= 2, "创作台的放大也要挡过期成片");
+assert(gallery.includes('selected && selected.storageStatus !== "expired" ? (') && gallery.includes('zoomOpen && selected && selected.storageStatus !== "expired"'), "过期成片不给下载链接、不开放大");
+assert((gallery.match(/<span className="result-thumb-expired">已清理<\/span>/g) || []).length >= 2, "舞台缩略胶片和右栏列表的过期缩略图都标已清理，不拉裂图");
+assert(gallery.includes('aria-label="下载" disabled title={EXPIRED_FILE_HINT}'), "网格列表的下载也收掉");
+assert(taskRail.includes('preview.storageStatus !== "expired"'), "任务面板的预览图过期就不拉");
+assert(styles.includes(".stage-filmstrip .result-thumb-expired"), "胶片里的已清理标记要有尺寸适配");
 
 /* ── 真浏览器：地址栏视图 / 软删除撤销 / 会话失效 / 功能中心保活 ─────────── */
 function waitForOutput(child, pattern) {
@@ -400,6 +422,130 @@ try {
   );
   await page.unroute("**/api/me/preferences");
 
+  /* 退出时偏好请求一直不回包（服务器僵住）：6 秒超时后照样退出，但改动不能凭空没了——先写后发，暂存里得有 */
+  const heldPuts = [];
+  await page.route("**/api/me/preferences", async (route) => {
+    heldPuts.push(route); // 扣住不回包
+  });
+  await page.locator(".rail button[aria-label='收起侧边栏']").click(); // railCollapsed: false → true
+  await page.waitForFunction(() => document.querySelector(".rail.collapsed") !== null);
+  const heldDeadline = Date.now() + 8000;
+  while (!heldPuts.length && Date.now() < heldDeadline) await page.waitForTimeout(100);
+  assert(heldPuts.length >= 1, "防抖到点应该发了一次 PUT（被扣住）");
+  const signOutStartedAt = Date.now();
+  await page.locator(".signout-button").click();
+  await page.locator("#auth-email").waitFor({ state: "visible", timeout: 20000 });
+  assert(Date.now() - signOutStartedAt < 15000, "服务器僵住也不能让退出卡死");
+  const hungStash = await page.evaluate(() => JSON.parse(localStorage.getItem("clothdesign:unsynced-preferences") || "{}"));
+  assert(hungStash[accountId]?.patch?.["clothdesign:railCollapsed"] === true, `请求一直挂着、退出超时之后，改动要在暂存里（${JSON.stringify(hungStash)}）`);
+  await page.unroute("**/api/me/preferences");
+  for (const route of heldPuts) await route.abort().catch(() => undefined); // 请求最终失败：账号已经退了，暂存照旧
+  await page.waitForTimeout(300);
+  const hungStashAfterFail = await page.evaluate(() => JSON.parse(localStorage.getItem("clothdesign:unsynced-preferences") || "{}"));
+  assert(hungStashAfterFail[accountId]?.patch?.["clothdesign:railCollapsed"] === true, "挂着的请求最终失败也不能把暂存弄没");
+
+  const hungReplayPuts = [];
+  await page.route("**/api/me/preferences", async (route) => {
+    hungReplayPuts.push(route.request().postDataJSON());
+    await route.continue();
+  });
+  await page.locator(".auth-tab", { hasText: "登录" }).click();
+  await page.locator("#auth-email").fill("review-fixes@example.test");
+  await page.locator("input[autocomplete='current-password']").fill("clothdesign123");
+  await page.locator(".auth-shell button[type='submit'], form button[type='submit']").first().click();
+  await page.locator(".rail-nav").waitFor({ state: "visible", timeout: 15000 });
+  const hungReplayDeadline = Date.now() + 9000;
+  while (!hungReplayPuts.some((body) => body?.preferences?.["clothdesign:railCollapsed"] === true) && Date.now() < hungReplayDeadline) await page.waitForTimeout(200);
+  assert(hungReplayPuts.some((body) => body?.preferences?.["clothdesign:railCollapsed"] === true), `重新登录后要把挂着没推出去的那份补推上去（${JSON.stringify(hungReplayPuts)}）`);
+  await page.waitForFunction(
+    (id) => !(JSON.parse(localStorage.getItem("clothdesign:unsynced-preferences") || "{}")[id]),
+    accountId,
+    { timeout: 9000 },
+  );
+  await page.unroute("**/api/me/preferences");
+
+  /* 本机 localStorage 写不进去（配额满 / 隐私模式）：暂存不能假装成功——退到内存 + IndexedDB，刷新后从 IndexedDB 补水再补推 */
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function patchedSetItem(key, value) {
+      if (key === "clothdesign:unsynced-preferences" || key === "clothdesign:deleted-results") {
+        throw new DOMException("模拟 localStorage 配额满", "QuotaExceededError");
+      }
+      return original.call(this, key, value);
+    };
+  });
+  const readIdbCopy = () =>
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const request = indexedDB.open("clothdesign-state", 1);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
+          };
+          request.onsuccess = () => {
+            const db = request.result;
+            const tx = db.transaction("kv", "readonly");
+            const get = tx.objectStore("kv").get("durable:clothdesign:unsynced-preferences");
+            get.onsuccess = () => {
+              db.close();
+              resolve(get.result ?? null);
+            };
+            get.onerror = () => {
+              db.close();
+              resolve(null);
+            };
+          };
+          request.onerror = () => resolve(null);
+        }),
+    );
+  const quotaPuts = [];
+  await page.route("**/api/me/preferences", async (route) => {
+    quotaPuts.push(route.request().postDataJSON());
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "模拟服务端挂了" }) });
+  });
+  await page.locator(".rail button[aria-label='展开侧边栏']").click(); // railCollapsed: true → false
+  await page.waitForFunction(() => document.querySelector(".rail:not(.collapsed)") !== null);
+  await page.locator(".signout-button").click();
+  await page.locator("#auth-email").waitFor({ state: "visible", timeout: 20000 });
+  assert(quotaPuts.length >= 1, "退出前推过 PUT");
+  const quotaStash = await page.evaluate(() => JSON.parse(localStorage.getItem("clothdesign:unsynced-preferences") || "{}"));
+  assert(quotaStash[accountId]?.patch?.["clothdesign:railCollapsed"] !== false, "localStorage 写不进去时它里面当然没有（模拟要生效）");
+  const idbCopyDeadline = Date.now() + 5000;
+  let idbCopy = null;
+  while (Date.now() < idbCopyDeadline) {
+    idbCopy = await readIdbCopy();
+    if (idbCopy?.value?.[accountId]?.patch?.["clothdesign:railCollapsed"] === false) break;
+    await page.waitForTimeout(200);
+  }
+  assert(idbCopy?.value?.[accountId]?.patch?.["clothdesign:railCollapsed"] === false, `localStorage 写不进去时要落一份到 IndexedDB（${JSON.stringify(idbCopy)}）`);
+  await page.unroute("**/api/me/preferences");
+
+  const quotaReplayPuts = [];
+  await page.route("**/api/me/preferences", async (route) => {
+    quotaReplayPuts.push(route.request().postDataJSON());
+    await route.continue();
+  });
+  await page.reload({ waitUntil: "networkidle" }); // 刷新：setItem 的模拟没了，内存也没了，只剩 IndexedDB 那份
+  await page.locator("#auth-email").waitFor({ state: "visible", timeout: 15000 });
+  await page.locator(".auth-tab", { hasText: "登录" }).click();
+  await page.locator("#auth-email").fill("review-fixes@example.test");
+  await page.locator("input[autocomplete='current-password']").fill("clothdesign123");
+  await page.locator(".auth-shell button[type='submit'], form button[type='submit']").first().click();
+  await page.locator(".rail-nav").waitFor({ state: "visible", timeout: 15000 });
+  const quotaReplayDeadline = Date.now() + 9000;
+  while (!quotaReplayPuts.some((body) => body?.preferences?.["clothdesign:railCollapsed"] === false) && Date.now() < quotaReplayDeadline) await page.waitForTimeout(200);
+  assert(quotaReplayPuts.some((body) => body?.preferences?.["clothdesign:railCollapsed"] === false), `刷新 + 登录后要从 IndexedDB 补水并补推（${JSON.stringify(quotaReplayPuts)}）`);
+  await page.waitForFunction(() => document.querySelector(".rail:not(.collapsed)") !== null, null, { timeout: 5000 });
+  const idbGoneDeadline = Date.now() + 6000;
+  while (Date.now() < idbGoneDeadline) {
+    idbCopy = await readIdbCopy();
+    if (!idbCopy) break;
+    await page.waitForTimeout(200);
+  }
+  assert.equal(idbCopy, null, "localStorage 又能写了，IndexedDB 里的副本要删掉，免得旧值以后再被捞回来");
+  await page.unroute("**/api/me/preferences");
+
   /* 退出时删除请求失败：成片不能下次登录又回来——留 pending 墓碑，重新登录后补删 */
   await page.locator(".rail-nav button[aria-label='自由创作']").click();
   await page.waitForFunction(() => window.location.pathname === "/free");
@@ -454,7 +600,64 @@ try {
   await page.waitForFunction((expected) => document.querySelectorAll(".simple-result-card:not(.simple-result-card-pending)").length === expected, cardsBeforeFailedDelete - 1, { timeout: 10000 });
   await page.unroute("**/api/generation-results/*");
 
-  console.log(JSON.stringify({ checks: "passed", deleteCalls, generateRequests: generateBodies.length, preferencePuts: preferencePuts.length, signOutPuts: signOutPuts.length, replayDeleteCalls }, null, 2));
+  /* 创作台：过期成片的放大 / 下载 / 缩略胶片也得收掉，不只是「加入参考」 */
+  const expireAll = async (route) => {
+    const response = await route.fetch();
+    const json = await response.json();
+    await route.fulfill({ response, json: { ...json, generationResults: (json.generationResults || []).map((item) => ({ ...item, storageStatus: "expired" })) } });
+  };
+  await page.route("**/api/me", expireAll);
+  await page.goto(`${baseUrl}/studio`, { waitUntil: "networkidle" });
+  await page.locator(".studio-workspace").waitFor({ state: "visible", timeout: 15000 });
+  await page.locator(".stage-plate-expired").first().waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator(".stage-tool", { hasText: "放大" }).isDisabled(), true, "过期成片不能放大");
+  assert.equal(await page.locator("a.stage-tool", { hasText: "下载" }).count(), 0, "过期成片没有下载链接");
+  assert.equal(await page.locator("span.stage-tool.disabled", { hasText: "下载" }).count(), 1, "下载位置是禁用态");
+  assert(await page.locator(".stage-filmstrip .result-thumb-expired").count() >= 1, "缩略胶片里过期的标已清理，不拉裂图");
+  assert.equal(await page.locator(".stage-filmstrip .result-thumb img").count(), 0, "缩略胶片里不该再有过期图的 <img>");
+  assert.equal(await page.locator(".recent-results a.text-button[aria-label='下载']").count(), 0, "右栏列表里过期成片也没有下载链接");
+  assert(await page.locator(".recent-results button[aria-label='下载'][disabled]").count() >= 1, "右栏的下载是禁用态");
+  await page.unroute("**/api/me", expireAll);
+
+  /* 画布：成片拉不下来（网络故障）就报错让用户重试，不把服务器地址写进画布 */
+  const netFailPath = `/generated-images/net-fail-${Date.now()}.png`;
+  let netFailFetches = 0; // 只数画布拉字节的 fetch（抽屉缩略图的 <img> 不算）
+  await page.route(`**${netFailPath}`, async (route) => {
+    if (route.request().resourceType() === "fetch") netFailFetches += 1;
+    await route.abort("failed");
+  });
+  await page.evaluate((imageUrl) => {
+    const accountId = window.localStorage.getItem("clothdesign:active-account");
+    const key = `clothdesign:${encodeURIComponent(accountId)}:results`;
+    const existing = JSON.parse(window.localStorage.getItem(key) || "[]");
+    existing.unshift({
+      id: "net-fail-1",
+      taskId: "net-fail-task-1",
+      title: "net-fail-seed",
+      mode: "free",
+      ratioLabel: "1:1",
+      storageStatus: "local-cache",
+      credits: 0,
+      imageUrl,
+      createdAt: new Date().toISOString(),
+    });
+    window.localStorage.setItem(key, JSON.stringify(existing));
+  }, netFailPath);
+  await page.goto(`${baseUrl}/free`, { waitUntil: "networkidle" });
+  await page.getByText("ImageDesign AI").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByRole("button", { name: "画布", exact: true }).click();
+  await page.locator(".tl-container").waitFor({ state: "visible", timeout: 60000 });
+  await page.waitForTimeout(1200);
+  await page.getByRole("button", { name: /^成片 \d+$/ }).click();
+  await page.locator(".canvas-library").waitFor({ state: "visible", timeout: 10000 });
+  await page.locator(".canvas-library-item", { hasText: "net-fail-seed" }).first().click();
+  await page.locator(".free-canvas-notice").waitFor({ state: "visible", timeout: 15000 });
+  assert.match(await page.locator(".free-canvas-notice").innerText(), /暂时拉取失败/, "拉不到就明说，让用户稍后重试");
+  assert.equal(netFailFetches, 2, `网络抖动先重试一次、再不行就报错（实际拉了 ${netFailFetches} 次）`);
+  assert.equal(await page.locator(".tl-canvas img").count(), 0, "拉不到的成片不能按服务器地址放进画布");
+  await page.unroute(`**${netFailPath}`);
+
+  console.log(JSON.stringify({ checks: "passed", deleteCalls, generateRequests: generateBodies.length, preferencePuts: preferencePuts.length, signOutPuts: signOutPuts.length, replayDeleteCalls, netFailFetches }, null, 2));
 } finally {
   await browser?.close();
   appProcess.kill("SIGTERM");

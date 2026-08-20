@@ -6,6 +6,8 @@ import type { GeneratedResult, ReferenceImage, StorageStatus } from "../types";
 
 /** 过期成片文件已经不在服务器上了，再拿去当参考只会让下一次生成报「参考图读不到」。 */
 const EXPIRED_REFERENCE_HINT = "这张成片已在服务器上清理，文件不在了，不能再加入参考。";
+/** 同理，放大 / 下载都是去拉那个已经不存在的地址：放大是一张裂图，下载是一页 404。 */
+const EXPIRED_FILE_HINT = "这张成片已在服务器上清理，文件不在了。";
 
 const storageStatusLabels: Record<StorageStatus, string> = {
   "local-cache": "服务器暂存",
@@ -198,13 +200,19 @@ export function ResultStage({
             >
               前后对比
             </button>
-            <button type="button" className="stage-tool" disabled={!selected} onClick={() => setZoomOpen(true)}>
+            <button
+              type="button"
+              className="stage-tool"
+              disabled={!selected || selected.storageStatus === "expired"}
+              title={selected?.storageStatus === "expired" ? EXPIRED_FILE_HINT : undefined}
+              onClick={() => setZoomOpen(true)}
+            >
               放大
             </button>
-            {selected ? (
+            {selected && selected.storageStatus !== "expired" ? (
               <a className="stage-tool" href={selected.imageUrl} download={resultFileName(selected)}>下载</a>
             ) : (
-              <span className="stage-tool disabled">下载</span>
+              <span className="stage-tool disabled" title={selected ? EXPIRED_FILE_HINT : undefined}>下载</span>
             )}
             <button type="button" className="stage-tool" disabled={!selected} onClick={() => selected && onDelete(selected.id)}>
               删除
@@ -335,18 +343,18 @@ export function ResultStage({
               type="button"
               key={result.id}
               className={`result-thumb ${selected?.id === result.id ? "active" : ""}`}
-              title={result.title}
+              title={result.storageStatus === "expired" ? `${result.title}（服务器已清理）` : result.title}
               aria-label={`查看 ${result.title}`}
               aria-pressed={selected?.id === result.id}
               onClick={() => onSelect(result.id)}
             >
-              <img src={result.imageUrl} alt="" />
+              {result.storageStatus === "expired" ? <span className="result-thumb-expired">已清理</span> : <img src={result.imageUrl} alt="" />}
             </button>
           ))}
         </div>
       ) : null}
 
-      {zoomOpen && selected ? (
+      {zoomOpen && selected && selected.storageStatus !== "expired" ? (
         <div className="stage-zoom" role="dialog" aria-label="成片放大" onClick={() => setZoomOpen(false)}>
           <figure>
             <img src={selected.imageUrl} alt={`${selected.title} 放大`} />
@@ -417,9 +425,15 @@ export function ResultPanelList({
                   推到云盘
                 </button>
               ) : null}
-              <a className="text-button" href={result.imageUrl} download={resultFileName(result)} aria-label="下载">
-                下载
-              </a>
+              {result.storageStatus === "expired" ? (
+                <button type="button" className="text-button" aria-label="下载" disabled title={EXPIRED_FILE_HINT}>
+                  下载
+                </button>
+              ) : (
+                <a className="text-button" href={result.imageUrl} download={resultFileName(result)} aria-label="下载">
+                  下载
+                </a>
+              )}
               <button type="button" className="text-button result-delete" aria-label="删除" onClick={() => onDelete(result.id)}>
                 删除
               </button>

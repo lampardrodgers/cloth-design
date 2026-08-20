@@ -7573,6 +7573,17 @@ a.stage-tool {
   color: var(--faint);
 }
 
+/* 舞台下方的缩略胶片只有 34×42：过期的也标「已清理」，别去拉一张注定裂掉的图。 */
+.stage-filmstrip .result-thumb-expired {
+  min-height: 0;
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  text-align: center;
+  color: rgba(243, 242, 242, 0.55);
+  background: rgba(26, 25, 23, 0.6);
+}
+
 @media (max-width: 900px) {
   .storage-webdav {
     grid-template-columns: minmax(0, 1fr);

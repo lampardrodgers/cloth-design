@@ -75,6 +75,7 @@ import {
 } from "./lib/storedState";
 import { storedStateKeyForAccount } from "./lib/storageNamespace";
 import { forgetDeletedResults, markDeletedResultsDone, pendingDeletedResultIds, recentlyDeletedResultIds, rememberDeletedResults } from "./lib/deletedResults";
+import { hydrateDurableState } from "./lib/durableState";
 import type {
   CreditPolicy,
   CreditLedgerEntry,
@@ -481,7 +482,8 @@ function App() {
   const loadAccount = async () => {
     setAuthError("");
     try {
-      const data = await fetchMe();
+      // 上次 localStorage 写不进去时落在 IndexedDB 里的偏好暂存 / 删除墓碑先捞回来，下面的落地 / 过滤 / 补删才看得到。
+      const [data] = await Promise.all([fetchMe(), hydrateDurableState()]);
       // 服务端那份偏好先落到这个账号的本地命名空间，再切命名空间渲染，提示词库 / 设置 / 草稿就跨设备一致了。
       seedAccountPreferences(data.account.id, data.preferences);
       setStoredStateAccount(data.account.id);

@@ -94,7 +94,9 @@ export function TaskRail({ tasks, results = [], submissions = [], onRetry, onAba
           });
           return (
             <article className={`task-item task-${task.status}`} key={task.id}>
-              <div className="task-preview">{preview ? <img src={preview.imageUrl} alt="" loading="lazy" decoding="async" /> : null}</div>
+              <div className="task-preview">
+                {preview && preview.storageStatus !== "expired" ? <img src={preview.imageUrl} alt="" loading="lazy" decoding="async" /> : null}
+              </div>
               <div className="task-body">
                 <div className="task-title">
                   <strong>{mode?.shortTitle ?? task.mode}</strong>
